@@ -49,7 +49,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         // Get all wellen assigned to these markets
         const { data: welleMarkets } = await supabase
           .from('wellen_markets')
-          .select('welle_id')
+          .select('welle_id, market_id')
           .in('market_id', marketIds);
         
         const welleIds = [...new Set((welleMarkets || []).map(wm => wm.welle_id))];
@@ -159,7 +159,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         
         const { data: welleMarkets } = await supabase
           .from('wellen_markets')
-          .select('welle_id')
+          .select('welle_id, market_id')
           .in('market_id', marketIds);
         
         const welleIds = [...new Set((welleMarkets || []).map(wm => wm.welle_id))];
