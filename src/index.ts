@@ -33,7 +33,8 @@ app.get('/api/health', (_req, res) => {
 
 // Request logging for API routes
 app.use((req, _res, next) => {
-  console.log(``$`{new Date().toISOString()} | ${req.method} ${req.url}`);
+  const now = new Date().toISOString();
+  console.log('Request: ' + now + ' | ' + req.method + ' ' + req.url);
   next();
 });
 
@@ -53,7 +54,7 @@ app.use('/api/wellen', wellenRouter);
 
 // Start server
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(Backend server running on port ${PORT}`);
+  console.log('Backend server running on port ' + PORT);
 });
 
 // Graceful shutdown handling
