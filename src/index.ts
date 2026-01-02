@@ -34,6 +34,15 @@ app.use('/api/products', productsRouter);
 console.log('📌 Registering wellen routes...');
 app.use('/api/wellen', wellenRouter);
 
+// Root health check (for Railway)
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    service: 'Mars Rover Backend API',
+    timestamp: new Date().toISOString() 
+  });
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   console.log('💓 Health check');
@@ -41,13 +50,13 @@ app.get('/api/health', (req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Backend server running on http://localhost:${PORT}`);
-  console.log(`🔐 Auth API available at http://localhost:${PORT}/api/auth`);
-  console.log(`📊 Markets API available at http://localhost:${PORT}/api/markets`);
-  console.log(`📜 Action History API available at http://localhost:${PORT}/api/action-history`);
-  console.log(`👥 Gebietsleiter API available at http://localhost:${PORT}/api/gebietsleiter`);
-  console.log(`📦 Products API available at http://localhost:${PORT}/api/products`);
-  console.log(`🌊 Wellen API available at http://localhost:${PORT}/api/wellen`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Backend server running on http://0.0.0.0:${PORT}`);
+  console.log(`🔐 Auth API available at http://0.0.0.0:${PORT}/api/auth`);
+  console.log(`📊 Markets API available at http://0.0.0.0:${PORT}/api/markets`);
+  console.log(`📜 Action History API available at http://0.0.0.0:${PORT}/api/action-history`);
+  console.log(`👥 Gebietsleiter API available at http://0.0.0.0:${PORT}/api/gebietsleiter`);
+  console.log(`📦 Products API available at http://0.0.0.0:${PORT}/api/products`);
+  console.log(`🌊 Wellen API available at http://0.0.0.0:${PORT}/api/wellen`);
 });
 
