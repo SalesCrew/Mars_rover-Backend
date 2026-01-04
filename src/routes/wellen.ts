@@ -1242,4 +1242,174 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
   }
 });
 
+// ============================================================================
+// GET GL CHAIN PERFORMANCE - For GL detail modal charts
+// ============================================================================
+router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) => {
+  try {
+    const { glId } = req.params;
+    
+    // Chain groupings (same as dashboard)
+    const chainGroups = {
+      billa: ['Adeg', 'Billa+', 'BILLA+', 'BILLA Plus', 'BILLA+ Privat', 'BILLA Plus Privat', 'BILLA Privat'],
+      spar: ['Spar', 'SPAR Privat Popovic', 'Spar Gourmet', 'Eurospar', 'Interspar'],
+      zoofachhandel: ['Zoofachhandel', 'Futterhaus', 'Fressnapf', 'Das Futterhaus'],
+      hagebau: ['Hagebau']
+    };
+
+    // Get all progress entries for this GL
+    const { data: allProgress, error: progressError } = await supabase
+      .from('wellen_gl_progress')
+      .select('*')
+      .eq('gebietsleiter_id', glId)
+      .order('created_at', { ascending: true });
+
+    if (progressError) throw progressError;
+
+    if (!allProgress || allProgress.length === 0) {
+      return res.json({
+        billa: { kwData: [], current: { displays: 0, kartonware: 0 }, goal: { displays: 0, kartonware: 0 } },
+        spar: { kwData: [], current: { displays: 0, kartonware: 0 }, goal: { displays: 0, kartonware: 0 } },
+        zoofachhandel: { kwData: [], current: { displays: 0, kartonware: 0 }, goal: { displays: 0, kartonware: 0 } },
+        hagebau: { kwData: [], current: { displays: 0, kartonware: 0 }, goal: { displays: 0, kartonware: 0 } }
+      });
+    }
+
+    // Get market info to determine chain
+    const marketIds = [...new Set(allProgress.map(p => p.market_id).filter(Boolean))];
+    let markets: any[] = [];
+    if (marketIds.length > 0) {
+      const { data } = await supabase.from('markets').select('id, chain').in('id', marketIds);
+      markets = data || [];
+    }
+
+    // Get welle info for goals
+    const welleIds = [...new Set(allProgress.map(p => p.welle_id).filter(Boolean))];
+    let displays: any[] = [];
+    let kartonware: any[] = [];
+    
+    if (welleIds.length > 0) {
+      const [displaysResult, kartonwareResult] = await Promise.all([
+        supabase.from('wellen_displays').select('id, target_number, welle_id').in('welle_id', welleIds),
+        supabase.from('wellen_kartonware').select('id, target_number, welle_id').in('welle_id', welleIds)
+      ]);
+      displays = displaysResult.data || [];
+      kartonware = kartonwareResult.data || [];
+    }
+
+    // Get number of GLs for goal calculation
+    const { count: glCount } = await supabase.from('gebietsleiter').select('id', { count: 'exact', head: true });
+    const numGLs = glCount || 1;
+
+    // Helper to get calendar week from date
+    const getKW = (dateStr: string) => {
+      const date = new Date(dateStr);
+      const startOfYear = new Date(date.getFullYear(), 0, 1);
+      const days = Math.floor((date.getTime() - startOfYear.getTime()) / (24 * 60 * 60 * 1000));
+      const weekNumber = Math.ceil((days + startOfYear.getDay() + 1) / 7);
+      return `KW ${weekNumber}`;
+    };
+
+    // Helper to get chain group for a market
+    const getChainGroup = (marketId: string): string | null => {
+      const market = markets.find(m => m.id === marketId);
+      if (!market) return null;
+      
+      for (const [group, chains] of Object.entries(chainGroups)) {
+        if (chains.includes(market.chain)) return group;
+      }
+      return null;
+    };
+
+    // Process progress by chain group and KW
+    const chainData: Record<string, { 
+      kwProgress: Record<string, { displays: number; kartonware: number }>;
+      totalDisplays: number;
+      totalKartonware: number;
+      goalDisplays: number;
+      goalKartonware: number;
+    }> = {
+      billa: { kwProgress: {}, totalDisplays: 0, totalKartonware: 0, goalDisplays: 0, goalKartonware: 0 },
+      spar: { kwProgress: {}, totalDisplays: 0, totalKartonware: 0, goalDisplays: 0, goalKartonware: 0 },
+      zoofachhandel: { kwProgress: {}, totalDisplays: 0, totalKartonware: 0, goalDisplays: 0, goalKartonware: 0 },
+      hagebau: { kwProgress: {}, totalDisplays: 0, totalKartonware: 0, goalDisplays: 0, goalKartonware: 0 }
+    };
+
+    // Aggregate progress by chain and KW
+    for (const progress of allProgress) {
+      const chainGroup = getChainGroup(progress.market_id);
+      if (!chainGroup || !chainData[chainGroup]) continue;
+
+      const kw = getKW(progress.created_at);
+      
+      if (!chainData[chainGroup].kwProgress[kw]) {
+        chainData[chainGroup].kwProgress[kw] = { displays: 0, kartonware: 0 };
+      }
+
+      if (progress.item_type === 'display') {
+        chainData[chainGroup].kwProgress[kw].displays += progress.current_number;
+        chainData[chainGroup].totalDisplays += progress.current_number;
+      } else if (progress.item_type === 'kartonware') {
+        chainData[chainGroup].kwProgress[kw].kartonware += progress.current_number;
+        chainData[chainGroup].totalKartonware += progress.current_number;
+      }
+    }
+
+    // Calculate goals per GL (total goals / number of GLs)
+    const totalDisplayGoal = displays.reduce((sum, d) => sum + (d.target_number || 0), 0);
+    const totalKartonwareGoal = kartonware.reduce((sum, k) => sum + (k.target_number || 0), 0);
+    const glDisplayGoal = Math.ceil(totalDisplayGoal / numGLs);
+    const glKartonwareGoal = Math.ceil(totalKartonwareGoal / numGLs);
+
+    // Set goals for each chain (proportional based on typical chain distribution)
+    chainData.billa.goalDisplays = Math.ceil(glDisplayGoal * 0.35);
+    chainData.billa.goalKartonware = Math.ceil(glKartonwareGoal * 0.35);
+    chainData.spar.goalDisplays = Math.ceil(glDisplayGoal * 0.30);
+    chainData.spar.goalKartonware = Math.ceil(glKartonwareGoal * 0.30);
+    chainData.zoofachhandel.goalDisplays = Math.ceil(glDisplayGoal * 0.20);
+    chainData.zoofachhandel.goalKartonware = Math.ceil(glKartonwareGoal * 0.20);
+    chainData.hagebau.goalDisplays = Math.ceil(glDisplayGoal * 0.15);
+    chainData.hagebau.goalKartonware = Math.ceil(glKartonwareGoal * 0.15);
+
+    // Convert to response format
+    const formatChainResponse = (chain: string) => {
+      const data = chainData[chain];
+      const kwEntries = Object.entries(data.kwProgress)
+        .sort((a, b) => {
+          const kwA = parseInt(a[0].replace('KW ', ''));
+          const kwB = parseInt(b[0].replace('KW ', ''));
+          return kwA - kwB;
+        });
+
+      // Calculate cumulative values for chart
+      let cumulativeDisplays = 0;
+      let cumulativeKartonware = 0;
+      const kwData = kwEntries.map(([kw, values]) => {
+        cumulativeDisplays += values.displays;
+        cumulativeKartonware += values.kartonware;
+        return {
+          kw,
+          displays: cumulativeDisplays,
+          kartonware: cumulativeKartonware
+        };
+      });
+
+      return {
+        kwData,
+        current: { displays: data.totalDisplays, kartonware: data.totalKartonware },
+        goal: { displays: data.goalDisplays, kartonware: data.goalKartonware }
+      };
+    };
+
+    res.json({
+      billa: formatChainResponse('billa'),
+      spar: formatChainResponse('spar'),
+      zoofachhandel: formatChainResponse('zoofachhandel'),
+      hagebau: formatChainResponse('hagebau')
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
 export default router;
