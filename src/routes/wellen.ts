@@ -1139,14 +1139,13 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
     }
 
     // INSERT new progress entries (entries add up over time)
+    // Note: market_id and photo_url columns need to be added to the table for full functionality
     const progressEntries = items.map((item: any) => ({
       welle_id: welleId,
       gebietsleiter_id,
-      market_id: market_id || null,
       item_type: item.item_type,
       item_id: item.item_id,
-      current_number: item.current_number,
-      photo_url: photo_url || null
+      current_number: item.current_number
     }));
 
     const { error } = await supabase
@@ -1172,21 +1171,20 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
 router.post('/:id/progress', async (req: Request, res: Response) => {
   try {
     const { id: welleId } = req.params;
-    const { gebietsleiter_id, market_id, item_type, item_id, current_number, photo_url } = req.body;
+    const { gebietsleiter_id, item_type, item_id, current_number } = req.body;
 
     console.log(`📊 Adding GL progress for welle ${welleId}...`);
 
     // INSERT new progress entry (entries add up over time)
+    // Note: market_id and photo_url columns need to be added to the table for full functionality
     const { error } = await supabase
       .from('wellen_gl_progress')
       .insert({
         welle_id: welleId,
         gebietsleiter_id,
-        market_id: market_id || null,
         item_type,
         item_id,
-        current_number,
-        photo_url: photo_url || null
+        current_number
       });
 
     if (error) throw error;
