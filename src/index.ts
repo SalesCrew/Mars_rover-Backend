@@ -7,18 +7,6 @@ import gebietsleiterRouter from './routes/gebietsleiter';
 import productsRouter from './routes/products';
 import wellenRouter from './routes/wellen';
 
-// Handle uncaught exceptions - prevent process from crashing
-process.on('uncaughtException', (error) => {
-  console.error('⚠️ Uncaught Exception:', error);
-  // Don't exit - keep the server running
-});
-
-// Handle unhandled promise rejections - prevent process from crashing
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('⚠️ Unhandled Rejection at:', promise, 'reason:', reason);
-  // Don't exit - keep the server running
-});
-
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
