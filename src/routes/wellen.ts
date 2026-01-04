@@ -1173,4 +1173,93 @@ router.get('/:id/progress/:glId', async (req: Request, res: Response) => {
   }
 });
 
+// ============================================================================
+// GET ALL PROGRESS FOR A WELLE (ALL GLs)
+// ============================================================================
+router.get('/:id/all-progress', async (req: Request, res: Response) => {
+  try {
+    const { id: welleId } = req.params;
+    console.log(`📊 Fetching all GL progress for welle ${welleId}...`);
+
+    // Get all progress entries for this welle
+    const { data: progressEntries, error: progressError } = await supabase
+      .from('wellen_gl_progress')
+      .select('*')
+      .eq('welle_id', welleId)
+      .order('created_at', { ascending: false });
+
+    if (progressError) throw progressError;
+
+    if (!progressEntries || progressEntries.length === 0) {
+      return res.json([]);
+    }
+
+    // Get GL names
+    const glIds = [...new Set(progressEntries.map(p => p.gebietsleiter_id))];
+    const { data: gls } = await supabase
+      .from('users')
+      .select('id, email')
+      .in('id', glIds);
+
+    const { data: glDetails } = await supabase
+      .from('gebietsleiter')
+      .select('id, name')
+      .in('id', glIds);
+
+    // Get market names
+    const marketIds = [...new Set(progressEntries.map(p => p.market_id).filter(Boolean))];
+    const { data: markets } = await supabase
+      .from('markets')
+      .select('id, name, chain')
+      .in('id', marketIds);
+
+    // Get display and kartonware names
+    const displayIds = progressEntries.filter(p => p.item_type === 'display').map(p => p.item_id);
+    const kartonwareIds = progressEntries.filter(p => p.item_type === 'kartonware').map(p => p.item_id);
+
+    const { data: displays } = await supabase
+      .from('wellen_displays')
+      .select('id, name, item_value')
+      .in('id', displayIds);
+
+    const { data: kartonware } = await supabase
+      .from('wellen_kartonware')
+      .select('id, name, item_value')
+      .in('id', kartonwareIds);
+
+    // Build response
+    const response = progressEntries.map(entry => {
+      const gl = glDetails?.find(g => g.id === entry.gebietsleiter_id);
+      const glUser = gls?.find(u => u.id === entry.gebietsleiter_id);
+      const market = markets?.find(m => m.id === entry.market_id);
+      const item = entry.item_type === 'display'
+        ? displays?.find(d => d.id === entry.item_id)
+        : kartonware?.find(k => k.id === entry.item_id);
+
+      const itemValue = item?.item_value || 0;
+      const totalValue = entry.current_number * itemValue;
+
+      return {
+        id: entry.id,
+        glName: gl?.name || 'Unknown',
+        glEmail: glUser?.email || '',
+        marketName: market?.name || 'Unknown',
+        marketChain: market?.chain || '',
+        itemType: entry.item_type,
+        itemName: item?.name || 'Unknown',
+        quantity: entry.current_number,
+        value: totalValue,
+        timestamp: entry.created_at,
+        photoUrl: entry.photo_url
+      };
+    });
+
+    console.log(`✅ Fetched ${response.length} progress entries for welle ${welleId}`);
+    res.json(response);
+  } catch (error: any) {
+    console.error('❌ Error fetching all progress:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
 export default router;
