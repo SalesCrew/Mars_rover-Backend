@@ -350,14 +350,19 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
       .eq('gebietsleiter_id', id);
 
     // 5. Get markets visited (markets where GL has any action)
-    // Get all markets assigned to this GL
-    const { data: assignedMarkets } = await supabase
-      .from('gl_markets')
-      .select('market_id')
-      .eq('gebietsleiter_id', id);
-
-    const assignedMarketIds = assignedMarkets?.map(m => m.market_id) || [];
-    const totalAssignedMarkets = assignedMarketIds.length;
+    // Get all markets assigned to this GL (table may not exist)
+    let assignedMarketIds: string[] = [];
+    let totalAssignedMarkets = 0;
+    try {
+      const { data: assignedMarkets } = await supabase
+        .from('gl_markets')
+        .select('market_id')
+        .eq('gebietsleiter_id', id);
+      assignedMarketIds = assignedMarkets?.map(m => m.market_id) || [];
+      totalAssignedMarkets = assignedMarketIds.length;
+    } catch (e) {
+      console.log('gl_markets table may not exist, continuing...');
+    }
 
     // Get markets where GL has submitted progress
     const { data: progressMarkets } = await supabase
@@ -411,15 +416,19 @@ router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
       .select('id, name, start_date, end_date')
       .eq('status', 'active');
 
-    // Get markets assigned to this GL (if gl_markets table exists)
+    // Get markets assigned to this GL (table may not exist)
     let assignedMarketIds: string[] = [];
-    const { data: glMarkets } = await supabase
-      .from('gl_markets')
-      .select('market_id')
-      .eq('gebietsleiter_id', id);
+    try {
+      const { data: glMarkets } = await supabase
+        .from('gl_markets')
+        .select('market_id')
+        .eq('gebietsleiter_id', id);
 
-    if (glMarkets && glMarkets.length > 0) {
-      assignedMarketIds = glMarkets.map(m => m.market_id);
+      if (glMarkets && glMarkets.length > 0) {
+        assignedMarketIds = glMarkets.map(m => m.market_id);
+      }
+    } catch (e) {
+      console.log('gl_markets table may not exist, continuing...');
     }
 
     // Get markets from active waves
