@@ -38,29 +38,23 @@ app.get('/api/debug-db', async (_req, res) => {
     const url = process.env.SUPABASE_URL || '';
     const key = process.env.SUPABASE_SERVICE_KEY || '';
     
-    console.log('🔍 DEBUG: Creating fresh client...');
     const freshClient = createClient(url, key);
     
-    const { data, error, count } = await freshClient
-      .from('markets')
-      .select('*', { count: 'exact' })
-      .limit(5);
-    
-    console.log('🔍 DEBUG Result:', { dataLength: data?.length, error, count });
+    // Test multiple tables
+    const [marketsResult, glResult, productsResult] = await Promise.all([
+      freshClient.from('markets').select('id', { count: 'exact' }).limit(3),
+      freshClient.from('gebietsleiter').select('id', { count: 'exact' }).limit(3),
+      freshClient.from('products').select('id', { count: 'exact' }).limit(3)
+    ]);
     
     res.json({
-      success: !error,
-      dataLength: data?.length,
-      count,
-      error: error?.message,
-      sample: data?.slice(0, 2),
-      envCheck: {
-        urlLength: url.length,
-        keyLength: key.length
-      }
+      url: url.substring(0, 30) + '...',
+      keyPrefix: key.substring(0, 20) + '...',
+      markets: { count: marketsResult.count, error: marketsResult.error?.message },
+      gebietsleiter: { count: glResult.count, error: glResult.error?.message },
+      products: { count: productsResult.count, error: productsResult.error?.message, data: productsResult.data }
     });
   } catch (e: any) {
-    console.error('🔍 DEBUG Error:', e);
     res.status(500).json({ error: e.message });
   }
 });
