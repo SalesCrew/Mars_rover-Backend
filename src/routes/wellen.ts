@@ -1075,7 +1075,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
 });
 
 // ============================================================================
-// UPDATE GL PROGRESS (BATCH)
+// UPDATE GL PROGRESS (BATCH) - Now creates new entries that add up
 // ============================================================================
 router.post('/:id/progress/batch', async (req: Request, res: Response) => {
   try {
@@ -1088,63 +1088,63 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: gebietsleiter_id, items' });
     }
 
-    // Upsert all progress entries
+    // INSERT new progress entries (entries add up over time)
     const progressEntries = items.map((item: any) => ({
       welle_id: welleId,
       gebietsleiter_id,
+      market_id: market_id || null,
       item_type: item.item_type,
       item_id: item.item_id,
-      current_number: item.current_number
+      current_number: item.current_number,
+      photo_url: photo_url || null
     }));
 
     const { error } = await supabase
       .from('wellen_gl_progress')
-      .upsert(progressEntries, {
-        onConflict: 'welle_id,gebietsleiter_id,item_type,item_id'
-      });
+      .insert(progressEntries);
 
     if (error) throw error;
 
-    console.log(`✅ Updated ${items.length} progress entries`);
+    console.log(`✅ Added ${items.length} progress entries`);
     res.json({ 
-      message: 'Progress updated successfully',
-      items_updated: items.length 
+      message: 'Progress added successfully',
+      items_added: items.length 
     });
   } catch (error: any) {
-    console.error('❌ Error updating batch progress:', error);
+    console.error('❌ Error adding batch progress:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
 
 // ============================================================================
-// UPDATE GL PROGRESS
+// UPDATE GL PROGRESS - Now creates new entry that adds up
 // ============================================================================
 router.post('/:id/progress', async (req: Request, res: Response) => {
   try {
     const { id: welleId } = req.params;
-    const { gebietsleiter_id, item_type, item_id, current_number } = req.body;
+    const { gebietsleiter_id, market_id, item_type, item_id, current_number, photo_url } = req.body;
 
-    console.log(`📊 Updating GL progress for welle ${welleId}...`);
+    console.log(`📊 Adding GL progress for welle ${welleId}...`);
 
-    // Upsert progress
+    // INSERT new progress entry (entries add up over time)
     const { error } = await supabase
       .from('wellen_gl_progress')
-      .upsert({
+      .insert({
         welle_id: welleId,
         gebietsleiter_id,
+        market_id: market_id || null,
         item_type,
         item_id,
-        current_number
-      }, {
-        onConflict: 'welle_id,gebietsleiter_id,item_type,item_id'
+        current_number,
+        photo_url: photo_url || null
       });
 
     if (error) throw error;
 
-    console.log(`✅ Updated progress`);
-    res.json({ message: 'Progress updated successfully' });
+    console.log(`✅ Added progress entry`);
+    res.json({ message: 'Progress added successfully' });
   } catch (error: any) {
-    console.error('❌ Error updating progress:', error);
+    console.error('❌ Error adding progress:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
@@ -1275,7 +1275,7 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
       });
     }
 
-    // Get market info to determine chain
+    // Get market info to determine chain (from direct market_id or via welle's assigned markets)
     const marketIds = [...new Set(allProgress.map(p => p.market_id).filter(Boolean))];
     let markets: any[] = [];
     if (marketIds.length > 0) {
@@ -1283,18 +1283,39 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
       markets = data || [];
     }
 
-    // Get welle info for goals
+    // Get welle info for goals and to determine chain when market_id is null
     const welleIds = [...new Set(allProgress.map(p => p.welle_id).filter(Boolean))];
     let displays: any[] = [];
     let kartonware: any[] = [];
+    let welleMarkets: any[] = [];
+    let wellen: any[] = [];
     
     if (welleIds.length > 0) {
-      const [displaysResult, kartonwareResult] = await Promise.all([
+      const [displaysResult, kartonwareResult, welleMarketsResult, wellenResult] = await Promise.all([
         supabase.from('wellen_displays').select('id, target_number, welle_id').in('welle_id', welleIds),
-        supabase.from('wellen_kartonware').select('id, target_number, welle_id').in('welle_id', welleIds)
+        supabase.from('wellen_kartonware').select('id, target_number, welle_id').in('welle_id', welleIds),
+        supabase.from('wellen_markets').select('welle_id, market_id').in('welle_id', welleIds),
+        supabase.from('wellen').select('id, name').in('id', welleIds)
       ]);
       displays = displaysResult.data || [];
       kartonware = kartonwareResult.data || [];
+      welleMarkets = welleMarketsResult.data || [];
+      wellen = wellenResult.data || [];
+    }
+
+    // Get all markets that are assigned to these wellen (for fallback chain detection)
+    const welleMarketIds = [...new Set(welleMarkets.map(wm => wm.market_id))];
+    if (welleMarketIds.length > 0) {
+      const { data: additionalMarkets } = await supabase.from('markets').select('id, chain').in('id', welleMarketIds);
+      if (additionalMarkets) {
+        // Merge with existing markets, avoiding duplicates
+        const existingIds = new Set(markets.map(m => m.id));
+        for (const m of additionalMarkets) {
+          if (!existingIds.has(m.id)) {
+            markets.push(m);
+          }
+        }
+      }
     }
 
     // Get number of GLs for goal calculation
@@ -1311,12 +1332,22 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
     };
 
     // Helper to get chain group for a market
-    const getChainGroup = (marketId: string): string | null => {
+    const getChainGroupByMarket = (marketId: string): string | null => {
       const market = markets.find(m => m.id === marketId);
       if (!market) return null;
       
       for (const [group, chains] of Object.entries(chainGroups)) {
         if (chains.includes(market.chain)) return group;
+      }
+      return null;
+    };
+
+    // Helper to get chain group for a welle (based on its assigned markets)
+    const getChainGroupByWelle = (welleId: string): string | null => {
+      const welleMarketsForWelle = welleMarkets.filter(wm => wm.welle_id === welleId);
+      for (const wm of welleMarketsForWelle) {
+        const chainGroup = getChainGroupByMarket(wm.market_id);
+        if (chainGroup) return chainGroup;
       }
       return null;
     };
@@ -1337,7 +1368,12 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
 
     // Aggregate progress by chain and KW
     for (const progress of allProgress) {
-      const chainGroup = getChainGroup(progress.market_id);
+      // Try to get chain from market_id first, then fall back to welle's assigned markets
+      let chainGroup = progress.market_id ? getChainGroupByMarket(progress.market_id) : null;
+      if (!chainGroup) {
+        chainGroup = getChainGroupByWelle(progress.welle_id);
+      }
+      
       if (!chainGroup || !chainData[chainGroup]) continue;
 
       const kw = getKW(progress.created_at);
