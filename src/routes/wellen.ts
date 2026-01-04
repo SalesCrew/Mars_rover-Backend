@@ -1179,84 +1179,47 @@ router.get('/:id/progress/:glId', async (req: Request, res: Response) => {
 router.get('/:id/all-progress', async (req: Request, res: Response) => {
   try {
     const { id: welleId } = req.params;
-    console.log(`📊 Fetching all GL progress for welle ${welleId}...`);
-
-    // Get all progress entries for this welle
+    
     const { data: progressEntries, error: progressError } = await supabase
       .from('wellen_gl_progress')
       .select('*')
       .eq('welle_id', welleId)
       .order('created_at', { ascending: false });
 
-    if (progressError) throw progressError;
+    if (progressError) {
+      return res.status(500).json({ error: progressError.message });
+    }
 
     if (!progressEntries || progressEntries.length === 0) {
       return res.json([]);
     }
 
-    // Get GL names (only if there are GL IDs)
     const glIds = [...new Set(progressEntries.map(p => p.gebietsleiter_id).filter(Boolean))];
-    let gls: any[] = [];
-    let glDetails: any[] = [];
-    
-    if (glIds.length > 0) {
-      const { data: glsData } = await supabase
-        .from('users')
-        .select('id, email')
-        .in('id', glIds);
-      gls = glsData || [];
-
-      const { data: glDetailsData } = await supabase
-        .from('gebietsleiter')
-        .select('id, name')
-        .in('id', glIds);
-      glDetails = glDetailsData || [];
-    }
-
-    // Get market names (only if there are market IDs)
     const marketIds = [...new Set(progressEntries.map(p => p.market_id).filter(Boolean))];
-    let markets: any[] = [];
-    if (marketIds.length > 0) {
-      const { data } = await supabase
-        .from('markets')
-        .select('id, name, chain')
-        .in('id', marketIds);
-      markets = data || [];
-    }
-
-    // Get display and kartonware names (only if there are IDs)
     const displayIds = progressEntries.filter(p => p.item_type === 'display').map(p => p.item_id).filter(Boolean);
     const kartonwareIds = progressEntries.filter(p => p.item_type === 'kartonware').map(p => p.item_id).filter(Boolean);
 
-    let displays: any[] = [];
-    if (displayIds.length > 0) {
-      const { data } = await supabase
-        .from('wellen_displays')
-        .select('id, name, item_value')
-        .in('id', displayIds);
-      displays = data || [];
-    }
+    const [glsResult, glDetailsResult, marketsResult, displaysResult, kartonwareResult] = await Promise.all([
+      glIds.length > 0 ? supabase.from('users').select('id, email').in('id', glIds) : { data: [] },
+      glIds.length > 0 ? supabase.from('gebietsleiter').select('id, name').in('id', glIds) : { data: [] },
+      marketIds.length > 0 ? supabase.from('markets').select('id, name, chain').in('id', marketIds) : { data: [] },
+      displayIds.length > 0 ? supabase.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
+      kartonwareIds.length > 0 ? supabase.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] }
+    ]);
 
-    let kartonware: any[] = [];
-    if (kartonwareIds.length > 0) {
-      const { data } = await supabase
-        .from('wellen_kartonware')
-        .select('id, name, item_value')
-        .in('id', kartonwareIds);
-      kartonware = data || [];
-    }
+    const gls = glsResult.data || [];
+    const glDetails = glDetailsResult.data || [];
+    const markets = marketsResult.data || [];
+    const displays = displaysResult.data || [];
+    const kartonware = kartonwareResult.data || [];
 
-    // Build response
     const response = progressEntries.map(entry => {
-      const gl = glDetails.find(g => g.id === entry.gebietsleiter_id);
-      const glUser = gls.find(u => u.id === entry.gebietsleiter_id);
-      const market = markets.find(m => m.id === entry.market_id);
+      const gl = glDetails.find((g: any) => g.id === entry.gebietsleiter_id);
+      const glUser = gls.find((u: any) => u.id === entry.gebietsleiter_id);
+      const market = markets.find((m: any) => m.id === entry.market_id);
       const item = entry.item_type === 'display'
-        ? displays.find(d => d.id === entry.item_id)
-        : kartonware.find(k => k.id === entry.item_id);
-
-      const itemValue = item?.item_value || 0;
-      const totalValue = entry.current_number * itemValue;
+        ? displays.find((d: any) => d.id === entry.item_id)
+        : kartonware.find((k: any) => k.id === entry.item_id);
 
       return {
         id: entry.id,
@@ -1267,16 +1230,14 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
         itemType: entry.item_type,
         itemName: item?.name || 'Unknown',
         quantity: entry.current_number,
-        value: totalValue,
+        value: entry.current_number * (item?.item_value || 0),
         timestamp: entry.created_at,
         photoUrl: entry.photo_url
       };
     });
 
-    console.log(`✅ Fetched ${response.length} progress entries for welle ${welleId}`);
     res.json(response);
   } catch (error: any) {
-    console.error('❌ Error fetching all progress:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
