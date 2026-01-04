@@ -11,13 +11,11 @@ const router = Router();
 router.get('/', async (req: Request, res: Response) => {
   try {
     console.log('📋 Fetching all gebietsleiter...');
-    console.log('📋 Supabase client check:', !!supabase);
     
-    const { data, error, count } = await supabase
+    const { data, error } = await supabase
       .from('gebietsleiter')
-      .select('*', { count: 'exact' });
-
-    console.log('📋 Query result - data:', data?.length, 'error:', error, 'count:', count);
+      .select('id, name, address, postal_code, city, phone, email, profile_picture_url, created_at, updated_at')
+      .order('created_at', { ascending: false });
 
     if (error) {
       console.error('Supabase error:', error);
