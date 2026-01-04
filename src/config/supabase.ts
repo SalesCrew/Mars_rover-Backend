@@ -8,14 +8,6 @@ dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 const supabaseUrl = process.env.SUPABASE_URL || '';
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || '';
 
-console.log('🔧 Environment check:', {
-  url: supabaseUrl ? 'Loaded ✓' : 'Missing ✗',
-  key: supabaseServiceKey ? 'Loaded ✓' : 'Missing ✗',
-  keyLength: supabaseServiceKey.length,
-  keyType: supabaseServiceKey.includes('service_role') ? 'SERVICE KEY ✓' : (supabaseServiceKey.length > 200 ? 'LIKELY SERVICE KEY' : 'POSSIBLY ANON KEY ⚠️'),
-  actualUrl: supabaseUrl
-});
-
 if (!supabaseUrl || !supabaseServiceKey) {
   console.error('⚠️ Supabase credentials not configured!');
 }

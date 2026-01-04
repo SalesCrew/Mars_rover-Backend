@@ -31,33 +31,6 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// DEBUG: Direct database test
-import { createClient } from '@supabase/supabase-js';
-app.get('/api/debug-db', async (_req, res) => {
-  try {
-    const url = process.env.SUPABASE_URL || '';
-    const key = process.env.SUPABASE_SERVICE_KEY || '';
-    
-    const freshClient = createClient(url, key);
-    
-    // Test multiple tables
-    const [marketsResult, glResult, productsResult] = await Promise.all([
-      freshClient.from('markets').select('id', { count: 'exact' }).limit(3),
-      freshClient.from('gebietsleiter').select('id', { count: 'exact' }).limit(3),
-      freshClient.from('products').select('id', { count: 'exact' }).limit(3)
-    ]);
-    
-    res.json({
-      url: url.substring(0, 30) + '...',
-      keyPrefix: key.substring(0, 20) + '...',
-      markets: { count: marketsResult.count, error: marketsResult.error?.message },
-      gebietsleiter: { count: glResult.count, error: glResult.error?.message },
-      products: { count: productsResult.count, error: productsResult.error?.message, data: productsResult.data }
-    });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
 
 // Request logging for API routes
 app.use((req, _res, next) => {

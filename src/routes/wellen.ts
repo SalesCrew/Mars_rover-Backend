@@ -1173,4 +1173,73 @@ router.get('/:id/progress/:glId', async (req: Request, res: Response) => {
   }
 });
 
+// ============================================================================
+// GET ALL PROGRESS FOR A WELLE (ALL GLs) - For detailed view
+// ============================================================================
+router.get('/:id/all-progress', async (req: Request, res: Response) => {
+  try {
+    const { id: welleId } = req.params;
+    
+    const { data: progressEntries, error: progressError } = await supabase
+      .from('wellen_gl_progress')
+      .select('*')
+      .eq('welle_id', welleId)
+      .order('created_at', { ascending: false });
+
+    if (progressError) {
+      return res.status(500).json({ error: progressError.message });
+    }
+
+    if (!progressEntries || progressEntries.length === 0) {
+      return res.json([]);
+    }
+
+    const glIds = [...new Set(progressEntries.map(p => p.gebietsleiter_id).filter(Boolean))];
+    const marketIds = [...new Set(progressEntries.map(p => p.market_id).filter(Boolean))];
+    const displayIds = progressEntries.filter(p => p.item_type === 'display').map(p => p.item_id).filter(Boolean);
+    const kartonwareIds = progressEntries.filter(p => p.item_type === 'kartonware').map(p => p.item_id).filter(Boolean);
+
+    const [glsResult, glDetailsResult, marketsResult, displaysResult, kartonwareResult] = await Promise.all([
+      glIds.length > 0 ? supabase.from('users').select('id, email').in('id', glIds) : { data: [] },
+      glIds.length > 0 ? supabase.from('gebietsleiter').select('id, name').in('id', glIds) : { data: [] },
+      marketIds.length > 0 ? supabase.from('markets').select('id, name, chain').in('id', marketIds) : { data: [] },
+      displayIds.length > 0 ? supabase.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
+      kartonwareIds.length > 0 ? supabase.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] }
+    ]);
+
+    const gls = glsResult.data || [];
+    const glDetails = glDetailsResult.data || [];
+    const markets = marketsResult.data || [];
+    const displays = displaysResult.data || [];
+    const kartonware = kartonwareResult.data || [];
+
+    const response = progressEntries.map(entry => {
+      const gl = glDetails.find((g: any) => g.id === entry.gebietsleiter_id);
+      const glUser = gls.find((u: any) => u.id === entry.gebietsleiter_id);
+      const market = markets.find((m: any) => m.id === entry.market_id);
+      const item = entry.item_type === 'display'
+        ? displays.find((d: any) => d.id === entry.item_id)
+        : kartonware.find((k: any) => k.id === entry.item_id);
+
+      return {
+        id: entry.id,
+        glName: gl?.name || 'Unknown',
+        glEmail: glUser?.email || '',
+        marketName: market?.name || 'Unknown',
+        marketChain: market?.chain || '',
+        itemType: entry.item_type,
+        itemName: item?.name || 'Unknown',
+        quantity: entry.current_number,
+        value: entry.current_number * (item?.item_value || 0),
+        timestamp: entry.created_at,
+        photoUrl: entry.photo_url
+      };
+    });
+
+    res.json(response);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
 export default router;
