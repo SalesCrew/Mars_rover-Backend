@@ -31,6 +31,40 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// DEBUG: Direct database test
+import { createClient } from '@supabase/supabase-js';
+app.get('/api/debug-db', async (_req, res) => {
+  try {
+    const url = process.env.SUPABASE_URL || '';
+    const key = process.env.SUPABASE_SERVICE_KEY || '';
+    
+    console.log('🔍 DEBUG: Creating fresh client...');
+    const freshClient = createClient(url, key);
+    
+    const { data, error, count } = await freshClient
+      .from('markets')
+      .select('*', { count: 'exact' })
+      .limit(5);
+    
+    console.log('🔍 DEBUG Result:', { dataLength: data?.length, error, count });
+    
+    res.json({
+      success: !error,
+      dataLength: data?.length,
+      count,
+      error: error?.message,
+      sample: data?.slice(0, 2),
+      envCheck: {
+        urlLength: url.length,
+        keyLength: key.length
+      }
+    });
+  } catch (e: any) {
+    console.error('🔍 DEBUG Error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Request logging for API routes
 app.use((req, _res, next) => {
   const now = new Date().toISOString();
