@@ -11,35 +11,18 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     console.log('📋 Fetching all markets...');
     
-    // Fetch ALL markets using pagination (Supabase has 1000 row limit per request)
-    let allMarkets: any[] = [];
-    let from = 0;
-    const pageSize = 1000;
-    let hasMore = true;
+    const { data, error } = await supabase
+      .from('markets')
+      .select('*')
+      .order('name', { ascending: true });
 
-    while (hasMore) {
-      const { data, error } = await supabase
-        .from('markets')
-        .select('*')
-        .order('name', { ascending: true })
-        .range(from, from + pageSize - 1);
-
-      if (error) {
-        console.error('Supabase error:', error);
-        throw error;
-      }
-
-      if (data && data.length > 0) {
-        allMarkets = [...allMarkets, ...data];
-        from += pageSize;
-        hasMore = data.length === pageSize; // If we got less than pageSize, we're done
-      } else {
-        hasMore = false;
-      }
+    if (error) {
+      console.error('Supabase error:', error);
+      throw error;
     }
 
-    console.log(`✅ Fetched ${allMarkets.length} markets`);
-    res.json(allMarkets);
+    console.log(`✅ Fetched ${data?.length || 0} markets`);
+    res.json(data || []);
   } catch (error: any) {
     console.error('Error fetching markets:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
