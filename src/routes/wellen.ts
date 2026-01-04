@@ -13,8 +13,8 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
     // Chain groupings
     const chains = {
       billa: ['Adeg', 'Billa+', 'BILLA+', 'BILLA Plus', 'BILLA+ Privat', 'BILLA Plus Privat', 'BILLA Privat'],
-      spar: ['Spar', 'SPAR Privat Popovic', 'Spar Gourmet', 'Eurospar'],
-      interspar: ['Interspar'],
+      spar: ['Spar', 'SPAR Privat Popovic', 'Spar Gourmet', 'Eurospar', 'Interspar'],
+      zoofachhandel: ['Zoofachhandel', 'Futterhaus', 'Fressnapf', 'Das Futterhaus'],
       hagebau: ['Hagebau']
     };
 
@@ -237,7 +237,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
       
       // INTERSPAR AVERAGE
       (async () => {
-        const chainTypes = chains.interspar;
+        const chainTypes = chains.zoofachhandel;
         
         const { data: markets, error: marketsError } = await supabase
           .from('markets')
@@ -251,8 +251,8 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         
         if (totalMarkets === 0) {
           return {
-            chainName: 'Interspar',
-            chainColor: 'linear-gradient(135deg, #DC2626, #991B1B)',
+            chainName: 'Zoofachhandel',
+            chainColor: 'linear-gradient(135deg, #EC4899, #DB2777)',
             goalType: 'value' as const,
             goalValue: 0,
             currentValue: 0,
@@ -271,8 +271,8 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         
         if (welleIds.length === 0) {
           return {
-            chainName: 'Interspar',
-            chainColor: 'linear-gradient(135deg, #DC2626, #991B1B)',
+            chainName: 'Zoofachhandel',
+            chainColor: 'linear-gradient(135deg, #EC4899, #DB2777)',
             goalType: 'value' as const,
             goalValue: 0,
             currentValue: 0,
@@ -348,8 +348,8 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         }
         
         return {
-          chainName: 'Interspar',
-          chainColor: 'linear-gradient(135deg, #DC2626, #991B1B)',
+          chainName: 'Zoofachhandel',
+          chainColor: 'linear-gradient(135deg, #EC4899, #DB2777)',
           goalType: 'value' as const,
           goalValue: Math.round(goalValue * 100) / 100,
           currentValue: Math.round(currentValue * 100) / 100,
