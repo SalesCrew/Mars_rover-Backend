@@ -246,6 +246,278 @@ router.delete('/:id', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * GET /api/gebietsleiter/:id/dashboard-stats
+ * Get dashboard statistics for a specific GL
+ */
+router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    console.log(`📊 Fetching dashboard stats for GL ${id}...`);
+
+    const currentYear = new Date().getFullYear();
+    const yearStart = new Date(currentYear, 0, 1).toISOString();
+
+    // 1. Get GL's total vorbesteller value YTD (from wellen_gl_progress)
+    const { data: glProgress, error: progressError } = await supabase
+      .from('wellen_gl_progress')
+      .select('current_number, item_type, item_id')
+      .eq('gebietsleiter_id', id)
+      .gte('created_at', yearStart);
+
+    if (progressError) console.error('Progress error:', progressError);
+
+    // Get display and kartonware prices to calculate value
+    const displayIds = glProgress?.filter(p => p.item_type === 'display').map(p => p.item_id) || [];
+    const kartonwareIds = glProgress?.filter(p => p.item_type === 'kartonware').map(p => p.item_id) || [];
+
+    let glYearTotal = 0;
+
+    if (displayIds.length > 0) {
+      const { data: displays } = await supabase
+        .from('wellen_displays')
+        .select('id, price')
+        .in('id', displayIds);
+      
+      if (displays) {
+        glProgress?.filter(p => p.item_type === 'display').forEach(p => {
+          const display = displays.find(d => d.id === p.item_id);
+          if (display) glYearTotal += (display.price || 0) * (p.current_number || 0);
+        });
+      }
+    }
+
+    if (kartonwareIds.length > 0) {
+      const { data: kartonware } = await supabase
+        .from('wellen_kartonware')
+        .select('id, price')
+        .in('id', kartonwareIds);
+      
+      if (kartonware) {
+        glProgress?.filter(p => p.item_type === 'kartonware').forEach(p => {
+          const item = kartonware.find(k => k.id === p.item_id);
+          if (item) glYearTotal += (item.price || 0) * (p.current_number || 0);
+        });
+      }
+    }
+
+    // 2. Get agency average (all GLs' total)
+    const { data: allGLs } = await supabase.from('gebietsleiter').select('id');
+    const glCount = allGLs?.length || 1;
+
+    const { data: allProgress } = await supabase
+      .from('wellen_gl_progress')
+      .select('current_number, item_type, item_id, gebietsleiter_id')
+      .gte('created_at', yearStart);
+
+    let agencyTotal = 0;
+    const allDisplayIds = [...new Set(allProgress?.filter(p => p.item_type === 'display').map(p => p.item_id) || [])];
+    const allKartonwareIds = [...new Set(allProgress?.filter(p => p.item_type === 'kartonware').map(p => p.item_id) || [])];
+
+    if (allDisplayIds.length > 0) {
+      const { data: displays } = await supabase.from('wellen_displays').select('id, price').in('id', allDisplayIds);
+      if (displays && allProgress) {
+        allProgress.filter(p => p.item_type === 'display').forEach(p => {
+          const display = displays.find(d => d.id === p.item_id);
+          if (display) agencyTotal += (display.price || 0) * (p.current_number || 0);
+        });
+      }
+    }
+
+    if (allKartonwareIds.length > 0) {
+      const { data: kartonware } = await supabase.from('wellen_kartonware').select('id, price').in('id', allKartonwareIds);
+      if (kartonware && allProgress) {
+        allProgress.filter(p => p.item_type === 'kartonware').forEach(p => {
+          const item = kartonware.find(k => k.id === p.item_id);
+          if (item) agencyTotal += (item.price || 0) * (p.current_number || 0);
+        });
+      }
+    }
+
+    const agencyAverage = glCount > 0 ? agencyTotal / glCount : 0;
+    const percentageChange = agencyAverage > 0 ? ((glYearTotal - agencyAverage) / agencyAverage) * 100 : 0;
+
+    // 3. Get vorverkauf count for this GL
+    const { count: vorverkaufCount } = await supabase
+      .from('vorverkauf_entries')
+      .select('id', { count: 'exact', head: true })
+      .eq('gebietsleiter_id', id);
+
+    // 4. Get vorbestellung count (progress entries count)
+    const { count: vorbestellungCount } = await supabase
+      .from('wellen_gl_progress')
+      .select('id', { count: 'exact', head: true })
+      .eq('gebietsleiter_id', id);
+
+    // 5. Get markets visited (markets where GL has any action)
+    // Get all markets assigned to this GL
+    const { data: assignedMarkets } = await supabase
+      .from('gl_markets')
+      .select('market_id')
+      .eq('gebietsleiter_id', id);
+
+    const assignedMarketIds = assignedMarkets?.map(m => m.market_id) || [];
+    const totalAssignedMarkets = assignedMarketIds.length;
+
+    // Get markets where GL has submitted progress
+    const { data: progressMarkets } = await supabase
+      .from('wellen_gl_progress')
+      .select('market_id')
+      .eq('gebietsleiter_id', id)
+      .not('market_id', 'is', null);
+
+    // Get markets where GL has submitted vorverkauf
+    const { data: vorverkaufMarkets } = await supabase
+      .from('vorverkauf_entries')
+      .select('market_id')
+      .eq('gebietsleiter_id', id);
+
+    const visitedMarketIds = new Set([
+      ...(progressMarkets?.map(p => p.market_id) || []),
+      ...(vorverkaufMarkets?.map(v => v.market_id) || [])
+    ]);
+    const marketsVisited = visitedMarketIds.size;
+
+    console.log(`✅ Dashboard stats for GL ${id}: yearTotal=${glYearTotal}, vorverkauf=${vorverkaufCount}, vorbestellung=${vorbestellungCount}, markets=${marketsVisited}/${totalAssignedMarkets}`);
+
+    res.json({
+      yearTotal: Math.round(glYearTotal),
+      percentageChange: Math.round(percentageChange * 10) / 10,
+      vorverkaufCount: vorverkaufCount || 0,
+      vorbestellungCount: vorbestellungCount || 0,
+      marketsVisited,
+      totalMarkets: totalAssignedMarkets || marketsVisited || 180 // Fallback if no assignment table
+    });
+  } catch (error: any) {
+    console.error('❌ Error fetching dashboard stats:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+/**
+ * GET /api/gebietsleiter/:id/suggested-markets
+ * Get suggested markets for today (prioritize those with active vorbesteller)
+ */
+router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    console.log(`📍 Fetching suggested markets for GL ${id}...`);
+
+    const now = new Date();
+
+    // Get active waves with their date ranges
+    const { data: activeWaves } = await supabase
+      .from('wellen')
+      .select('id, name, start_date, end_date')
+      .eq('status', 'active');
+
+    // Get markets assigned to this GL (if gl_markets table exists)
+    let assignedMarketIds: string[] = [];
+    const { data: glMarkets } = await supabase
+      .from('gl_markets')
+      .select('market_id')
+      .eq('gebietsleiter_id', id);
+
+    if (glMarkets && glMarkets.length > 0) {
+      assignedMarketIds = glMarkets.map(m => m.market_id);
+    }
+
+    // Get markets from active waves
+    const waveMarketIds: string[] = [];
+    if (activeWaves && activeWaves.length > 0) {
+      const waveIds = activeWaves.map(w => w.id);
+      const { data: wellenMarkets } = await supabase
+        .from('wellen_markets')
+        .select('market_id, welle_id')
+        .in('welle_id', waveIds);
+
+      if (wellenMarkets) {
+        wellenMarkets.forEach(wm => waveMarketIds.push(wm.market_id));
+      }
+    }
+
+    // Combine market IDs - prioritize wave markets
+    const priorityMarketIds = [...new Set(waveMarketIds)];
+    const allRelevantMarketIds = assignedMarketIds.length > 0 
+      ? assignedMarketIds 
+      : priorityMarketIds;
+
+    if (allRelevantMarketIds.length === 0) {
+      // Fallback: get any markets
+      const { data: anyMarkets } = await supabase
+        .from('markets')
+        .select('id, name, address, city, postal_code, chain')
+        .limit(10);
+
+      return res.json((anyMarkets || []).map(m => ({
+        marketId: m.id,
+        name: `${m.chain} ${m.name}`.trim(),
+        address: `${m.address}, ${m.postal_code} ${m.city}`,
+        lastVisitWeeks: 4,
+        visits: { current: 0, required: 12 },
+        status: 'at-risk',
+        hasActiveWave: false
+      })));
+    }
+
+    // Fetch market details
+    const { data: markets } = await supabase
+      .from('markets')
+      .select('id, name, address, city, postal_code, chain, frequency')
+      .in('id', allRelevantMarketIds);
+
+    if (!markets) {
+      return res.json([]);
+    }
+
+    // Get GL's progress for these markets to calculate visits
+    const { data: marketProgress } = await supabase
+      .from('wellen_gl_progress')
+      .select('market_id, created_at')
+      .eq('gebietsleiter_id', id)
+      .in('market_id', allRelevantMarketIds);
+
+    // Calculate stats for each market
+    const suggestions = markets.map(market => {
+      const isInActiveWave = priorityMarketIds.includes(market.id);
+      const marketActions = marketProgress?.filter(p => p.market_id === market.id) || [];
+      const lastAction = marketActions.length > 0 
+        ? new Date(Math.max(...marketActions.map(a => new Date(a.created_at).getTime())))
+        : null;
+      
+      const weeksAgo = lastAction 
+        ? Math.floor((now.getTime() - lastAction.getTime()) / (7 * 24 * 60 * 60 * 1000))
+        : 8;
+
+      const frequency = market.frequency || 12;
+      const currentVisits = marketActions.length;
+      
+      return {
+        marketId: market.id,
+        name: `${market.chain} ${market.name}`.trim(),
+        address: `${market.address}, ${market.postal_code} ${market.city}`,
+        lastVisitWeeks: weeksAgo,
+        visits: { current: Math.min(currentVisits, frequency), required: frequency },
+        status: (currentVisits >= frequency * 0.5 ? 'on-track' : 'at-risk') as 'on-track' | 'at-risk',
+        hasActiveWave: isInActiveWave
+      };
+    });
+
+    // Sort: prioritize active wave markets, then by weeks since last visit
+    suggestions.sort((a, b) => {
+      if (a.hasActiveWave && !b.hasActiveWave) return -1;
+      if (!a.hasActiveWave && b.hasActiveWave) return 1;
+      return b.lastVisitWeeks - a.lastVisitWeeks;
+    });
+
+    console.log(`✅ Found ${suggestions.length} suggested markets for GL ${id}`);
+    res.json(suggestions.slice(0, 10));
+  } catch (error: any) {
+    console.error('❌ Error fetching suggested markets:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
 export default router;
 
 
