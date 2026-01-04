@@ -1194,17 +1194,24 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       return res.json([]);
     }
 
-    // Get GL names
-    const glIds = [...new Set(progressEntries.map(p => p.gebietsleiter_id))];
-    const { data: gls } = await supabase
-      .from('users')
-      .select('id, email')
-      .in('id', glIds);
+    // Get GL names (only if there are GL IDs)
+    const glIds = [...new Set(progressEntries.map(p => p.gebietsleiter_id).filter(Boolean))];
+    let gls: any[] = [];
+    let glDetails: any[] = [];
+    
+    if (glIds.length > 0) {
+      const { data: glsData } = await supabase
+        .from('users')
+        .select('id, email')
+        .in('id', glIds);
+      gls = glsData || [];
 
-    const { data: glDetails } = await supabase
-      .from('gebietsleiter')
-      .select('id, name')
-      .in('id', glIds);
+      const { data: glDetailsData } = await supabase
+        .from('gebietsleiter')
+        .select('id, name')
+        .in('id', glIds);
+      glDetails = glDetailsData || [];
+    }
 
     // Get market names (only if there are market IDs)
     const marketIds = [...new Set(progressEntries.map(p => p.market_id).filter(Boolean))];
@@ -1241,8 +1248,8 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
 
     // Build response
     const response = progressEntries.map(entry => {
-      const gl = glDetails?.find(g => g.id === entry.gebietsleiter_id);
-      const glUser = gls?.find(u => u.id === entry.gebietsleiter_id);
+      const gl = glDetails.find(g => g.id === entry.gebietsleiter_id);
+      const glUser = gls.find(u => u.id === entry.gebietsleiter_id);
       const market = markets.find(m => m.id === entry.market_id);
       const item = entry.item_type === 'display'
         ? displays.find(d => d.id === entry.item_id)
