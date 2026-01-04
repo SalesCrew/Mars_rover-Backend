@@ -1125,12 +1125,12 @@ router.delete('/:id', async (req: Request, res: Response) => {
 });
 
 // ============================================================================
-// UPDATE GL PROGRESS (BATCH) - Now creates new entries that add up
+// UPDATE GL PROGRESS (BATCH) - Adds to existing values (cumulative)
 // ============================================================================
 router.post('/:id/progress/batch', async (req: Request, res: Response) => {
   try {
     const { id: welleId } = req.params;
-    const { gebietsleiter_id, market_id, items, photo_url } = req.body;
+    const { gebietsleiter_id, items } = req.body;
 
     console.log(`📊 Batch updating GL progress for welle ${welleId}...`);
 
@@ -1138,61 +1138,96 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: gebietsleiter_id, items' });
     }
 
-    // INSERT new progress entries (entries add up over time)
-    // Note: market_id and photo_url columns need to be added to the table for full functionality
-    const progressEntries = items.map((item: any) => ({
-      welle_id: welleId,
-      gebietsleiter_id,
-      item_type: item.item_type,
-      item_id: item.item_id,
-      current_number: item.current_number
-    }));
+    // Fetch existing progress for this GL and welle
+    const { data: existingProgress } = await supabase
+      .from('wellen_gl_progress')
+      .select('item_type, item_id, current_number')
+      .eq('welle_id', welleId)
+      .eq('gebietsleiter_id', gebietsleiter_id);
+
+    // Create a map of existing progress for quick lookup
+    const existingMap = new Map<string, number>();
+    for (const p of (existingProgress || [])) {
+      const key = `${p.item_type}:${p.item_id}`;
+      existingMap.set(key, p.current_number || 0);
+    }
+
+    // Build upsert entries with cumulative values
+    const progressEntries = items.map((item: any) => {
+      const key = `${item.item_type}:${item.item_id}`;
+      const existingValue = existingMap.get(key) || 0;
+      const newTotal = existingValue + item.current_number;
+      
+      return {
+        welle_id: welleId,
+        gebietsleiter_id,
+        item_type: item.item_type,
+        item_id: item.item_id,
+        current_number: newTotal
+      };
+    });
 
     const { error } = await supabase
       .from('wellen_gl_progress')
-      .insert(progressEntries);
+      .upsert(progressEntries, {
+        onConflict: 'welle_id,gebietsleiter_id,item_type,item_id'
+      });
 
     if (error) throw error;
 
-    console.log(`✅ Added ${items.length} progress entries`);
+    console.log(`✅ Updated ${items.length} progress entries (cumulative)`);
     res.json({ 
-      message: 'Progress added successfully',
-      items_added: items.length 
+      message: 'Progress updated successfully',
+      items_updated: items.length 
     });
   } catch (error: any) {
-    console.error('❌ Error adding batch progress:', error);
+    console.error('❌ Error updating batch progress:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
 
 // ============================================================================
-// UPDATE GL PROGRESS - Now creates new entry that adds up
+// UPDATE GL PROGRESS - Adds to existing value (cumulative)
 // ============================================================================
 router.post('/:id/progress', async (req: Request, res: Response) => {
   try {
     const { id: welleId } = req.params;
     const { gebietsleiter_id, item_type, item_id, current_number } = req.body;
 
-    console.log(`📊 Adding GL progress for welle ${welleId}...`);
+    console.log(`📊 Updating GL progress for welle ${welleId}...`);
 
-    // INSERT new progress entry (entries add up over time)
-    // Note: market_id and photo_url columns need to be added to the table for full functionality
+    // Fetch existing progress for this specific item
+    const { data: existing } = await supabase
+      .from('wellen_gl_progress')
+      .select('current_number')
+      .eq('welle_id', welleId)
+      .eq('gebietsleiter_id', gebietsleiter_id)
+      .eq('item_type', item_type)
+      .eq('item_id', item_id)
+      .single();
+
+    const existingValue = existing?.current_number || 0;
+    const newTotal = existingValue + current_number;
+
+    // Upsert with cumulative value
     const { error } = await supabase
       .from('wellen_gl_progress')
-      .insert({
+      .upsert({
         welle_id: welleId,
         gebietsleiter_id,
         item_type,
         item_id,
-        current_number
+        current_number: newTotal
+      }, {
+        onConflict: 'welle_id,gebietsleiter_id,item_type,item_id'
       });
 
     if (error) throw error;
 
-    console.log(`✅ Added progress entry`);
-    res.json({ message: 'Progress added successfully' });
+    console.log(`✅ Updated progress entry (cumulative: ${existingValue} + ${current_number} = ${newTotal})`);
+    res.json({ message: 'Progress updated successfully' });
   } catch (error: any) {
-    console.error('❌ Error adding progress:', error);
+    console.error('❌ Error updating progress:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
