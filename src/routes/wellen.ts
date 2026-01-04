@@ -8,7 +8,11 @@ const router = Router();
 // ============================================================================
 router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
   try {
-    console.log('📊 Fetching chain averages...');
+    // Get GL filter from query params (comma-separated list of GL IDs)
+    const glIdsParam = req.query.glIds as string | undefined;
+    const glFilter = glIdsParam ? glIdsParam.split(',').filter(Boolean) : [];
+    
+    console.log('📊 Fetching chain averages...', glFilter.length > 0 ? `Filtering by GLs: ${glFilter.join(', ')}` : '');
 
     // Chain groupings
     const chains = {
@@ -77,18 +81,27 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           .select('id, target_number, welle_id')
           .in('welle_id', welleIds);
         
-        // Get all progress for these items
-        const { data: displayProgress } = await supabase
+        // Get all progress for these items (optionally filtered by GL)
+        let displayProgressQuery = supabase
           .from('wellen_gl_progress')
           .select('current_number, item_id, gebietsleiter_id')
           .eq('item_type', 'display')
           .in('welle_id', welleIds);
         
-        const { data: kartonwareProgress } = await supabase
+        let kartonwareProgressQuery = supabase
           .from('wellen_gl_progress')
           .select('current_number, item_id, gebietsleiter_id')
           .eq('item_type', 'kartonware')
           .in('welle_id', welleIds);
+        
+        // Apply GL filter if specified
+        if (glFilter.length > 0) {
+          displayProgressQuery = displayProgressQuery.in('gebietsleiter_id', glFilter);
+          kartonwareProgressQuery = kartonwareProgressQuery.in('gebietsleiter_id', glFilter);
+        }
+        
+        const { data: displayProgress } = await displayProgressQuery;
+        const { data: kartonwareProgress } = await kartonwareProgressQuery;
         
         // Calculate totals
         const totalTarget = 
@@ -186,17 +199,26 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           .select('id, target_number, welle_id')
           .in('welle_id', welleIds);
         
-        const { data: displayProgress } = await supabase
+        // Get progress (optionally filtered by GL)
+        let displayProgressQuery = supabase
           .from('wellen_gl_progress')
           .select('current_number, item_id, gebietsleiter_id')
           .eq('item_type', 'display')
           .in('welle_id', welleIds);
         
-        const { data: kartonwareProgress } = await supabase
+        let kartonwareProgressQuery = supabase
           .from('wellen_gl_progress')
           .select('current_number, item_id, gebietsleiter_id')
           .eq('item_type', 'kartonware')
           .in('welle_id', welleIds);
+        
+        if (glFilter.length > 0) {
+          displayProgressQuery = displayProgressQuery.in('gebietsleiter_id', glFilter);
+          kartonwareProgressQuery = kartonwareProgressQuery.in('gebietsleiter_id', glFilter);
+        }
+        
+        const { data: displayProgress } = await displayProgressQuery;
+        const { data: kartonwareProgress } = await kartonwareProgressQuery;
         
         const totalTarget = 
           (displays || []).reduce((sum, d) => sum + d.target_number, 0) +
@@ -301,17 +323,26 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           .select('id, target_number, item_value, welle_id')
           .in('welle_id', welleIds);
         
-        const { data: displayProgress } = await supabase
+        // Get progress (optionally filtered by GL)
+        let displayProgressQuery = supabase
           .from('wellen_gl_progress')
           .select('current_number, item_id, gebietsleiter_id')
           .eq('item_type', 'display')
           .in('welle_id', welleIds);
         
-        const { data: kartonwareProgress } = await supabase
+        let kartonwareProgressQuery = supabase
           .from('wellen_gl_progress')
           .select('current_number, item_id, gebietsleiter_id')
           .eq('item_type', 'kartonware')
           .in('welle_id', welleIds);
+        
+        if (glFilter.length > 0) {
+          displayProgressQuery = displayProgressQuery.in('gebietsleiter_id', glFilter);
+          kartonwareProgressQuery = kartonwareProgressQuery.in('gebietsleiter_id', glFilter);
+        }
+        
+        const { data: displayProgress } = await displayProgressQuery;
+        const { data: kartonwareProgress } = await kartonwareProgressQuery;
         
         // Calculate total value (target * item_value)
         const totalValue = 
@@ -424,17 +455,26 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           .select('id, target_number, item_value, welle_id')
           .in('welle_id', welleIds);
         
-        const { data: displayProgress } = await supabase
+        // Get progress (optionally filtered by GL)
+        let displayProgressQuery = supabase
           .from('wellen_gl_progress')
           .select('current_number, item_id, gebietsleiter_id')
           .eq('item_type', 'display')
           .in('welle_id', welleIds);
         
-        const { data: kartonwareProgress } = await supabase
+        let kartonwareProgressQuery = supabase
           .from('wellen_gl_progress')
           .select('current_number, item_id, gebietsleiter_id')
           .eq('item_type', 'kartonware')
           .in('welle_id', welleIds);
+        
+        if (glFilter.length > 0) {
+          displayProgressQuery = displayProgressQuery.in('gebietsleiter_id', glFilter);
+          kartonwareProgressQuery = kartonwareProgressQuery.in('gebietsleiter_id', glFilter);
+        }
+        
+        const { data: displayProgress } = await displayProgressQuery;
+        const { data: kartonwareProgress } = await kartonwareProgressQuery;
         
         const totalValue = 
           (displays || []).reduce((sum, d) => sum + (d.target_number * (d.item_value || 0)), 0) +
@@ -494,7 +534,11 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
 // ============================================================================
 router.get('/dashboard/waves', async (req: Request, res: Response) => {
   try {
-    console.log('📊 Fetching waves for dashboard...');
+    // Get GL filter from query params (comma-separated list of GL IDs)
+    const glIdsParam = req.query.glIds as string | undefined;
+    const glFilter = glIdsParam ? glIdsParam.split(',').filter(Boolean) : [];
+    
+    console.log('📊 Fetching waves for dashboard...', glFilter.length > 0 ? `Filtering by GLs: ${glFilter.join(', ')}` : '');
 
     const today = new Date();
     const threeDaysAgo = new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000);
@@ -528,11 +572,17 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           .select('market_id')
           .eq('welle_id', welle.id);
 
-        // Fetch progress
-        const { data: progressData } = await supabase
+        // Fetch progress (optionally filtered by GL)
+        let progressQuery = supabase
           .from('wellen_gl_progress')
           .select('current_number, item_type, item_id, gebietsleiter_id')
           .eq('welle_id', welle.id);
+        
+        if (glFilter.length > 0) {
+          progressQuery = progressQuery.in('gebietsleiter_id', glFilter);
+        }
+        
+        const { data: progressData } = await progressQuery;
 
         // Calculate display aggregates
         let displayCount = 0;
