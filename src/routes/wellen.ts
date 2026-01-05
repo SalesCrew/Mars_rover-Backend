@@ -1531,4 +1531,100 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
   }
 });
 
+// ============================================================================
+// IMAGE UPLOAD: Upload image to Supabase Storage
+// ============================================================================
+router.post('/upload-image', async (req: Request, res: Response) => {
+  try {
+    const { image, folder, filename } = req.body;
+    
+    if (!image) {
+      return res.status(400).json({ error: 'No image provided' });
+    }
+
+    console.log('📷 Uploading image to wellen-images bucket...');
+
+    // Extract base64 data (remove data:image/...;base64, prefix if present)
+    let base64Data = image;
+    let contentType = 'image/jpeg';
+    
+    if (image.startsWith('data:')) {
+      const matches = image.match(/^data:([^;]+);base64,(.+)$/);
+      if (matches) {
+        contentType = matches[1];
+        base64Data = matches[2];
+      }
+    }
+
+    // Convert base64 to buffer
+    const buffer = Buffer.from(base64Data, 'base64');
+
+    // Generate unique filename
+    const timestamp = Date.now();
+    const randomStr = Math.random().toString(36).substring(2, 8);
+    const extension = contentType.split('/')[1] || 'jpg';
+    const finalFilename = filename || `${timestamp}-${randomStr}.${extension}`;
+    const filePath = folder ? `${folder}/${finalFilename}` : finalFilename;
+
+    // Upload to Supabase Storage
+    const { data, error } = await supabase.storage
+      .from('wellen-images')
+      .upload(filePath, buffer, {
+        contentType,
+        upsert: true
+      });
+
+    if (error) {
+      console.error('❌ Storage upload error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    // Get public URL
+    const { data: urlData } = supabase.storage
+      .from('wellen-images')
+      .getPublicUrl(data.path);
+
+    console.log('✅ Image uploaded successfully:', urlData.publicUrl);
+
+    res.json({
+      success: true,
+      path: data.path,
+      url: urlData.publicUrl
+    });
+  } catch (error: any) {
+    console.error('❌ Error uploading image:', error);
+    res.status(500).json({ error: error.message || 'Failed to upload image' });
+  }
+});
+
+// ============================================================================
+// IMAGE DELETE: Delete image from Supabase Storage
+// ============================================================================
+router.delete('/delete-image', async (req: Request, res: Response) => {
+  try {
+    const { path } = req.body;
+    
+    if (!path) {
+      return res.status(400).json({ error: 'No path provided' });
+    }
+
+    console.log('🗑️ Deleting image from wellen-images bucket:', path);
+
+    const { error } = await supabase.storage
+      .from('wellen-images')
+      .remove([path]);
+
+    if (error) {
+      console.error('❌ Storage delete error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    console.log('✅ Image deleted successfully');
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('❌ Error deleting image:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete image' });
+  }
+});
+
 export default router;
