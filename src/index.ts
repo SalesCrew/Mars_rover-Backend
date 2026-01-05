@@ -7,6 +7,7 @@ import gebietsleiterRouter from './routes/gebietsleiter';
 import productsRouter from './routes/products';
 import wellenRouter from './routes/wellen';
 import vorverkaufRouter from './routes/vorverkauf';
+import activitiesRouter from './routes/activities';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
@@ -55,6 +56,8 @@ console.log('Registering wellen routes...');
 app.use('/api/wellen', wellenRouter);
 console.log('Registering vorverkauf routes...');
 app.use('/api/vorverkauf', vorverkaufRouter);
+console.log('Registering activities routes...');
+app.use('/api/activities', activitiesRouter);
 
 // Start server
 const server = app.listen(PORT, '0.0.0.0', () => {
