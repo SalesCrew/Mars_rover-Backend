@@ -247,6 +247,66 @@ router.delete('/:id', async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/gebietsleiter/:id/change-password
+ * Change password for a gebietsleiter using Supabase Auth
+ */
+router.post('/:id/change-password', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { currentPassword, newPassword } = req.body;
+    
+    console.log(`🔐 Password change request for gebietsleiter ${id}...`);
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Current password and new password are required' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters long' });
+    }
+
+    // Get the gebietsleiter email
+    const { data: gl, error: glError } = await supabase
+      .from('gebietsleiter')
+      .select('email')
+      .eq('id', id)
+      .single();
+
+    if (glError || !gl) {
+      console.error('GL lookup error:', glError);
+      return res.status(404).json({ error: 'Gebietsleiter not found' });
+    }
+
+    // Verify current password by attempting to sign in
+    const { error: signInError } = await supabase.auth.signInWithPassword({
+      email: gl.email,
+      password: currentPassword
+    });
+
+    if (signInError) {
+      console.error('Current password verification failed:', signInError.message);
+      return res.status(401).json({ error: 'Aktuelles Passwort ist falsch' });
+    }
+
+    // Update the password using admin API
+    const { error: updateError } = await supabase.auth.admin.updateUserById(id, {
+      password: newPassword
+    });
+
+    if (updateError) {
+      console.error('Password update error:', updateError);
+      return res.status(500).json({ error: 'Failed to update password' });
+    }
+
+    console.log(`✅ Password changed successfully for gebietsleiter ${id}`);
+    res.json({ success: true, message: 'Password changed successfully' });
+  } catch (error: any) {
+    console.error('Error changing password:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+/**
  * GET /api/gebietsleiter/:id/dashboard-stats
  * Get dashboard statistics for a specific GL
  */
