@@ -1042,32 +1042,90 @@ router.put('/:id', async (req: Request, res: Response) => {
 
     if (welleError) throw welleError;
 
-    // Delete and recreate displays
-    await supabase.from('wellen_displays').delete().eq('welle_id', id);
+    // Update displays - preserve IDs to keep progress links
+    const { data: existingDisplays } = await supabase
+      .from('wellen_displays')
+      .select('id, name')
+      .eq('welle_id', id);
+    
+    const existingDisplayMap = new Map((existingDisplays || []).map(d => [d.name, d.id]));
+    const newDisplayNames = new Set((displays || []).map((d: any) => d.name));
+    
+    // Delete displays that are no longer in the list
+    const displaysToDelete = (existingDisplays || []).filter(d => !newDisplayNames.has(d.name)).map(d => d.id);
+    if (displaysToDelete.length > 0) {
+      await supabase.from('wellen_displays').delete().in('id', displaysToDelete);
+    }
+    
+    // Update or insert displays
     if (displays && displays.length > 0) {
-      const displaysToInsert = displays.map((d: any, index: number) => ({
-        welle_id: id,
-        name: d.name,
-        target_number: d.targetNumber,
-        item_value: d.itemValue || null,
-        picture_url: d.picture || null,
-        display_order: index
-      }));
-      await supabase.from('wellen_displays').insert(displaysToInsert);
+      for (let index = 0; index < displays.length; index++) {
+        const d = displays[index];
+        const existingId = existingDisplayMap.get(d.name);
+        
+        if (existingId) {
+          // Update existing display (preserves ID for progress)
+          await supabase.from('wellen_displays').update({
+            target_number: d.targetNumber,
+            item_value: d.itemValue || null,
+            picture_url: d.picture || null,
+            display_order: index
+          }).eq('id', existingId);
+        } else {
+          // Insert new display
+          await supabase.from('wellen_displays').insert({
+            welle_id: id,
+            name: d.name,
+            target_number: d.targetNumber,
+            item_value: d.itemValue || null,
+            picture_url: d.picture || null,
+            display_order: index
+          });
+        }
+      }
     }
 
-    // Delete and recreate kartonware
-    await supabase.from('wellen_kartonware').delete().eq('welle_id', id);
+    // Update kartonware - preserve IDs to keep progress links
+    const { data: existingKartonware } = await supabase
+      .from('wellen_kartonware')
+      .select('id, name')
+      .eq('welle_id', id);
+    
+    const existingKartonwareMap = new Map((existingKartonware || []).map(k => [k.name, k.id]));
+    const newKartonwareNames = new Set((kartonwareItems || []).map((k: any) => k.name));
+    
+    // Delete kartonware that is no longer in the list
+    const kartonwareToDelete = (existingKartonware || []).filter(k => !newKartonwareNames.has(k.name)).map(k => k.id);
+    if (kartonwareToDelete.length > 0) {
+      await supabase.from('wellen_kartonware').delete().in('id', kartonwareToDelete);
+    }
+    
+    // Update or insert kartonware
     if (kartonwareItems && kartonwareItems.length > 0) {
-      const kartonwareToInsert = kartonwareItems.map((k: any, index: number) => ({
-        welle_id: id,
-        name: k.name,
-        target_number: k.targetNumber,
-        item_value: k.itemValue || null,
-        picture_url: k.picture || null,
-        kartonware_order: index
-      }));
-      await supabase.from('wellen_kartonware').insert(kartonwareToInsert);
+      for (let index = 0; index < kartonwareItems.length; index++) {
+        const k = kartonwareItems[index];
+        const existingId = existingKartonwareMap.get(k.name);
+        
+        if (existingId) {
+          // Update existing kartonware (preserves ID for progress)
+          await supabase.from('wellen_kartonware').update({
+            target_number: k.targetNumber,
+            item_value: k.itemValue || null,
+            picture_url: k.picture || null,
+            kartonware_order: index
+          }).eq('id', existingId);
+        } else {
+          // Insert new kartonware
+          await supabase.from('wellen_kartonware').insert({
+            welle_id: id,
+            name: k.name,
+            target_number: k.targetNumber,
+            item_value: k.itemValue || null,
+            picture_url: k.picture || null,
+            kartonware_order: index
+          });
+        }
+      }
     }
 
     // Delete and recreate KW days
