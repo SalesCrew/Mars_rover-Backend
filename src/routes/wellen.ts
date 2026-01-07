@@ -688,12 +688,18 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
     const today = new Date();
     const threeDaysAgo = new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000);
 
-    // Fetch active and recently finished waves
-    const { data: wellen, error: wellenError } = await supabase
+    // Use fresh client to avoid caching issues
+    const freshClient = createFreshClient();
+
+    // Fetch active, upcoming, and recently finished waves
+    const { data: wellen, error: wellenError } = await freshClient
       .from('wellen')
       .select('*')
-      .or(`status.eq.active,and(status.eq.past,end_date.gte.${threeDaysAgo.toISOString().split('T')[0]})`)
+      .or(`status.eq.active,status.eq.upcoming,and(status.eq.past,end_date.gte.${threeDaysAgo.toISOString().split('T')[0]})`)
       .order('start_date', { ascending: false });
+
+    console.log(`📊 Dashboard waves query returned: ${wellen?.length || 0} waves`);
+    console.log(`📋 Dashboard waves: ${(wellen || []).map(w => `${w.name}:${w.status}`).join(', ')}`);
 
     if (wellenError) throw wellenError;
 
