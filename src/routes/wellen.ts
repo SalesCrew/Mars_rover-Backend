@@ -838,6 +838,7 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
 router.get('/', async (req: Request, res: Response) => {
   try {
     console.log('📋 Fetching all wellen...');
+    console.log('🔗 Supabase URL:', process.env.SUPABASE_URL?.substring(0, 30) + '...');
     
     // Fetch all wellen
     const { data: wellen, error: wellenError } = await supabase
@@ -845,7 +846,12 @@ router.get('/', async (req: Request, res: Response) => {
       .select('*')
       .order('created_at', { ascending: false });
 
-    if (wellenError) throw wellenError;
+    if (wellenError) {
+      console.error('❌ Wellen query error:', wellenError);
+      throw wellenError;
+    }
+    
+    console.log(`📊 Raw wellen count from DB: ${wellen?.length || 0}`);
 
     // For each welle, fetch related data
     const wellenWithDetails = await Promise.all(
