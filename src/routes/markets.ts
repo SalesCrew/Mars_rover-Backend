@@ -173,6 +173,78 @@ router.put('/:id', async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/markets/:id/visit
+ * Record a visit to a market (increments current_visits if not already visited today)
+ */
+router.post('/:id/visit', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { gl_id } = req.body; // Optional: track which GL visited
+    
+    console.log(`📍 Recording visit for market ${id}...`);
+
+    // Get current market data
+    const { data: market, error: fetchError } = await supabase
+      .from('markets')
+      .select('current_visits, last_visit_date')
+      .eq('id', id)
+      .single();
+
+    if (fetchError) {
+      console.error('Error fetching market:', fetchError);
+      throw fetchError;
+    }
+
+    if (!market) {
+      return res.status(404).json({ error: 'Market not found' });
+    }
+
+    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const lastVisit = market.last_visit_date;
+
+    // Check if already visited today
+    if (lastVisit === today) {
+      console.log(`ℹ️ Market ${id} already visited today, not incrementing`);
+      return res.json({ 
+        message: 'Already visited today',
+        current_visits: market.current_visits,
+        last_visit_date: lastVisit,
+        incremented: false
+      });
+    }
+
+    // Increment visit count and update last visit date
+    const newVisitCount = (market.current_visits || 0) + 1;
+    
+    const { data: updated, error: updateError } = await supabase
+      .from('markets')
+      .update({
+        current_visits: newVisitCount,
+        last_visit_date: today
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateError) {
+      console.error('Error updating market visit:', updateError);
+      throw updateError;
+    }
+
+    console.log(`✅ Recorded visit for market ${id}: ${newVisitCount} total visits`);
+    res.json({
+      message: 'Visit recorded',
+      current_visits: newVisitCount,
+      last_visit_date: today,
+      incremented: true
+    });
+  } catch (error: any) {
+    console.error('Error recording market visit:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+/**
  * DELETE /api/markets/:id
  * Delete a market
  */
