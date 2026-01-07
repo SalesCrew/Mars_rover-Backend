@@ -8,6 +8,9 @@ const router = Router();
 // ============================================================================
 router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
   try {
+    // Use fresh client to avoid caching issues with wellen queries
+    const freshClient = createFreshClient();
+    
     // Get filters from query params
     const glIdsParam = req.query.glIds as string | undefined;
     const startDate = req.query.startDate as string | undefined;
@@ -73,7 +76,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         }
         
         // Get all wellen assigned to these markets (optionally filtered by date)
-        let wellenQuery = supabase
+        let wellenQuery = freshClient
           .from('wellen')
           .select('id, start_date, end_date');
         
@@ -252,7 +255,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         }
         
         // Get wellen filtered by date range
-        let wellenQuery = supabase.from('wellen').select('id');
+        let wellenQuery = freshClient.from('wellen').select('id');
         if (startDate) wellenQuery = wellenQuery.gte('end_date', startDate);
         if (endDate) wellenQuery = wellenQuery.lte('start_date', endDate);
         const { data: filteredWellen } = await wellenQuery;
@@ -388,7 +391,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         }
         
         // Get wellen filtered by date range
-        let wellenQuery = supabase.from('wellen').select('id, goal_value, goal_type');
+        let wellenQuery = freshClient.from('wellen').select('id, goal_value, goal_type');
         if (startDate) wellenQuery = wellenQuery.gte('end_date', startDate);
         if (endDate) wellenQuery = wellenQuery.lte('start_date', endDate);
         const { data: filteredWellen } = await wellenQuery;
@@ -543,7 +546,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         }
         
         // Get wellen filtered by date range
-        let wellenQuery = supabase.from('wellen').select('id, goal_value, goal_type');
+        let wellenQuery = freshClient.from('wellen').select('id, goal_value, goal_type');
         if (startDate) wellenQuery = wellenQuery.gte('end_date', startDate);
         if (endDate) wellenQuery = wellenQuery.lte('start_date', endDate);
         const { data: filteredWellen } = await wellenQuery;
@@ -842,14 +845,7 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
 // GET ALL WELLEN
 // ============================================================================
 router.get('/', async (req: Request, res: Response) => {
-  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  const startTime = Date.now();
-  
   try {
-    console.log(`📋 [${requestId}] Fetching all wellen...`);
-    console.log(`🔗 [${requestId}] Supabase URL: ${process.env.SUPABASE_URL?.substring(0, 30)}...`);
-    console.log(`⏱️ [${requestId}] Request started at: ${new Date().toISOString()}`);
-    
     // Use a fresh client to avoid any potential caching issues
     const freshClient = createFreshClient();
     
@@ -859,29 +855,12 @@ router.get('/', async (req: Request, res: Response) => {
       .select('*')
       .order('created_at', { ascending: false });
 
-    const queryDuration = Date.now() - startTime;
-    console.log(`⏱️ [${requestId}] Supabase query took: ${queryDuration}ms`);
-
     if (wellenError) {
-      console.error(`❌ [${requestId}] Wellen query error:`, wellenError);
-      console.error(`❌ [${requestId}] Error code: ${wellenError.code}, message: ${wellenError.message}`);
+      console.error('❌ Wellen query error:', wellenError);
       throw wellenError;
     }
     
-    console.log(`📊 [${requestId}] Raw wellen count from DB: ${wellen?.length || 0}`);
-    console.log(`📋 [${requestId}] Wellen IDs from DB: ${(wellen || []).map(w => w.id).join(', ')}`);
-    console.log(`📋 [${requestId}] Wellen statuses: ${(wellen || []).map(w => `${w.name}:${w.status}`).join(', ')}`);
-    
-    if (!wellen || wellen.length === 0) {
-      console.warn(`⚠️ [${requestId}] WARNING: No wellen found in database!`);
-      console.warn(`⚠️ [${requestId}] Returning empty array - this may indicate a connection issue`);
-    }
-    
-    // Debug: Run a separate count query to verify (use fresh client)
-    const { count, error: countError } = await freshClient
-      .from('wellen')
-      .select('*', { count: 'exact', head: true });
-    console.log(`🔢 [${requestId}] Verification count query: ${count} (error: ${countError?.message || 'none'})`);
+    console.log(`✅ Fetched ${wellen?.length || 0} wellen`);
 
     // For each welle, fetch related data (all using fresh client)
     const wellenWithDetails = await Promise.all(
@@ -970,14 +949,9 @@ router.get('/', async (req: Request, res: Response) => {
       })
     );
 
-    const totalDuration = Date.now() - startTime;
-    console.log(`✅ [${requestId}] Fetched ${wellenWithDetails.length} wellen in ${totalDuration}ms`);
-    console.log(`✅ [${requestId}] Wellen names: ${wellenWithDetails.map((w: any) => w.name).join(', ') || 'NONE'}`);
     res.json(wellenWithDetails);
   } catch (error: any) {
-    const totalDuration = Date.now() - startTime;
-    console.error(`❌ [${requestId}] Error fetching wellen after ${totalDuration}ms:`, error);
-    console.error(`❌ [${requestId}] Error stack:`, error.stack);
+    console.error('❌ Error fetching wellen:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
