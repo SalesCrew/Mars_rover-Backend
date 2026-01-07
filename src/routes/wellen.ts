@@ -147,7 +147,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         let kartonwareProgress: any[] = [];
         
         if (!itemType || itemType === 'displays') {
-          let query = supabase
+          let query = freshClient
             .from('wellen_gl_progress')
             .select('current_number, item_id, gebietsleiter_id')
             .eq('item_type', 'display')
@@ -162,7 +162,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         }
         
         if (!itemType || itemType === 'kartonware') {
-          let query = supabase
+          let query = freshClient
             .from('wellen_gl_progress')
             .select('current_number, item_id, gebietsleiter_id')
             .eq('item_type', 'kartonware')
@@ -311,13 +311,13 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         let kartonwareProgress: any[] = [];
         
         if (!itemType || itemType === 'displays') {
-          let query = supabase.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id').eq('item_type', 'display').in('welle_id', welleIds);
+          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id').eq('item_type', 'display').in('welle_id', welleIds);
           if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
           const { data } = await query;
           displayProgress = data || [];
         }
         if (!itemType || itemType === 'kartonware') {
-          let query = supabase.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id').eq('item_type', 'kartonware').in('welle_id', welleIds);
+          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id').eq('item_type', 'kartonware').in('welle_id', welleIds);
           if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
           const { data } = await query;
           kartonwareProgress = data || [];
@@ -454,13 +454,13 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         let kartonwareProgress: any[] = [];
         
         if (!itemType || itemType === 'displays') {
-          let query = supabase.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id').eq('item_type', 'display').in('welle_id', welleIds);
+          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id').eq('item_type', 'display').in('welle_id', welleIds);
           if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
           const { data } = await query;
           displayProgress = data || [];
         }
         if (!itemType || itemType === 'kartonware') {
-          let query = supabase.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id').eq('item_type', 'kartonware').in('welle_id', welleIds);
+          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id').eq('item_type', 'kartonware').in('welle_id', welleIds);
           if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
           const { data } = await query;
           kartonwareProgress = data || [];
@@ -608,13 +608,13 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         let kartonwareProgress: any[] = [];
         
         if (!itemType || itemType === 'displays') {
-          let query = supabase.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id').eq('item_type', 'display').in('welle_id', welleIds);
+          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id').eq('item_type', 'display').in('welle_id', welleIds);
           if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
           const { data } = await query;
           displayProgress = data || [];
         }
         if (!itemType || itemType === 'kartonware') {
-          let query = supabase.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id').eq('item_type', 'kartonware').in('welle_id', welleIds);
+          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id').eq('item_type', 'kartonware').in('welle_id', welleIds);
           if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
           const { data } = await query;
           kartonwareProgress = data || [];
