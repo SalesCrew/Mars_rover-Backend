@@ -705,37 +705,37 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
 
     const wavesProgress = await Promise.all(
       (wellen || []).map(async (welle) => {
-        // Fetch displays (conditionally based on item type filter)
+        // Fetch displays (conditionally based on item type filter) - use fresh client
         let displays: any[] = [];
         if (!itemType || itemType === 'displays') {
-          const { data } = await supabase
+          const { data } = await freshClient
             .from('wellen_displays')
             .select('id, target_number, item_value')
             .eq('welle_id', welle.id);
           displays = data || [];
         }
 
-        // Fetch kartonware (conditionally based on item type filter)
+        // Fetch kartonware (conditionally based on item type filter) - use fresh client
         let kartonware: any[] = [];
         if (!itemType || itemType === 'kartonware') {
-          const { data } = await supabase
+          const { data } = await freshClient
             .from('wellen_kartonware')
             .select('id, target_number, item_value')
             .eq('welle_id', welle.id);
           kartonware = data || [];
         }
 
-        // Fetch assigned markets count
-        const { data: welleMarkets } = await supabase
+        // Fetch assigned markets count - use fresh client
+        const { data: welleMarkets } = await freshClient
           .from('wellen_markets')
           .select('market_id')
           .eq('welle_id', welle.id);
 
-        // Fetch progress (optionally filtered by GL and item type)
+        // Fetch progress (optionally filtered by GL and item type) - use fresh client
         let progressData: any[] = [];
         
         if (!itemType || itemType === 'displays') {
-          let query = supabase
+          let query = freshClient
             .from('wellen_gl_progress')
             .select('current_number, item_type, item_id, gebietsleiter_id')
             .eq('welle_id', welle.id)
@@ -750,7 +750,7 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
         }
         
         if (!itemType || itemType === 'kartonware') {
-          let query = supabase
+          let query = freshClient
             .from('wellen_gl_progress')
             .select('current_number, item_type, item_id, gebietsleiter_id')
             .eq('welle_id', welle.id)
@@ -877,44 +877,44 @@ router.get('/', async (req: Request, res: Response) => {
       console.warn(`⚠️ [${requestId}] Returning empty array - this may indicate a connection issue`);
     }
     
-    // Debug: Run a separate count query to verify
-    const { count, error: countError } = await supabase
+    // Debug: Run a separate count query to verify (use fresh client)
+    const { count, error: countError } = await freshClient
       .from('wellen')
       .select('*', { count: 'exact', head: true });
     console.log(`🔢 [${requestId}] Verification count query: ${count} (error: ${countError?.message || 'none'})`);
 
-    // For each welle, fetch related data
+    // For each welle, fetch related data (all using fresh client)
     const wellenWithDetails = await Promise.all(
       (wellen || []).map(async (welle) => {
         // Fetch displays
-        const { data: displays } = await supabase
+        const { data: displays } = await freshClient
           .from('wellen_displays')
           .select('*')
           .eq('welle_id', welle.id)
           .order('display_order', { ascending: true });
 
         // Fetch kartonware
-        const { data: kartonware } = await supabase
+        const { data: kartonware } = await freshClient
           .from('wellen_kartonware')
           .select('*')
           .eq('welle_id', welle.id)
           .order('kartonware_order', { ascending: true });
 
         // Fetch KW days
-        const { data: kwDays } = await supabase
+        const { data: kwDays } = await freshClient
           .from('wellen_kw_days')
           .select('*')
           .eq('welle_id', welle.id)
           .order('kw_order', { ascending: true });
 
         // Fetch assigned market IDs
-        const { data: welleMarkets } = await supabase
+        const { data: welleMarkets } = await freshClient
           .from('wellen_markets')
           .select('market_id')
           .eq('welle_id', welle.id);
 
         // Calculate progress aggregates
-        const { data: progressData } = await supabase
+        const { data: progressData } = await freshClient
           .from('wellen_gl_progress')
           .select('current_number, item_type, item_id, gebietsleiter_id')
           .eq('welle_id', welle.id);
