@@ -47,6 +47,102 @@ router.get('/', async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/markets/backfill-gl-ids
+ * Backfill gebietsleiter_id for markets that have gebietsleiter_name but no gebietsleiter_id
+ * Uses fuzzy matching (case insensitive, ignores dashes, extra spaces, etc.)
+ * MUST be defined BEFORE /:id routes to avoid being caught by parameter matching
+ */
+router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
+  try {
+    console.log('🔄 Starting GL ID backfill...');
+
+    // Helper function to normalize names for matching
+    const normalizeName = (name: string | null | undefined): string => {
+      if (!name) return '';
+      return name
+        .toLowerCase()
+        .replace(/[-–—]/g, ' ')  // Replace dashes with spaces
+        .replace(/\s+/g, ' ')     // Collapse multiple spaces
+        .replace(/[^a-z0-9äöüß\s]/g, '') // Remove special chars except umlauts
+        .trim();
+    };
+
+    // Fetch all GLs
+    const { data: gls, error: glError } = await supabase
+      .from('gebietsleiter')
+      .select('id, name, email')
+      .eq('is_active', true);
+
+    if (glError) throw glError;
+
+    console.log(`📋 Found ${gls?.length || 0} active GLs`);
+
+    // Create a map of normalized names to GL data
+    const glMap = new Map<string, { id: string; name: string; email: string }>();
+    for (const gl of gls || []) {
+      const normalizedName = normalizeName(gl.name);
+      glMap.set(normalizedName, { id: gl.id, name: gl.name, email: gl.email });
+      console.log(`  GL: "${gl.name}" -> normalized: "${normalizedName}"`);
+    }
+
+    // Fetch markets with gebietsleiter_name but no gebietsleiter_id
+    const { data: marketsToUpdate, error: marketsError } = await supabase
+      .from('markets')
+      .select('id, gebietsleiter_name, gebietsleiter_id')
+      .not('gebietsleiter_name', 'is', null)
+      .or('gebietsleiter_id.is.null,gebietsleiter_id.eq.');
+
+    if (marketsError) throw marketsError;
+
+    console.log(`📋 Found ${marketsToUpdate?.length || 0} markets needing GL ID backfill`);
+
+    let updated = 0;
+    let notFound = 0;
+    const unmatchedNames = new Set<string>();
+
+    for (const market of marketsToUpdate || []) {
+      const normalizedMarketGL = normalizeName(market.gebietsleiter_name);
+      const matchedGL = glMap.get(normalizedMarketGL);
+
+      if (matchedGL) {
+        // Update the market with the GL ID and email
+        const { error: updateError } = await supabase
+          .from('markets')
+          .update({
+            gebietsleiter_id: matchedGL.id,
+            gebietsleiter_email: matchedGL.email
+          })
+          .eq('id', market.id);
+
+        if (updateError) {
+          console.error(`  ❌ Failed to update market ${market.id}:`, updateError);
+        } else {
+          updated++;
+        }
+      } else {
+        notFound++;
+        unmatchedNames.add(market.gebietsleiter_name);
+      }
+    }
+
+    console.log(`✅ Backfill complete: ${updated} updated, ${notFound} not matched`);
+    if (unmatchedNames.size > 0) {
+      console.log(`⚠️ Unmatched GL names:`, Array.from(unmatchedNames));
+    }
+
+    res.json({
+      success: true,
+      updated,
+      notMatched: notFound,
+      unmatchedNames: Array.from(unmatchedNames)
+    });
+  } catch (error: any) {
+    console.error('❌ Error during GL ID backfill:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+/**
  * GET /api/markets/:id
  * Get a single market by ID
  */
@@ -267,101 +363,6 @@ router.delete('/:id', async (req: Request, res: Response) => {
     res.status(204).send();
   } catch (error: any) {
     console.error('Error deleting market:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
-  }
-});
-
-/**
- * POST /api/markets/backfill-gl-ids
- * Backfill gebietsleiter_id for markets that have gebietsleiter_name but no gebietsleiter_id
- * Uses fuzzy matching (case insensitive, ignores dashes, extra spaces, etc.)
- */
-router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
-  try {
-    console.log('🔄 Starting GL ID backfill...');
-
-    // Helper function to normalize names for matching
-    const normalizeName = (name: string | null | undefined): string => {
-      if (!name) return '';
-      return name
-        .toLowerCase()
-        .replace(/[-–—]/g, ' ')  // Replace dashes with spaces
-        .replace(/\s+/g, ' ')     // Collapse multiple spaces
-        .replace(/[^a-z0-9äöüß\s]/g, '') // Remove special chars except umlauts
-        .trim();
-    };
-
-    // Fetch all GLs
-    const { data: gls, error: glError } = await supabase
-      .from('gebietsleiter')
-      .select('id, name, email')
-      .eq('is_active', true);
-
-    if (glError) throw glError;
-
-    console.log(`📋 Found ${gls?.length || 0} active GLs`);
-
-    // Create a map of normalized names to GL data
-    const glMap = new Map<string, { id: string; name: string; email: string }>();
-    for (const gl of gls || []) {
-      const normalizedName = normalizeName(gl.name);
-      glMap.set(normalizedName, { id: gl.id, name: gl.name, email: gl.email });
-      console.log(`  GL: "${gl.name}" -> normalized: "${normalizedName}"`);
-    }
-
-    // Fetch markets with gebietsleiter_name but no gebietsleiter_id
-    const { data: marketsToUpdate, error: marketsError } = await supabase
-      .from('markets')
-      .select('id, gebietsleiter_name, gebietsleiter_id')
-      .not('gebietsleiter_name', 'is', null)
-      .or('gebietsleiter_id.is.null,gebietsleiter_id.eq.');
-
-    if (marketsError) throw marketsError;
-
-    console.log(`📋 Found ${marketsToUpdate?.length || 0} markets needing GL ID backfill`);
-
-    let updated = 0;
-    let notFound = 0;
-    const unmatchedNames = new Set<string>();
-
-    for (const market of marketsToUpdate || []) {
-      const normalizedMarketGL = normalizeName(market.gebietsleiter_name);
-      const matchedGL = glMap.get(normalizedMarketGL);
-
-      if (matchedGL) {
-        // Update the market with the GL ID and email
-        const { error: updateError } = await supabase
-          .from('markets')
-          .update({
-            gebietsleiter_id: matchedGL.id,
-            gebietsleiter_email: matchedGL.email
-          })
-          .eq('id', market.id);
-
-        if (updateError) {
-          console.error(`  ❌ Failed to update market ${market.id}:`, updateError);
-        } else {
-          updated++;
-        }
-      } else {
-        notFound++;
-        unmatchedNames.add(market.gebietsleiter_name);
-      }
-    }
-
-    console.log(`✅ Backfill complete: ${updated} updated, ${notFound} not matched`);
-    if (unmatchedNames.size > 0) {
-      console.log(`⚠️ Unmatched GL names:`, Array.from(unmatchedNames));
-    }
-
-    res.json({
-      success: true,
-      updated,
-      notMatched: notFound,
-      unmatchedNames: Array.from(unmatchedNames)
-    });
-  } catch (error: any) {
-    console.error('❌ Error during GL ID backfill:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
