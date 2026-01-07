@@ -423,51 +423,94 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
     const agencyAverage = glCount > 0 ? agencyTotal / glCount : 0;
     const percentageChange = agencyAverage > 0 ? ((glYearTotal - agencyAverage) / agencyAverage) * 100 : 0;
 
-    // 3. Get vorverkauf count for this GL
+    // 3. Get Vorverkauf count (from vorverkauf_submissions table)
     const { count: vorverkaufCount } = await supabase
-      .from('vorverkauf_entries')
+      .from('vorverkauf_submissions')
       .select('id', { count: 'exact', head: true })
       .eq('gebietsleiter_id', id);
 
-    // 4. Get vorbestellung count (progress entries count)
-    const { count: vorbestellungCount } = await supabase
+    // 4. Get Vorbestellung count (unique submissions - group by market_id + date)
+    // Each batch submission to a market on a day counts as 1 Vorbestellung
+    const { data: vorbestellerProgress } = await supabase
       .from('wellen_gl_progress')
-      .select('id', { count: 'exact', head: true })
-      .eq('gebietsleiter_id', id);
-
-    // 5. Get markets visited (markets where GL has any action)
-    // Get all markets assigned to this GL (table may not exist)
-    let assignedMarketIds: string[] = [];
-    let totalAssignedMarkets = 0;
-    try {
-      const { data: assignedMarkets } = await supabase
-        .from('gl_markets')
-        .select('market_id')
-        .eq('gebietsleiter_id', id);
-      assignedMarketIds = assignedMarkets?.map(m => m.market_id) || [];
-      totalAssignedMarkets = assignedMarketIds.length;
-    } catch (e) {
-      console.log('gl_markets table may not exist, continuing...');
-    }
-
-    // Get markets where GL has submitted progress
-    const { data: progressMarkets } = await supabase
-      .from('wellen_gl_progress')
-      .select('market_id')
+      .select('market_id, created_at')
       .eq('gebietsleiter_id', id)
       .not('market_id', 'is', null);
 
-    // Get markets where GL has submitted vorverkauf
-    const { data: vorverkaufMarkets } = await supabase
-      .from('vorverkauf_entries')
-      .select('market_id')
+    // Count unique market+date combinations for Vorbestellungen
+    const uniqueVorbestellungen = new Set<string>();
+    vorbestellerProgress?.forEach(p => {
+      const dateStr = new Date(p.created_at).toISOString().split('T')[0];
+      uniqueVorbestellungen.add(`${p.market_id}_${dateStr}`);
+    });
+    const vorbestellungCount = uniqueVorbestellungen.size;
+
+    // 5. Get total markets assigned to this GL (via gebietsleiter_id field in markets table)
+    const { count: totalAssignedMarkets } = await supabase
+      .from('markets')
+      .select('id', { count: 'exact', head: true })
+      .eq('gebietsleiter_id', id)
+      .eq('is_active', true);
+
+    // 6. Get unique market visits (any action counts, but same market same day = 1)
+    // Sources: market visits (last_visit_date), vorverkauf_submissions, wellen_gl_progress, vorverkauf_entries
+    
+    // Get markets with last_visit_date for this GL
+    const { data: visitedMarketsData } = await supabase
+      .from('markets')
+      .select('id, last_visit_date')
+      .eq('gebietsleiter_id', id)
+      .not('last_visit_date', 'is', null);
+
+    // Get vorbesteller progress (market + date)
+    const { data: vorbestellerVisits } = await supabase
+      .from('wellen_gl_progress')
+      .select('market_id, created_at')
+      .eq('gebietsleiter_id', id)
+      .not('market_id', 'is', null);
+
+    // Get vorverkauf submissions (market + date)
+    const { data: vorverkaufVisits } = await supabase
+      .from('vorverkauf_submissions')
+      .select('market_id, created_at')
       .eq('gebietsleiter_id', id);
 
-    const visitedMarketIds = new Set([
-      ...(progressMarkets?.map(p => p.market_id) || []),
-      ...(vorverkaufMarkets?.map(v => v.market_id) || [])
-    ]);
-    const marketsVisited = visitedMarketIds.size;
+    // Get produktersatz entries (market + date)
+    const { data: produktersatzVisits } = await supabase
+      .from('vorverkauf_entries')
+      .select('market_id, created_at')
+      .eq('gebietsleiter_id', id);
+
+    // Count unique market+date combinations across all sources
+    const uniqueMarketVisits = new Set<string>();
+    
+    // Add visits from last_visit_date
+    visitedMarketsData?.forEach(m => {
+      if (m.last_visit_date) {
+        const dateStr = new Date(m.last_visit_date).toISOString().split('T')[0];
+        uniqueMarketVisits.add(`${m.id}_${dateStr}`);
+      }
+    });
+    
+    // Add vorbesteller visits
+    vorbestellerVisits?.forEach(v => {
+      const dateStr = new Date(v.created_at).toISOString().split('T')[0];
+      uniqueMarketVisits.add(`${v.market_id}_${dateStr}`);
+    });
+    
+    // Add vorverkauf visits
+    vorverkaufVisits?.forEach(v => {
+      const dateStr = new Date(v.created_at).toISOString().split('T')[0];
+      uniqueMarketVisits.add(`${v.market_id}_${dateStr}`);
+    });
+    
+    // Add produktersatz visits
+    produktersatzVisits?.forEach(v => {
+      const dateStr = new Date(v.created_at).toISOString().split('T')[0];
+      uniqueMarketVisits.add(`${v.market_id}_${dateStr}`);
+    });
+
+    const marketsVisited = uniqueMarketVisits.size;
 
     console.log(`✅ Dashboard stats for GL ${id}: yearTotal=${glYearTotal}, vorverkauf=${vorverkaufCount}, vorbestellung=${vorbestellungCount}, markets=${marketsVisited}/${totalAssignedMarkets}`);
 
@@ -475,9 +518,9 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
       yearTotal: Math.round(glYearTotal),
       percentageChange: Math.round(percentageChange * 10) / 10,
       vorverkaufCount: vorverkaufCount || 0,
-      vorbestellungCount: vorbestellungCount || 0,
+      vorbestellungCount: vorbestellungCount,
       marketsVisited,
-      totalMarkets: totalAssignedMarkets || marketsVisited || 180 // Fallback if no assignment table
+      totalMarkets: totalAssignedMarkets || 0
     });
   } catch (error: any) {
     console.error('❌ Error fetching dashboard stats:', error);
