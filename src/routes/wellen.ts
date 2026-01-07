@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { supabase } from '../config/supabase';
+import { supabase, createFreshClient } from '../config/supabase';
 
 const router = Router();
 
@@ -844,8 +844,11 @@ router.get('/', async (req: Request, res: Response) => {
     console.log(`🔗 [${requestId}] Supabase URL: ${process.env.SUPABASE_URL?.substring(0, 30)}...`);
     console.log(`⏱️ [${requestId}] Request started at: ${new Date().toISOString()}`);
     
+    // Use a fresh client to avoid any potential caching issues
+    const freshClient = createFreshClient();
+    
     // Fetch all wellen
-    const { data: wellen, error: wellenError } = await supabase
+    const { data: wellen, error: wellenError } = await freshClient
       .from('wellen')
       .select('*')
       .order('created_at', { ascending: false });
