@@ -9,6 +9,7 @@ import wellenRouter from './routes/wellen';
 import vorverkaufRouter from './routes/vorverkauf';
 import vorverkaufWellenRouter from './routes/vorverkaufWellen';
 import activitiesRouter from './routes/activities';
+import bugReportsRouter from './routes/bugReports';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
@@ -61,6 +62,8 @@ console.log('Registering vorverkauf-wellen routes...');
 app.use('/api/vorverkauf-wellen', vorverkaufWellenRouter);
 console.log('Registering activities routes...');
 app.use('/api/activities', activitiesRouter);
+console.log('Registering bug-reports routes...');
+app.use('/api/bug-reports', bugReportsRouter);
 
 // Start server
 const server = app.listen(PORT, '0.0.0.0', () => {
