@@ -485,107 +485,194 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
   }
 });
 
+// Helper functions for KW+Day matching (same logic as PreorderNotification)
+const getCurrentKWNumber = (): number => {
+  const now = new Date();
+  const startOfYear = new Date(now.getFullYear(), 0, 1);
+  const days = Math.floor((now.getTime() - startOfYear.getTime()) / (24 * 60 * 60 * 1000));
+  return Math.ceil((days + startOfYear.getDay() + 1) / 7);
+};
+
+const getCurrentDayAbbr = (): string => {
+  const days = ['SO', 'MO', 'DI', 'MI', 'DO', 'FR', 'SA'];
+  return days[new Date().getDay()];
+};
+
+const extractKWNumber = (kwString: string): number => {
+  const match = kwString.match(/(\d+)/);
+  return match ? parseInt(match[1], 10) : -1;
+};
+
 /**
  * GET /api/gebietsleiter/:id/suggested-markets
- * Get suggested markets for today (prioritize those with active vorbesteller)
+ * Smart market suggestions based on priority scoring:
+ * - Vorbesteller (KW+Day match): +200 pts
+ * - Frequency overdue: +100 pts
+ * - Vorverkauf last 3 days: +80 pts
+ * - Frequency soon: +50 pts
+ * - Vorverkauf last week: +40 pts
+ * - Vorverkauf active: +20 pts
  */
 router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    console.log(`📍 Fetching suggested markets for GL ${id}...`);
+    console.log(`📍 Fetching smart suggested markets for GL ${id}...`);
 
     const now = new Date();
+    const currentKW = getCurrentKWNumber();
+    const currentDay = getCurrentDayAbbr();
 
-    // Get active waves with their date ranges
-    const { data: activeWaves } = await supabase
-      .from('wellen')
-      .select('id, name, start_date, end_date')
-      .eq('status', 'active');
-
-    // Get markets assigned to this GL (table may not exist)
-    let assignedMarketIds: string[] = [];
-    try {
-      const { data: glMarkets } = await supabase
-        .from('gl_markets')
-        .select('market_id')
-        .eq('gebietsleiter_id', id);
-
-      if (glMarkets && glMarkets.length > 0) {
-        assignedMarketIds = glMarkets.map(m => m.market_id);
-      }
-    } catch (e) {
-      console.log('gl_markets table may not exist, continuing...');
-    }
-
-    // Get markets from active waves
-    const waveMarketIds: string[] = [];
-    if (activeWaves && activeWaves.length > 0) {
-      const waveIds = activeWaves.map(w => w.id);
-      const { data: wellenMarkets } = await supabase
-        .from('wellen_markets')
-        .select('market_id, welle_id')
-        .in('welle_id', waveIds);
-
-      if (wellenMarkets) {
-        wellenMarkets.forEach(wm => waveMarketIds.push(wm.market_id));
-      }
-    }
-
-    // Combine market IDs - prioritize wave markets
-    const priorityMarketIds = [...new Set(waveMarketIds)];
-    const allRelevantMarketIds = assignedMarketIds.length > 0 
-      ? assignedMarketIds 
-      : priorityMarketIds;
-
-    if (allRelevantMarketIds.length === 0) {
-      // Fallback: get any markets
-      const { data: anyMarkets } = await supabase
-        .from('markets')
-        .select('id, name, address, city, postal_code, chain')
-        .limit(10);
-
-      return res.json((anyMarkets || []).map(m => ({
-        marketId: m.id,
-        name: `${m.chain} ${m.name}`.trim(),
-        address: `${m.address}, ${m.postal_code} ${m.city}`,
-        lastVisitWeeks: 4,
-        visits: { current: 0, required: 12 },
-        status: 'at-risk',
-        hasActiveWave: false
-      })));
-    }
-
-    // Fetch market details
-    const { data: markets } = await supabase
+    // 1. Get ALL markets assigned to this GL (via gebietsleiter_id field)
+    const { data: glMarkets } = await supabase
       .from('markets')
-      .select('id, name, address, city, postal_code, chain, frequency')
-      .in('id', allRelevantMarketIds);
+      .select('id, name, address, city, postal_code, chain, frequency, last_visit_date, current_visits')
+      .eq('gebietsleiter_id', id)
+      .eq('is_active', true);
 
-    if (!markets) {
+    if (!glMarkets || glMarkets.length === 0) {
+      console.log(`⚠️ No markets assigned to GL ${id}`);
       return res.json([]);
     }
 
-    // Get GL's progress for these markets to calculate visits
-    const { data: marketProgress } = await supabase
-      .from('wellen_gl_progress')
-      .select('market_id, created_at')
-      .eq('gebietsleiter_id', id)
-      .in('market_id', allRelevantMarketIds);
+    const marketIds = glMarkets.map(m => m.id);
 
-    // Calculate stats for each market
-    const suggestions = markets.map(market => {
-      const isInActiveWave = priorityMarketIds.includes(market.id);
-      const marketActions = marketProgress?.filter(p => p.market_id === market.id) || [];
-      const lastAction = marketActions.length > 0 
-        ? new Date(Math.max(...marketActions.map(a => new Date(a.created_at).getTime())))
-        : null;
+    // 2. Get active Vorbesteller waves with KW days
+    const { data: vorbestellerWaves } = await supabase
+      .from('wellen')
+      .select('id, name')
+      .eq('status', 'active');
+
+    // Get KW days for active waves
+    let vorbestellerKwDays: { welle_id: string; kw: string; days: string[] }[] = [];
+    if (vorbestellerWaves && vorbestellerWaves.length > 0) {
+      const waveIds = vorbestellerWaves.map(w => w.id);
+      const { data: kwDaysData } = await supabase
+        .from('wellen_kw_days')
+        .select('welle_id, kw, days')
+        .in('welle_id', waveIds);
+      if (kwDaysData) {
+        vorbestellerKwDays = kwDaysData;
+      }
+    }
+
+    // Get markets linked to active Vorbesteller waves
+    let vorbestellerMarketIds: Set<string> = new Set();
+    if (vorbestellerWaves && vorbestellerWaves.length > 0) {
+      const waveIds = vorbestellerWaves.map(w => w.id);
+      const { data: wellenMarkets } = await supabase
+        .from('wellen_markets')
+        .select('market_id, welle_id')
+        .in('welle_id', waveIds)
+        .in('market_id', marketIds);
       
-      const weeksAgo = lastAction 
-        ? Math.floor((now.getTime() - lastAction.getTime()) / (7 * 24 * 60 * 60 * 1000))
-        : 8;
+      if (wellenMarkets) {
+        wellenMarkets.forEach(wm => vorbestellerMarketIds.add(wm.market_id));
+      }
+    }
+
+    // Check if today matches any Vorbesteller KW+Day
+    const isVorbestellerToday = vorbestellerKwDays.some(kwDay => {
+      const kwNum = extractKWNumber(kwDay.kw);
+      const matchesKW = kwNum === currentKW;
+      const matchesDay = kwDay.days.some(day => day.toUpperCase() === currentDay);
+      return matchesKW && matchesDay;
+    });
+
+    // 3. Get active Vorverkauf waves
+    const { data: vorverkaufWaves } = await supabase
+      .from('vorverkauf_wellen')
+      .select('id, name, start_date, end_date')
+      .eq('status', 'active');
+
+    // Get markets linked to active Vorverkauf waves
+    let vorverkaufMarketData: Map<string, { endDate: Date; daysUntilEnd: number }> = new Map();
+    if (vorverkaufWaves && vorverkaufWaves.length > 0) {
+      const waveIds = vorverkaufWaves.map(w => w.id);
+      const { data: vvMarkets } = await supabase
+        .from('vorverkauf_wellen_markets')
+        .select('market_id, welle_id')
+        .in('welle_id', waveIds)
+        .in('market_id', marketIds);
+      
+      if (vvMarkets) {
+        vvMarkets.forEach(vvm => {
+          const wave = vorverkaufWaves.find(w => w.id === vvm.welle_id);
+          if (wave) {
+            const endDate = new Date(wave.end_date);
+            const daysUntilEnd = Math.floor((endDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+            // Keep the one with the soonest end date
+            const existing = vorverkaufMarketData.get(vvm.market_id);
+            if (!existing || daysUntilEnd < existing.daysUntilEnd) {
+              vorverkaufMarketData.set(vvm.market_id, { endDate, daysUntilEnd });
+            }
+          }
+        });
+      }
+    }
+
+    // 4. Calculate priority score and reason for each market
+    const suggestions = glMarkets.map(market => {
+      let priorityScore = 0;
+      const reasons: string[] = [];
 
       const frequency = market.frequency || 12;
-      const currentVisits = marketActions.length;
+      const expectedIntervalDays = 365 / frequency;
+      
+      // Calculate days since last visit
+      let daysSinceVisit = 999; // Never visited = very overdue
+      if (market.last_visit_date) {
+        const lastVisit = new Date(market.last_visit_date);
+        daysSinceVisit = Math.floor((now.getTime() - lastVisit.getTime()) / (1000 * 60 * 60 * 24));
+      }
+
+      const weeksAgo = Math.floor(daysSinceVisit / 7);
+
+      // --- VORBESTELLER SCORE (+200) ---
+      if (vorbestellerMarketIds.has(market.id) && isVorbestellerToday) {
+        priorityScore += 200;
+        reasons.push('HEUTE: Vorbesteller');
+      }
+
+      // --- FREQUENCY OVERDUE SCORE (+100) ---
+      const isOverdue = daysSinceVisit > expectedIntervalDays;
+      if (isOverdue) {
+        priorityScore += 100;
+        reasons.push('Frequenz überfällig');
+      }
+
+      // --- VORVERKAUF CLOSING SCORE (+80/+40/+20) ---
+      const vvData = vorverkaufMarketData.get(market.id);
+      if (vvData) {
+        if (vvData.daysUntilEnd <= 3 && vvData.daysUntilEnd >= 0) {
+          priorityScore += 80;
+          reasons.push('Vorverkauf: letzte 3 Tage');
+        } else if (vvData.daysUntilEnd <= 7) {
+          priorityScore += 40;
+          reasons.push('Vorverkauf: letzte Woche');
+        } else {
+          priorityScore += 20;
+          reasons.push('Vorverkauf aktiv');
+        }
+      }
+
+      // --- FREQUENCY SOON SCORE (+50) ---
+      const isSoon = !isOverdue && daysSinceVisit > (expectedIntervalDays - 7);
+      if (isSoon) {
+        priorityScore += 50;
+        reasons.push('Bald Frequenz fällig');
+      }
+
+      // Determine primary reason (highest priority one)
+      let priorityReason = reasons.length > 0 ? reasons[0] : 'Regelmäßiger Besuch';
+      
+      // Combine reasons if multiple high-priority ones
+      if (reasons.includes('HEUTE: Vorbesteller') && reasons.includes('Frequenz überfällig')) {
+        priorityReason = 'HEUTE: Vorbesteller + Frequenz';
+      } else if (reasons.includes('HEUTE: Vorbesteller') && reasons.some(r => r.includes('Vorverkauf'))) {
+        priorityReason = 'HEUTE: Vorbesteller + Vorverkauf';
+      }
+
+      const currentVisits = market.current_visits || 0;
       
       return {
         marketId: market.id,
@@ -594,19 +681,21 @@ router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
         lastVisitWeeks: weeksAgo,
         visits: { current: Math.min(currentVisits, frequency), required: frequency },
         status: (currentVisits >= frequency * 0.5 ? 'on-track' : 'at-risk') as 'on-track' | 'at-risk',
-        hasActiveWave: isInActiveWave
+        priorityScore,
+        priorityReason
       };
     });
 
-    // Sort: prioritize active wave markets, then by weeks since last visit
+    // Sort by priority score (highest first), then by weeks since last visit
     suggestions.sort((a, b) => {
-      if (a.hasActiveWave && !b.hasActiveWave) return -1;
-      if (!a.hasActiveWave && b.hasActiveWave) return 1;
+      if (b.priorityScore !== a.priorityScore) {
+        return b.priorityScore - a.priorityScore;
+      }
       return b.lastVisitWeeks - a.lastVisitWeeks;
     });
 
-    console.log(`✅ Found ${suggestions.length} suggested markets for GL ${id}`);
-    res.json(suggestions.slice(0, 10));
+    console.log(`✅ Found ${suggestions.length} suggested markets for GL ${id}, returning top 15`);
+    res.json(suggestions.slice(0, 15));
   } catch (error: any) {
     console.error('❌ Error fetching suggested markets:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
