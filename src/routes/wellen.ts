@@ -860,11 +860,19 @@ router.get('/', async (req: Request, res: Response) => {
     }
     
     console.log(`📊 [${requestId}] Raw wellen count from DB: ${wellen?.length || 0}`);
+    console.log(`📋 [${requestId}] Wellen IDs from DB: ${(wellen || []).map(w => w.id).join(', ')}`);
+    console.log(`📋 [${requestId}] Wellen statuses: ${(wellen || []).map(w => `${w.name}:${w.status}`).join(', ')}`);
     
     if (!wellen || wellen.length === 0) {
       console.warn(`⚠️ [${requestId}] WARNING: No wellen found in database!`);
       console.warn(`⚠️ [${requestId}] Returning empty array - this may indicate a connection issue`);
     }
+    
+    // Debug: Run a separate count query to verify
+    const { count, error: countError } = await supabase
+      .from('wellen')
+      .select('*', { count: 'exact', head: true });
+    console.log(`🔢 [${requestId}] Verification count query: ${count} (error: ${countError?.message || 'none'})`);
 
     // For each welle, fetch related data
     const wellenWithDetails = await Promise.all(
