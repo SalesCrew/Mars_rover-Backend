@@ -53,7 +53,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         }
         
         // Get all markets of this chain type
-        const { data: markets, error: marketsError } = await supabase
+        const { data: markets, error: marketsError } = await freshClient
           .from('markets')
           .select('id')
           .in('chain', chainTypes);
@@ -102,7 +102,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
-        const { data: welleMarkets } = await supabase
+        const { data: welleMarkets } = await freshClient
           .from('wellen_markets')
           .select('welle_id, market_id')
           .in('market_id', marketIds)
@@ -127,7 +127,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         let kartonware: any[] = [];
         
         if (!itemType || itemType === 'displays') {
-          const { data } = await supabase
+          const { data } = await freshClient
             .from('wellen_displays')
             .select('id, target_number, welle_id')
             .in('welle_id', welleIds);
@@ -135,7 +135,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         }
         
         if (!itemType || itemType === 'kartonware') {
-          const { data } = await supabase
+          const { data } = await freshClient
             .from('wellen_kartonware')
             .select('id, target_number, welle_id')
             .in('welle_id', welleIds);
@@ -232,7 +232,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
-        const { data: markets, error: marketsError } = await supabase
+        const { data: markets, error: marketsError } = await freshClient
           .from('markets')
           .select('id')
           .in('chain', chainTypes);
@@ -273,7 +273,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
-        const { data: welleMarkets } = await supabase
+        const { data: welleMarkets } = await freshClient
           .from('wellen_markets')
           .select('welle_id, market_id')
           .in('market_id', marketIds)
@@ -298,11 +298,11 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         let kartonware: any[] = [];
         
         if (!itemType || itemType === 'displays') {
-          const { data } = await supabase.from('wellen_displays').select('id, target_number, welle_id').in('welle_id', welleIds);
+          const { data } = await freshClient.from('wellen_displays').select('id, target_number, welle_id').in('welle_id', welleIds);
           displays = data || [];
         }
         if (!itemType || itemType === 'kartonware') {
-          const { data } = await supabase.from('wellen_kartonware').select('id, target_number, welle_id').in('welle_id', welleIds);
+          const { data } = await freshClient.from('wellen_kartonware').select('id, target_number, welle_id').in('welle_id', welleIds);
           kartonware = data || [];
         }
         
@@ -367,7 +367,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
-        const { data: markets, error: marketsError } = await supabase
+        const { data: markets, error: marketsError } = await freshClient
           .from('markets')
           .select('id')
           .in('chain', chainTypes);
@@ -410,7 +410,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
-        const { data: welleMarkets } = await supabase
+        const { data: welleMarkets } = await freshClient
           .from('wellen_markets')
           .select('welle_id, market_id')
           .in('market_id', marketIds)
@@ -441,11 +441,11 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         let kartonware: any[] = [];
         
         if (!itemType || itemType === 'displays') {
-          const { data } = await supabase.from('wellen_displays').select('id, target_number, item_value, welle_id').in('welle_id', welleIds);
+          const { data } = await freshClient.from('wellen_displays').select('id, target_number, item_value, welle_id').in('welle_id', welleIds);
           displays = data || [];
         }
         if (!itemType || itemType === 'kartonware') {
-          const { data } = await supabase.from('wellen_kartonware').select('id, target_number, item_value, welle_id').in('welle_id', welleIds);
+          const { data } = await freshClient.from('wellen_kartonware').select('id, target_number, item_value, welle_id').in('welle_id', welleIds);
           kartonware = data || [];
         }
         
@@ -522,7 +522,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
-        const { data: markets, error: marketsError } = await supabase
+        const { data: markets, error: marketsError } = await freshClient
           .from('markets')
           .select('id')
           .in('chain', chainTypes);
@@ -565,7 +565,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
-        const { data: welleMarkets } = await supabase
+        const { data: welleMarkets } = await freshClient
           .from('wellen_markets')
           .select('welle_id, market_id')
           .in('market_id', marketIds)
@@ -595,11 +595,11 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         let kartonware: any[] = [];
         
         if (!itemType || itemType === 'displays') {
-          const { data } = await supabase.from('wellen_displays').select('id, target_number, item_value, welle_id').in('welle_id', welleIds);
+          const { data } = await freshClient.from('wellen_displays').select('id, target_number, item_value, welle_id').in('welle_id', welleIds);
           displays = data || [];
         }
         if (!itemType || itemType === 'kartonware') {
-          const { data } = await supabase.from('wellen_kartonware').select('id, target_number, item_value, welle_id').in('welle_id', welleIds);
+          const { data } = await freshClient.from('wellen_kartonware').select('id, target_number, item_value, welle_id').in('welle_id', welleIds);
           kartonware = data || [];
         }
         
