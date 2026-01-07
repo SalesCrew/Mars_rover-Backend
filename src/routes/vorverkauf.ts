@@ -306,16 +306,14 @@ router.get('/stats/summary', async (req: Request, res: Response) => {
 
     const totalEntries = entries?.length || 0;
     const totalItems = (items || []).reduce((sum, i) => sum + i.quantity, 0);
-    const byReason = {
-      OOS: entries?.filter(e => e.reason === 'OOS').length || 0,
-      Listungslücke: entries?.filter(e => e.reason === 'Listungslücke').length || 0,
-      Platzierung: entries?.filter(e => e.reason === 'Platzierung').length || 0
-    };
+    const takeOutItems = (items || []).filter((i: any) => i.item_type === 'take_out').reduce((sum, i) => sum + i.quantity, 0);
+    const replaceItems = (items || []).filter((i: any) => i.item_type === 'replace').reduce((sum, i) => sum + i.quantity, 0);
 
     res.json({
       totalEntries,
       totalItems,
-      byReason
+      takeOutItems,
+      replaceItems
     });
   } catch (error: any) {
     console.error('❌ Error fetching vorverkauf stats:', error);
