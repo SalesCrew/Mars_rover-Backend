@@ -836,9 +836,13 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
 // GET ALL WELLEN
 // ============================================================================
 router.get('/', async (req: Request, res: Response) => {
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  const startTime = Date.now();
+  
   try {
-    console.log('📋 Fetching all wellen...');
-    console.log('🔗 Supabase URL:', process.env.SUPABASE_URL?.substring(0, 30) + '...');
+    console.log(`📋 [${requestId}] Fetching all wellen...`);
+    console.log(`🔗 [${requestId}] Supabase URL: ${process.env.SUPABASE_URL?.substring(0, 30)}...`);
+    console.log(`⏱️ [${requestId}] Request started at: ${new Date().toISOString()}`);
     
     // Fetch all wellen
     const { data: wellen, error: wellenError } = await supabase
@@ -846,12 +850,21 @@ router.get('/', async (req: Request, res: Response) => {
       .select('*')
       .order('created_at', { ascending: false });
 
+    const queryDuration = Date.now() - startTime;
+    console.log(`⏱️ [${requestId}] Supabase query took: ${queryDuration}ms`);
+
     if (wellenError) {
-      console.error('❌ Wellen query error:', wellenError);
+      console.error(`❌ [${requestId}] Wellen query error:`, wellenError);
+      console.error(`❌ [${requestId}] Error code: ${wellenError.code}, message: ${wellenError.message}`);
       throw wellenError;
     }
     
-    console.log(`📊 Raw wellen count from DB: ${wellen?.length || 0}`);
+    console.log(`📊 [${requestId}] Raw wellen count from DB: ${wellen?.length || 0}`);
+    
+    if (!wellen || wellen.length === 0) {
+      console.warn(`⚠️ [${requestId}] WARNING: No wellen found in database!`);
+      console.warn(`⚠️ [${requestId}] Returning empty array - this may indicate a connection issue`);
+    }
 
     // For each welle, fetch related data
     const wellenWithDetails = await Promise.all(
@@ -940,10 +953,14 @@ router.get('/', async (req: Request, res: Response) => {
       })
     );
 
-    console.log(`✅ Fetched ${wellenWithDetails.length} wellen`);
+    const totalDuration = Date.now() - startTime;
+    console.log(`✅ [${requestId}] Fetched ${wellenWithDetails.length} wellen in ${totalDuration}ms`);
+    console.log(`✅ [${requestId}] Wellen names: ${wellenWithDetails.map((w: any) => w.name).join(', ') || 'NONE'}`);
     res.json(wellenWithDetails);
   } catch (error: any) {
-    console.error('❌ Error fetching wellen:', error);
+    const totalDuration = Date.now() - startTime;
+    console.error(`❌ [${requestId}] Error fetching wellen after ${totalDuration}ms:`, error);
+    console.error(`❌ [${requestId}] Error stack:`, error.stack);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
