@@ -6,7 +6,7 @@ const router = Router();
 
 /**
  * GET /api/gebietsleiter
- * Get all gebietsleiter
+ * Get all active gebietsleiter
  */
 router.get('/', async (req: Request, res: Response) => {
   try {
@@ -14,7 +14,8 @@ router.get('/', async (req: Request, res: Response) => {
     
     const { data, error } = await supabase
       .from('gebietsleiter')
-      .select('id, name, address, postal_code, city, phone, email, profile_picture_url, created_at, updated_at')
+      .select('id, name, address, postal_code, city, phone, email, profile_picture_url, is_active, created_at, updated_at')
+      .neq('is_active', false) // Filter out inactive/deleted GLs
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -221,27 +222,52 @@ router.put('/:id', async (req: Request, res: Response) => {
 
 /**
  * DELETE /api/gebietsleiter/:id
- * Delete a gebietsleiter
+ * Deactivate a gebietsleiter - deletes auth user but keeps data for progress tracking
  */
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    console.log(`🗑️ Deleting gebietsleiter ${id}...`);
+    console.log(`🗑️ Deactivating gebietsleiter ${id}...`);
 
-    const { error } = await supabase
-      .from('gebietsleiter')
-      .delete()
-      .eq('id', id);
-
-    if (error) {
-      console.error('Supabase error:', error);
-      throw error;
+    // 1. Delete the Supabase Auth user so they can't login anymore
+    // The GL id is the same as the auth user id
+    const { error: authError } = await supabase.auth.admin.deleteUser(id);
+    
+    if (authError) {
+      console.error('Error deleting auth user:', authError);
+      // Continue even if auth deletion fails - the user might already be deleted
+      // or might not have an auth account
+    } else {
+      console.log(`✅ Deleted auth user ${id}`);
     }
 
-    console.log(`✅ Deleted gebietsleiter ${id}`);
+    // 2. Mark the GL as inactive instead of deleting the data
+    // This preserves progress tracking data
+    const { error: updateError } = await supabase
+      .from('gebietsleiter')
+      .update({ 
+        is_active: false,
+        email: `deleted_${Date.now()}_${id.substring(0, 8)}@deleted.local` // Change email to prevent conflicts
+      })
+      .eq('id', id);
+
+    if (updateError) {
+      console.error('Supabase error marking GL as inactive:', updateError);
+      // If update fails, try to delete as fallback (old behavior)
+      const { error: deleteError } = await supabase
+        .from('gebietsleiter')
+        .delete()
+        .eq('id', id);
+      
+      if (deleteError) {
+        throw deleteError;
+      }
+    }
+
+    console.log(`✅ Deactivated gebietsleiter ${id} - data preserved for progress tracking`);
     res.status(204).send();
   } catch (error: any) {
-    console.error('Error deleting gebietsleiter:', error);
+    console.error('Error deactivating gebietsleiter:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
