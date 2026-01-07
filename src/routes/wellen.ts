@@ -701,8 +701,6 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
       .or(`status.eq.active,status.eq.upcoming,and(status.eq.past,end_date.gte.${threeDaysAgo.toISOString().split('T')[0]})`)
       .order('start_date', { ascending: false });
 
-    console.log(`📊 Dashboard waves query returned: ${wellen?.length || 0} waves`);
-    console.log(`📋 Dashboard waves: ${(wellen || []).map(w => `${w.name}:${w.status}`).join(', ')}`);
 
     if (wellenError) throw wellenError;
 
