@@ -1062,6 +1062,20 @@ router.get('/', async (req: Request, res: Response) => {
           .from('wellen_markets')
           .select('market_id')
           .eq('welle_id', welle.id);
+        
+        // Count unique GLs that have markets assigned in this wave
+        let glsWithMarketsInWave = 0;
+        const waveMarketIds = (welleMarkets || []).map(wm => wm.market_id);
+        if (waveMarketIds.length > 0) {
+          const { data: marketsWithGL } = await freshClient
+            .from('markets')
+            .select('gebietsleiter_id')
+            .in('id', waveMarketIds)
+            .not('gebietsleiter_id', 'is', null);
+          
+          const uniqueGLsInWave = new Set((marketsWithGL || []).map(m => m.gebietsleiter_id));
+          glsWithMarketsInWave = uniqueGLsInWave.size;
+        }
 
         // Calculate progress aggregates
         const { data: progressData } = await freshClient
@@ -1115,7 +1129,7 @@ router.get('/', async (req: Request, res: Response) => {
           })),
           assignedMarketIds: (welleMarkets || []).map(wm => wm.market_id),
           participatingGLs: uniqueGLs,
-          totalGLs: 45 // TODO: Get actual total from users table
+          totalGLs: glsWithMarketsInWave // Number of GLs that have markets in this wave
         };
       })
     );
