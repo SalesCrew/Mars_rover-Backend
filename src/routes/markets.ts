@@ -103,6 +103,7 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
     let updated = 0;
     let notFound = 0;
     const unmatchedNames = new Set<string>();
+    const unmatchedMarketIds: string[] = [];
 
     for (const market of marketsToUpdate || []) {
       let matchedGL = null;
@@ -142,6 +143,7 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
         }
       } else {
         notFound++;
+        unmatchedMarketIds.push(market.id);
         if (market.gebietsleiter_name) {
           unmatchedNames.add(market.gebietsleiter_name);
         }
@@ -153,11 +155,32 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
       console.log(`⚠️ Unmatched GL names:`, Array.from(unmatchedNames));
     }
 
+    // Fetch detailed info for unmatched markets
+    const unmatchedMarkets: Array<{ id: string; name: string; glName: string | null; glEmail: string | null }> = [];
+    if (unmatchedMarketIds.length > 0) {
+      const { data: unmatchedMarketsData } = await supabase
+        .from('markets')
+        .select('id, name, gebietsleiter_name, gebietsleiter_email')
+        .in('id', unmatchedMarketIds);
+      
+      for (const m of unmatchedMarketsData || []) {
+        unmatchedMarkets.push({
+          id: m.id,
+          name: m.name || m.id,
+          glName: m.gebietsleiter_name,
+          glEmail: m.gebietsleiter_email
+        });
+      }
+    }
+    
+    console.log(`📋 Returning ${unmatchedMarkets.length} unmatched markets for manual assignment`);
+
     res.json({
       success: true,
       updated,
       notMatched: notFound,
-      unmatchedNames: Array.from(unmatchedNames)
+      unmatchedNames: Array.from(unmatchedNames),
+      unmatchedMarkets
     });
   } catch (error: any) {
     console.error('❌ Error during GL ID backfill:', error);
