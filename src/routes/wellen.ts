@@ -848,6 +848,13 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           kartonware = data || [];
         }
 
+        // Fetch KW days for this wave (for Vorbesteller status calculation)
+        const { data: kwDaysData } = await freshClient
+          .from('wellen_kw_days')
+          .select('kw, days')
+          .eq('welle_id', welle.id)
+          .order('kw_order', { ascending: true });
+        
         // Fetch assigned markets with gebietsleiter info - use fresh client
         const { data: welleMarkets } = await freshClient
           .from('wellen_markets')
@@ -954,8 +961,8 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
         let status = welle.status === 'past' ? 'finished' : welle.status;
         
         // If wave has kw_days (Vorbesteller), override status based on KW selling period
-        if (welle.kw_days && Array.isArray(welle.kw_days) && welle.kw_days.length > 0) {
-          const kwStatus = isWaveInKWSellPeriod(welle.kw_days);
+        if (kwDaysData && Array.isArray(kwDaysData) && kwDaysData.length > 0) {
+          const kwStatus = isWaveInKWSellPeriod(kwDaysData);
           if (kwStatus === 'before') {
             status = 'upcoming';
           } else if (kwStatus === 'active') {
