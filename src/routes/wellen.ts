@@ -771,11 +771,31 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           kartonware = data || [];
         }
 
-        // Fetch assigned markets count - use fresh client
+        // Fetch assigned markets with gebietsleiter info - use fresh client
         const { data: welleMarkets } = await freshClient
           .from('wellen_markets')
           .select('market_id')
           .eq('welle_id', welle.id);
+        
+        const waveMarketIds = (welleMarkets || []).map(wm => wm.market_id);
+        const totalWaveMarkets = waveMarketIds.length;
+        
+        // Get GL's markets in the wave for proportional goal calculation
+        let glWaveMarketCount = totalWaveMarkets; // Default to all if no GL filter
+        if (glFilter.length > 0 && waveMarketIds.length > 0) {
+          const { data: marketsData } = await freshClient
+            .from('markets')
+            .select('id, gebietsleiter_id')
+            .in('id', waveMarketIds);
+          
+          const glWaveMarkets = (marketsData || []).filter(m => 
+            glFilter.includes(m.gebietsleiter_id)
+          );
+          glWaveMarketCount = glWaveMarkets.length;
+        }
+        
+        // Calculate GL's proportional ratio
+        const glGoalRatio = totalWaveMarkets > 0 ? glWaveMarketCount / totalWaveMarkets : 0;
 
         // Fetch progress (optionally filtered by GL and item type) - use fresh client
         let progressData: any[] = [];
@@ -855,6 +875,18 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
 
         // Determine status
         const status = welle.status === 'past' ? 'finished' : welle.status;
+        
+        // Apply proportional goals when GL filter is active
+        // Formula: GL Target = Total Target × (GL's Markets in Wave / Total Markets in Wave)
+        const proportionalDisplayTarget = glFilter.length > 0 
+          ? Math.ceil(displayTarget * glGoalRatio) 
+          : displayTarget;
+        const proportionalKartonwareTarget = glFilter.length > 0 
+          ? Math.ceil(kartonwareTarget * glGoalRatio) 
+          : kartonwareTarget;
+        const proportionalGoalValue = glFilter.length > 0 && welle.goal_value
+          ? Math.round(welle.goal_value * glGoalRatio * 100) / 100
+          : welle.goal_value;
 
         return {
           id: welle.id,
@@ -864,13 +896,13 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           status,
           goalType: welle.goal_type,
           goalPercentage: welle.goal_percentage,
-          goalValue: welle.goal_value,
+          goalValue: proportionalGoalValue,
           currentValue: Math.round(currentValue * 100) / 100,
           displayCount,
-          displayTarget,
+          displayTarget: proportionalDisplayTarget,
           kartonwareCount,
-          kartonwareTarget,
-          assignedMarkets: (welleMarkets || []).length,
+          kartonwareTarget: proportionalKartonwareTarget,
+          assignedMarkets: glFilter.length > 0 ? glWaveMarketCount : totalWaveMarkets,
           participatingGLs
         };
       })
