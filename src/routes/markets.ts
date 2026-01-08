@@ -78,18 +78,22 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
     console.log(`📋 Found ${gls?.length || 0} active GLs`);
 
     // Create a map of normalized names to GL data
-    const glMap = new Map<string, { id: string; name: string; email: string }>();
+    const glNameMap = new Map<string, { id: string; name: string; email: string }>();
+    const glEmailMap = new Map<string, { id: string; name: string; email: string }>();
     for (const gl of gls || []) {
       const normalizedName = normalizeName(gl.name);
-      glMap.set(normalizedName, { id: gl.id, name: gl.name, email: gl.email });
-      console.log(`  GL: "${gl.name}" -> normalized: "${normalizedName}"`);
+      glNameMap.set(normalizedName, { id: gl.id, name: gl.name, email: gl.email });
+      // Also create email map for fallback matching
+      if (gl.email) {
+        glEmailMap.set(gl.email.toLowerCase().trim(), { id: gl.id, name: gl.name, email: gl.email });
+      }
+      console.log(`  GL: "${gl.name}" -> normalized: "${normalizedName}", email: "${gl.email}"`);
     }
 
-    // Fetch markets with gebietsleiter_name but no gebietsleiter_id
+    // Fetch markets with no gebietsleiter_id (they might have gebietsleiter_name or gebietsleiter_email)
     const { data: marketsToUpdate, error: marketsError } = await supabase
       .from('markets')
-      .select('id, gebietsleiter_name, gebietsleiter_id')
-      .not('gebietsleiter_name', 'is', null)
+      .select('id, gebietsleiter_name, gebietsleiter_email, gebietsleiter_id')
       .or('gebietsleiter_id.is.null,gebietsleiter_id.eq.');
 
     if (marketsError) throw marketsError;
@@ -101,8 +105,25 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
     const unmatchedNames = new Set<string>();
 
     for (const market of marketsToUpdate || []) {
-      const normalizedMarketGL = normalizeName(market.gebietsleiter_name);
-      const matchedGL = glMap.get(normalizedMarketGL);
+      let matchedGL = null;
+      
+      // First try: match by name
+      if (market.gebietsleiter_name) {
+        const normalizedMarketGL = normalizeName(market.gebietsleiter_name);
+        matchedGL = glNameMap.get(normalizedMarketGL);
+        if (matchedGL) {
+          console.log(`  ✓ Matched by name: "${market.gebietsleiter_name}" -> GL ${matchedGL.name}`);
+        }
+      }
+      
+      // Second try: match by email if name didn't match
+      if (!matchedGL && market.gebietsleiter_email) {
+        const normalizedEmail = market.gebietsleiter_email.toLowerCase().trim();
+        matchedGL = glEmailMap.get(normalizedEmail);
+        if (matchedGL) {
+          console.log(`  ✓ Matched by email: "${market.gebietsleiter_email}" -> GL ${matchedGL.name}`);
+        }
+      }
 
       if (matchedGL) {
         // Update the market with the GL ID and email
@@ -121,7 +142,9 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
         }
       } else {
         notFound++;
-        unmatchedNames.add(market.gebietsleiter_name);
+        if (market.gebietsleiter_name) {
+          unmatchedNames.add(market.gebietsleiter_name);
+        }
       }
     }
 
