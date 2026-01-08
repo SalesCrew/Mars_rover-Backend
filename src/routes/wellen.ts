@@ -367,9 +367,10 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
+        // Get ALL markets of this chain type (for total count)
         const { data: markets, error: marketsError } = await freshClient
           .from('markets')
-          .select('id')
+          .select('id, gebietsleiter_id')
           .in('chain', chainTypes);
         
         if (marketsError) throw marketsError;
@@ -431,10 +432,30 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
-        // Sum goal values from filtered wellen
-        const goalValue = (filteredWellen || [])
+        // Get unique market IDs that are in the waves (wave markets)
+        const waveMarketIds = [...new Set((welleMarkets || []).map(wm => wm.market_id))];
+        const totalWaveMarkets = waveMarketIds.length;
+        
+        // Calculate GL's markets that are in the wave
+        let glWaveMarketCount = totalWaveMarkets; // Default to all if no GL filter
+        if (glFilter.length > 0) {
+          // Find markets in the wave that belong to this GL
+          const glWaveMarkets = waveMarketIds.filter(marketId => {
+            const market = markets?.find(m => m.id === marketId);
+            return market && glFilter.includes(market.gebietsleiter_id);
+          });
+          glWaveMarketCount = glWaveMarkets.length;
+        }
+        
+        // Sum goal values from filtered wellen (total goal)
+        const totalGoalValue = (filteredWellen || [])
           .filter(w => welleIds.includes(w.id) && w.goal_type === 'value')
           .reduce((sum, w) => sum + (w.goal_value || 0), 0);
+        
+        // Calculate GL's proportional goal based on their market share IN THE WAVE
+        // Formula: GL Goal = Wave Goal × (GL's Markets in Wave / Total Markets in Wave)
+        const glGoalRatio = totalWaveMarkets > 0 ? glWaveMarketCount / totalWaveMarkets : 0;
+        const goalValue = glFilter.length > 0 ? totalGoalValue * glGoalRatio : totalGoalValue;
         
         // Get items filtered by type
         let displays: any[] = [];
@@ -499,7 +520,8 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           goalValue: Math.round(goalValue * 100) / 100,
           currentValue: Math.round(currentValue * 100) / 100,
           totalValue: Math.round(totalValue * 100) / 100,
-          totalMarkets,
+          // Return GL's wave market count when filtering, otherwise total wave markets
+          totalMarkets: glFilter.length > 0 ? glWaveMarketCount : totalWaveMarkets,
           marketsWithProgress: marketsWithProgressSet.size
         };
       })(),
@@ -522,9 +544,10 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
+        // Get ALL markets of this chain type (including gebietsleiter_id for GL filtering)
         const { data: markets, error: marketsError } = await freshClient
           .from('markets')
-          .select('id')
+          .select('id, gebietsleiter_id')
           .in('chain', chainTypes);
         
         if (marketsError) throw marketsError;
@@ -586,9 +609,30 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
-        const goalValue = (filteredWellen || [])
+        // Get unique market IDs that are in the waves (wave markets)
+        const waveMarketIds = [...new Set((welleMarkets || []).map(wm => wm.market_id))];
+        const totalWaveMarkets = waveMarketIds.length;
+        
+        // Calculate GL's markets that are in the wave
+        let glWaveMarketCount = totalWaveMarkets; // Default to all if no GL filter
+        if (glFilter.length > 0) {
+          // Find markets in the wave that belong to this GL
+          const glWaveMarkets = waveMarketIds.filter(marketId => {
+            const market = markets?.find(m => m.id === marketId);
+            return market && glFilter.includes(market.gebietsleiter_id);
+          });
+          glWaveMarketCount = glWaveMarkets.length;
+        }
+        
+        // Sum goal values from filtered wellen (total goal)
+        const totalGoalValue = (filteredWellen || [])
           .filter(w => welleIds.includes(w.id) && w.goal_type === 'value')
           .reduce((sum, w) => sum + (w.goal_value || 0), 0);
+        
+        // Calculate GL's proportional goal based on their market share IN THE WAVE
+        // Formula: GL Goal = Wave Goal × (GL's Markets in Wave / Total Markets in Wave)
+        const glGoalRatio = totalWaveMarkets > 0 ? glWaveMarketCount / totalWaveMarkets : 0;
+        const goalValue = glFilter.length > 0 ? totalGoalValue * glGoalRatio : totalGoalValue;
         
         // Get items filtered by type
         let displays: any[] = [];
@@ -651,7 +695,8 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           goalValue: Math.round(goalValue * 100) / 100,
           currentValue: Math.round(currentValue * 100) / 100,
           totalValue: Math.round(totalValue * 100) / 100,
-          totalMarkets,
+          // Return GL's wave market count when filtering, otherwise total wave markets
+          totalMarkets: glFilter.length > 0 ? glWaveMarketCount : totalWaveMarkets,
           marketsWithProgress: marketsWithProgressSet.size
         };
       })()
