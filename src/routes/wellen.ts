@@ -4,6 +4,83 @@ import { supabase, createFreshClient } from '../config/supabase';
 const router = Router();
 
 // ============================================================================
+// KW (Calendar Week) HELPER FUNCTIONS
+// ============================================================================
+
+// Get current day abbreviation in German
+const getCurrentDayAbbr = (): string => {
+  const days = ['SO', 'MO', 'DI', 'MI', 'DO', 'FR', 'SA'];
+  return days[new Date().getDay()];
+};
+
+// Get current calendar week number
+const getCurrentKWNumber = (): number => {
+  const now = new Date();
+  const startOfYear = new Date(now.getFullYear(), 0, 1);
+  const days = Math.floor((now.getTime() - startOfYear.getTime()) / (24 * 60 * 60 * 1000));
+  return Math.ceil((days + startOfYear.getDay() + 1) / 7);
+};
+
+// Extract just the number from a KW string (handles "KW2", "KW 2", "2", etc.)
+const extractKWNumber = (kwString: string): number => {
+  const match = kwString.match(/(\d+)/);
+  return match ? parseInt(match[1], 10) : -1;
+};
+
+// Day order for comparison (MO=1, DI=2, ... SO=7)
+const getDayOrder = (day: string): number => {
+  const dayOrder: { [key: string]: number } = { 'MO': 1, 'DI': 2, 'MI': 3, 'DO': 4, 'FR': 5, 'SA': 6, 'SO': 7 };
+  return dayOrder[day.toUpperCase()] || 0;
+};
+
+// Check if a wave with KW days is currently in its active selling period
+const isWaveInKWSellPeriod = (kwDays: Array<{ kw: string; days: string[] }> | null): 'before' | 'active' | 'after' => {
+  if (!kwDays || kwDays.length === 0) return 'active'; // No KW days = use regular status
+  
+  const currentKW = getCurrentKWNumber();
+  const currentDay = getCurrentDayAbbr();
+  const currentDayOrder = getDayOrder(currentDay);
+  
+  // Find min and max KW numbers
+  let minKW = Infinity, maxKW = -Infinity;
+  let minDayInMinKW = Infinity, maxDayInMaxKW = -Infinity;
+  
+  for (const kwDay of kwDays) {
+    const kwNum = extractKWNumber(kwDay.kw);
+    if (kwNum === -1) continue;
+    
+    if (kwNum < minKW) {
+      minKW = kwNum;
+      minDayInMinKW = Math.min(...kwDay.days.map(d => getDayOrder(d)));
+    } else if (kwNum === minKW) {
+      minDayInMinKW = Math.min(minDayInMinKW, ...kwDay.days.map(d => getDayOrder(d)));
+    }
+    
+    if (kwNum > maxKW) {
+      maxKW = kwNum;
+      maxDayInMaxKW = Math.max(...kwDay.days.map(d => getDayOrder(d)));
+    } else if (kwNum === maxKW) {
+      maxDayInMaxKW = Math.max(maxDayInMaxKW, ...kwDay.days.map(d => getDayOrder(d)));
+    }
+  }
+  
+  if (minKW === Infinity || maxKW === -Infinity) return 'active';
+  
+  // Check if before first selling day
+  if (currentKW < minKW || (currentKW === minKW && currentDayOrder < minDayInMinKW)) {
+    return 'before';
+  }
+  
+  // Check if after last selling day
+  if (currentKW > maxKW || (currentKW === maxKW && currentDayOrder > maxDayInMaxKW)) {
+    return 'after';
+  }
+  
+  // We're within the selling period
+  return 'active';
+};
+
+// ============================================================================
 // DASHBOARD: GET CHAIN AVERAGES
 // ============================================================================
 router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
@@ -873,8 +950,20 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
         // Count unique participating GLs
         const participatingGLs = new Set((progressData || []).map(p => p.gebietsleiter_id)).size;
 
-        // Determine status
-        const status = welle.status === 'past' ? 'finished' : welle.status;
+        // Determine status - for Vorbesteller waves with kw_days, use KW-based status
+        let status = welle.status === 'past' ? 'finished' : welle.status;
+        
+        // If wave has kw_days (Vorbesteller), override status based on KW selling period
+        if (welle.kw_days && Array.isArray(welle.kw_days) && welle.kw_days.length > 0) {
+          const kwStatus = isWaveInKWSellPeriod(welle.kw_days);
+          if (kwStatus === 'before') {
+            status = 'upcoming';
+          } else if (kwStatus === 'active') {
+            status = 'active';
+          } else if (kwStatus === 'after') {
+            status = 'finished';
+          }
+        }
         
         // Apply proportional goals when GL filter is active
         // Formula: GL Target = Total Target × (GL's Markets in Wave / Total Markets in Wave)
