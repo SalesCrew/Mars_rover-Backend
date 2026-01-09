@@ -1050,6 +1050,52 @@ router.get('/', async (req: Request, res: Response) => {
           .eq('welle_id', welle.id)
           .order('kartonware_order', { ascending: true });
 
+        // Fetch palettes with their products
+        const { data: paletten } = await freshClient
+          .from('wellen_paletten')
+          .select('*')
+          .eq('welle_id', welle.id)
+          .order('palette_order', { ascending: true });
+
+        // Fetch palette products for each palette
+        const palettenWithProducts = await Promise.all(
+          (paletten || []).map(async (palette) => {
+            const { data: products } = await freshClient
+              .from('wellen_paletten_products')
+              .select('*')
+              .eq('palette_id', palette.id)
+              .order('product_order', { ascending: true });
+            
+            return {
+              ...palette,
+              products: products || []
+            };
+          })
+        );
+
+        // Fetch schütten with their products
+        const { data: schuetten } = await freshClient
+          .from('wellen_schuetten')
+          .select('*')
+          .eq('welle_id', welle.id)
+          .order('schuette_order', { ascending: true });
+
+        // Fetch schütte products for each schütte
+        const schuettenWithProducts = await Promise.all(
+          (schuetten || []).map(async (schuette) => {
+            const { data: products } = await freshClient
+              .from('wellen_schuetten_products')
+              .select('*')
+              .eq('schuette_id', schuette.id)
+              .order('product_order', { ascending: true });
+            
+            return {
+              ...schuette,
+              products: products || []
+            };
+          })
+        );
+
         // Fetch KW days
         const { data: kwDays } = await freshClient
           .from('wellen_kw_days')
@@ -1085,10 +1131,12 @@ router.get('/', async (req: Request, res: Response) => {
 
         const uniqueGLs = new Set((progressData || []).map(p => p.gebietsleiter_id)).size;
 
-        // Derive types based on what displays/kartonware exist
-        const types: ('display' | 'kartonware')[] = [];
+        // Derive types based on what items exist
+        const types: ('display' | 'kartonware' | 'palette' | 'schuette')[] = [];
         if (displays && displays.length > 0) types.push('display');
         if (kartonware && kartonware.length > 0) types.push('kartonware');
+        if (palettenWithProducts && palettenWithProducts.length > 0) types.push('palette');
+        if (schuettenWithProducts && schuettenWithProducts.length > 0) types.push('schuette');
 
         return {
           id: welle.id,
@@ -1096,13 +1144,15 @@ router.get('/', async (req: Request, res: Response) => {
           image: welle.image_url,
           startDate: welle.start_date,
           endDate: welle.end_date,
-          types, // Derived from displays/kartonware
+          types, // Derived from displays/kartonware/palettes/schuetten
           status: welle.status,
           goalType: welle.goal_type,
           goalPercentage: welle.goal_percentage,
           goalValue: welle.goal_value,
           displayCount: displays?.length || 0,
           kartonwareCount: kartonware?.length || 0,
+          paletteCount: palettenWithProducts?.length || 0,
+          schutteCount: schuettenWithProducts?.length || 0,
           displays: (displays || []).map(d => ({
             id: d.id,
             name: d.name,
@@ -1122,6 +1172,32 @@ router.get('/', async (req: Request, res: Response) => {
               .reduce((sum, p) => sum + p.current_number, 0),
             picture: k.picture_url,
             itemValue: k.item_value
+          })),
+          paletteItems: palettenWithProducts.map(p => ({
+            id: p.id,
+            name: p.name,
+            size: p.size,
+            picture: p.picture_url,
+            products: p.products.map((prod: any) => ({
+              id: prod.id,
+              name: prod.name,
+              valuePerVE: prod.value_per_ve,
+              ve: prod.ve,
+              ean: prod.ean
+            }))
+          })),
+          schutteItems: schuettenWithProducts.map(s => ({
+            id: s.id,
+            name: s.name,
+            size: s.size,
+            picture: s.picture_url,
+            products: s.products.map((prod: any) => ({
+              id: prod.id,
+              name: prod.name,
+              valuePerVE: prod.value_per_ve,
+              ve: prod.ve,
+              ean: prod.ean
+            }))
           })),
           kwDays: (kwDays || []).map(kw => ({
             kw: kw.kw,
@@ -1262,9 +1338,20 @@ router.post('/', async (req: Request, res: Response) => {
       goalValue,
       displays,
       kartonwareItems,
+      paletteItems,
+      schutteItems,
       kwDays,
       assignedMarketIds
     } = req.body;
+
+    console.log('📦 Received data:', {
+      displays: displays?.length || 0,
+      kartonwareItems: kartonwareItems?.length || 0,
+      paletteItems: paletteItems?.length || 0,
+      schutteItems: schutteItems?.length || 0,
+      paletteItemsData: JSON.stringify(paletteItems),
+      schutteItemsData: JSON.stringify(schutteItems)
+    });
 
     // Validate required fields
     if (!name || !startDate || !endDate || !goalType) {
@@ -1337,6 +1424,100 @@ router.post('/', async (req: Request, res: Response) => {
       console.log(`✅ Created ${kartonwareItems.length} kartonware items`);
     }
 
+    // Insert palettes with their products
+    if (paletteItems && paletteItems.length > 0) {
+      console.log(`📦 Inserting ${paletteItems.length} palettes...`);
+      for (let index = 0; index < paletteItems.length; index++) {
+        const p = paletteItems[index];
+        console.log(`  Palette ${index}: ${p.name}, products: ${p.products?.length || 0}`);
+        
+        // Insert palette
+        const { data: palette, error: paletteError } = await supabase
+          .from('wellen_paletten')
+          .insert({
+            welle_id: welle.id,
+            name: p.name,
+            size: p.size || null,
+            picture_url: p.picture || null,
+            palette_order: index
+          })
+          .select()
+          .single();
+
+        if (paletteError) {
+          console.error('❌ Palette insert error:', paletteError);
+          throw paletteError;
+        }
+        console.log(`  ✅ Palette inserted with id: ${palette.id}`);
+
+        // Insert palette products
+        if (p.products && p.products.length > 0) {
+          const productsToInsert = p.products.map((prod: any, prodIndex: number) => ({
+            palette_id: palette.id,
+            name: prod.name,
+            value_per_ve: parseFloat(prod.value) || 0,
+            ve: parseInt(prod.ve) || 0,
+            ean: prod.ean || null,
+            product_order: prodIndex
+          }));
+
+          const { error: productsError } = await supabase
+            .from('wellen_paletten_products')
+            .insert(productsToInsert);
+
+          if (productsError) throw productsError;
+        }
+      }
+      console.log(`✅ Created ${paletteItems.length} palettes with products`);
+    }
+
+    // Insert schütten with their products
+    if (schutteItems && schutteItems.length > 0) {
+      console.log(`📦 Inserting ${schutteItems.length} schütten...`);
+      for (let index = 0; index < schutteItems.length; index++) {
+        const s = schutteItems[index];
+        console.log(`  Schütte ${index}: ${s.name}, products: ${s.products?.length || 0}`);
+        
+        // Insert schütte
+        const { data: schuette, error: schutteError } = await supabase
+          .from('wellen_schuetten')
+          .insert({
+            welle_id: welle.id,
+            name: s.name,
+            size: s.size || null,
+            picture_url: s.picture || null,
+            schuette_order: index
+          })
+          .select()
+          .single();
+
+        if (schutteError) {
+          console.error('❌ Schütte insert error:', schutteError);
+          throw schutteError;
+        }
+        console.log(`  ✅ Schütte inserted with id: ${schuette.id}`);
+
+        // Insert schütte products
+        if (s.products && s.products.length > 0) {
+          const productsToInsert = s.products.map((prod: any, prodIndex: number) => ({
+            schuette_id: schuette.id,
+            name: prod.name,
+            value_per_ve: parseFloat(prod.value) || 0,
+            ve: parseInt(prod.ve) || 0,
+            ean: prod.ean || null,
+            product_order: prodIndex
+          }));
+
+          const { error: productsError } = await supabase
+            .from('wellen_schuetten_products')
+            .insert(productsToInsert);
+
+          if (productsError) throw productsError;
+        }
+      }
+      console.log(`✅ Created ${schutteItems.length} schütten with products`);
+    }
+
     // Insert KW days
     if (kwDays && kwDays.length > 0) {
       const kwDaysToInsert = kwDays.map((kw: any, index: number) => ({
@@ -1397,6 +1578,8 @@ router.put('/:id', async (req: Request, res: Response) => {
       goalValue,
       displays,
       kartonwareItems,
+      paletteItems,
+      schutteItems,
       kwDays,
       assignedMarketIds
     } = req.body;
@@ -1501,6 +1684,107 @@ router.put('/:id', async (req: Request, res: Response) => {
           });
         }
       }
+    }
+
+    // Delete and recreate palettes with products
+    // First delete products (due to foreign key), then palettes
+    const { data: existingPalettes } = await freshClient
+      .from('wellen_paletten')
+      .select('id')
+      .eq('welle_id', id);
+    
+    if (existingPalettes && existingPalettes.length > 0) {
+      const paletteIds = existingPalettes.map(p => p.id);
+      await freshClient.from('wellen_paletten_products').delete().in('palette_id', paletteIds);
+      await freshClient.from('wellen_paletten').delete().eq('welle_id', id);
+    }
+    
+    if (paletteItems && paletteItems.length > 0) {
+      for (let index = 0; index < paletteItems.length; index++) {
+        const p = paletteItems[index];
+        
+        const { data: palette, error: paletteError } = await freshClient
+          .from('wellen_paletten')
+          .insert({
+            welle_id: id,
+            name: p.name,
+            size: p.size || null,
+            picture_url: p.picture || null,
+            palette_order: index
+          })
+          .select()
+          .single();
+
+        if (paletteError) throw paletteError;
+
+        if (p.products && p.products.length > 0) {
+          const productsToInsert = p.products.map((prod: any, prodIndex: number) => ({
+            palette_id: palette.id,
+            name: prod.name,
+            value_per_ve: parseFloat(prod.value) || 0,
+            ve: parseInt(prod.ve) || 0,
+            ean: prod.ean || null,
+            product_order: prodIndex
+          }));
+
+          const { error: productsError } = await freshClient
+            .from('wellen_paletten_products')
+            .insert(productsToInsert);
+
+          if (productsError) throw productsError;
+        }
+      }
+      console.log(`✅ Updated ${paletteItems.length} palettes with products`);
+    }
+
+    // Delete and recreate schütten with products
+    const { data: existingSchuetten } = await freshClient
+      .from('wellen_schuetten')
+      .select('id')
+      .eq('welle_id', id);
+    
+    if (existingSchuetten && existingSchuetten.length > 0) {
+      const schutteIds = existingSchuetten.map(s => s.id);
+      await freshClient.from('wellen_schuetten_products').delete().in('schuette_id', schutteIds);
+      await freshClient.from('wellen_schuetten').delete().eq('welle_id', id);
+    }
+    
+    if (schutteItems && schutteItems.length > 0) {
+      for (let index = 0; index < schutteItems.length; index++) {
+        const s = schutteItems[index];
+        
+        const { data: schuette, error: schutteError } = await freshClient
+          .from('wellen_schuetten')
+          .insert({
+            welle_id: id,
+            name: s.name,
+            size: s.size || null,
+            picture_url: s.picture || null,
+            schuette_order: index
+          })
+          .select()
+          .single();
+
+        if (schutteError) throw schutteError;
+
+        if (s.products && s.products.length > 0) {
+          const productsToInsert = s.products.map((prod: any, prodIndex: number) => ({
+            schuette_id: schuette.id,
+            name: prod.name,
+            value_per_ve: parseFloat(prod.value) || 0,
+            ve: parseInt(prod.ve) || 0,
+            ean: prod.ean || null,
+            product_order: prodIndex
+          }));
+
+          const { error: productsError } = await freshClient
+            .from('wellen_schuetten_products')
+            .insert(productsToInsert);
+
+          if (productsError) throw productsError;
+        }
+      }
+      console.log(`✅ Updated ${schutteItems.length} schütten with products`);
     }
 
     // Delete and recreate KW days
