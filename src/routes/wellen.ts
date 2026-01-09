@@ -1384,6 +1384,8 @@ router.put('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     console.log(`✏️ Updating welle ${id}...`);
+    
+    const freshClient = createFreshClient();
 
     const {
       name,
@@ -1400,7 +1402,7 @@ router.put('/:id', async (req: Request, res: Response) => {
     } = req.body;
 
     // Update main welle record
-    const { error: welleError } = await supabase
+    const { error: welleError } = await freshClient
       .from('wellen')
       .update({
         name,
@@ -1416,7 +1418,7 @@ router.put('/:id', async (req: Request, res: Response) => {
     if (welleError) throw welleError;
 
     // Update displays - preserve IDs to keep progress links
-    const { data: existingDisplays } = await supabase
+    const { data: existingDisplays } = await freshClient
       .from('wellen_displays')
       .select('id, name')
       .eq('welle_id', id);
@@ -1427,7 +1429,7 @@ router.put('/:id', async (req: Request, res: Response) => {
     // Delete displays that are no longer in the list
     const displaysToDelete = (existingDisplays || []).filter(d => !newDisplayNames.has(d.name)).map(d => d.id);
     if (displaysToDelete.length > 0) {
-      await supabase.from('wellen_displays').delete().in('id', displaysToDelete);
+      await freshClient.from('wellen_displays').delete().in('id', displaysToDelete);
     }
     
     // Update or insert displays
@@ -1438,7 +1440,7 @@ router.put('/:id', async (req: Request, res: Response) => {
         
         if (existingId) {
           // Update existing display (preserves ID for progress)
-          await supabase.from('wellen_displays').update({
+          await freshClient.from('wellen_displays').update({
             target_number: d.targetNumber,
             item_value: d.itemValue || null,
             picture_url: d.picture || null,
@@ -1446,7 +1448,7 @@ router.put('/:id', async (req: Request, res: Response) => {
           }).eq('id', existingId);
         } else {
           // Insert new display
-          await supabase.from('wellen_displays').insert({
+          await freshClient.from('wellen_displays').insert({
             welle_id: id,
             name: d.name,
             target_number: d.targetNumber,
@@ -1459,7 +1461,7 @@ router.put('/:id', async (req: Request, res: Response) => {
     }
 
     // Update kartonware - preserve IDs to keep progress links
-    const { data: existingKartonware } = await supabase
+    const { data: existingKartonware } = await freshClient
       .from('wellen_kartonware')
       .select('id, name')
       .eq('welle_id', id);
@@ -1470,7 +1472,7 @@ router.put('/:id', async (req: Request, res: Response) => {
     // Delete kartonware that is no longer in the list
     const kartonwareToDelete = (existingKartonware || []).filter(k => !newKartonwareNames.has(k.name)).map(k => k.id);
     if (kartonwareToDelete.length > 0) {
-      await supabase.from('wellen_kartonware').delete().in('id', kartonwareToDelete);
+      await freshClient.from('wellen_kartonware').delete().in('id', kartonwareToDelete);
     }
     
     // Update or insert kartonware
@@ -1481,7 +1483,7 @@ router.put('/:id', async (req: Request, res: Response) => {
         
         if (existingId) {
           // Update existing kartonware (preserves ID for progress)
-          await supabase.from('wellen_kartonware').update({
+          await freshClient.from('wellen_kartonware').update({
             target_number: k.targetNumber,
             item_value: k.itemValue || null,
             picture_url: k.picture || null,
@@ -1489,7 +1491,7 @@ router.put('/:id', async (req: Request, res: Response) => {
           }).eq('id', existingId);
         } else {
           // Insert new kartonware
-          await supabase.from('wellen_kartonware').insert({
+          await freshClient.from('wellen_kartonware').insert({
             welle_id: id,
             name: k.name,
             target_number: k.targetNumber,
@@ -1502,7 +1504,7 @@ router.put('/:id', async (req: Request, res: Response) => {
     }
 
     // Delete and recreate KW days
-    await supabase.from('wellen_kw_days').delete().eq('welle_id', id);
+    await freshClient.from('wellen_kw_days').delete().eq('welle_id', id);
     if (kwDays && kwDays.length > 0) {
       const kwDaysToInsert = kwDays.map((kw: any, index: number) => ({
         welle_id: id,
@@ -1510,17 +1512,17 @@ router.put('/:id', async (req: Request, res: Response) => {
         days: kw.days,
         kw_order: index
       }));
-      await supabase.from('wellen_kw_days').insert(kwDaysToInsert);
+      await freshClient.from('wellen_kw_days').insert(kwDaysToInsert);
     }
 
     // Delete and recreate market assignments
-    await supabase.from('wellen_markets').delete().eq('welle_id', id);
+    await freshClient.from('wellen_markets').delete().eq('welle_id', id);
     if (assignedMarketIds && assignedMarketIds.length > 0) {
       const marketsToInsert = assignedMarketIds.map((marketId: string) => ({
         welle_id: id,
         market_id: marketId
       }));
-      await supabase.from('wellen_markets').insert(marketsToInsert);
+      await freshClient.from('wellen_markets').insert(marketsToInsert);
     }
 
     console.log(`✅ Updated welle ${id}`);
@@ -1564,13 +1566,15 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
     const { gebietsleiter_id, items } = req.body;
 
     console.log(`📊 Batch updating GL progress for welle ${welleId}...`);
+    
+    const freshClient = createFreshClient();
 
     if (!gebietsleiter_id || !items || !Array.isArray(items)) {
       return res.status(400).json({ error: 'Missing required fields: gebietsleiter_id, items' });
     }
 
     // Fetch existing progress for this GL and welle
-    const { data: existingProgress } = await supabase
+    const { data: existingProgress } = await freshClient
       .from('wellen_gl_progress')
       .select('item_type, item_id, current_number')
       .eq('welle_id', welleId)
@@ -1598,7 +1602,7 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
       };
     });
 
-    const { error } = await supabase
+    const { error } = await freshClient
       .from('wellen_gl_progress')
       .upsert(progressEntries, {
         onConflict: 'welle_id,gebietsleiter_id,item_type,item_id'
@@ -1626,9 +1630,11 @@ router.post('/:id/progress', async (req: Request, res: Response) => {
     const { gebietsleiter_id, item_type, item_id, current_number } = req.body;
 
     console.log(`📊 Updating GL progress for welle ${welleId}...`);
+    
+    const freshClient = createFreshClient();
 
     // Fetch existing progress for this specific item
-    const { data: existing } = await supabase
+    const { data: existing } = await freshClient
       .from('wellen_gl_progress')
       .select('current_number')
       .eq('welle_id', welleId)
@@ -1641,7 +1647,7 @@ router.post('/:id/progress', async (req: Request, res: Response) => {
     const newTotal = existingValue + current_number;
 
     // Upsert with cumulative value
-    const { error } = await supabase
+    const { error } = await freshClient
       .from('wellen_gl_progress')
       .upsert({
         welle_id: welleId,
@@ -1670,8 +1676,10 @@ router.get('/:id/progress/:glId', async (req: Request, res: Response) => {
   try {
     const { id: welleId, glId } = req.params;
     console.log(`📊 Fetching GL progress for welle ${welleId}, GL ${glId}...`);
+    
+    const freshClient = createFreshClient();
 
-    const { data, error } = await supabase
+    const { data, error } = await freshClient
       .from('wellen_gl_progress')
       .select('*')
       .eq('welle_id', welleId)
@@ -1694,7 +1702,9 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
   try {
     const { id: welleId } = req.params;
     
-    const { data: progressEntries, error: progressError } = await supabase
+    const freshClient = createFreshClient();
+    
+    const { data: progressEntries, error: progressError } = await freshClient
       .from('wellen_gl_progress')
       .select('*')
       .eq('welle_id', welleId)
@@ -1714,11 +1724,11 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     const kartonwareIds = progressEntries.filter(p => p.item_type === 'kartonware').map(p => p.item_id).filter(Boolean);
 
     const [glsResult, glDetailsResult, marketsResult, displaysResult, kartonwareResult] = await Promise.all([
-      glIds.length > 0 ? supabase.from('users').select('id, email').in('id', glIds) : { data: [] },
-      glIds.length > 0 ? supabase.from('gebietsleiter').select('id, name').in('id', glIds) : { data: [] },
-      marketIds.length > 0 ? supabase.from('markets').select('id, name, chain').in('id', marketIds) : { data: [] },
-      displayIds.length > 0 ? supabase.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
-      kartonwareIds.length > 0 ? supabase.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] }
+      glIds.length > 0 ? freshClient.from('users').select('id, email').in('id', glIds) : { data: [] },
+      glIds.length > 0 ? freshClient.from('gebietsleiter').select('id, name').in('id', glIds) : { data: [] },
+      marketIds.length > 0 ? freshClient.from('markets').select('id, name, chain').in('id', marketIds) : { data: [] },
+      displayIds.length > 0 ? freshClient.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
+      kartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] }
     ]);
 
     const gls = glsResult.data || [];
@@ -1763,6 +1773,8 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
   try {
     const { glId } = req.params;
     
+    const freshClient = createFreshClient();
+    
     // Chain groupings (same as dashboard)
     const chainGroups = {
       billa: ['Adeg', 'Billa+', 'BILLA+', 'BILLA Plus', 'BILLA+ Privat', 'BILLA Plus Privat', 'BILLA Privat'],
@@ -1772,7 +1784,7 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
     };
 
     // Get all progress entries for this GL
-    const { data: allProgress, error: progressError } = await supabase
+    const { data: allProgress, error: progressError } = await freshClient
       .from('wellen_gl_progress')
       .select('*')
       .eq('gebietsleiter_id', glId)
@@ -1793,7 +1805,7 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
     const marketIds = [...new Set(allProgress.map(p => p.market_id).filter(Boolean))];
     let markets: any[] = [];
     if (marketIds.length > 0) {
-      const { data } = await supabase.from('markets').select('id, chain').in('id', marketIds);
+      const { data } = await freshClient.from('markets').select('id, chain').in('id', marketIds);
       markets = data || [];
     }
 
@@ -1806,10 +1818,10 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
     
     if (welleIds.length > 0) {
       const [displaysResult, kartonwareResult, welleMarketsResult, wellenResult] = await Promise.all([
-        supabase.from('wellen_displays').select('id, target_number, welle_id').in('welle_id', welleIds),
-        supabase.from('wellen_kartonware').select('id, target_number, welle_id').in('welle_id', welleIds),
-        supabase.from('wellen_markets').select('welle_id, market_id').in('welle_id', welleIds),
-        supabase.from('wellen').select('id, name').in('id', welleIds)
+        freshClient.from('wellen_displays').select('id, target_number, welle_id').in('welle_id', welleIds),
+        freshClient.from('wellen_kartonware').select('id, target_number, welle_id').in('welle_id', welleIds),
+        freshClient.from('wellen_markets').select('welle_id, market_id').in('welle_id', welleIds),
+        freshClient.from('wellen').select('id, name').in('id', welleIds)
       ]);
       displays = displaysResult.data || [];
       kartonware = kartonwareResult.data || [];
@@ -1820,7 +1832,7 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
     // Get all markets that are assigned to these wellen (for fallback chain detection)
     const welleMarketIds = [...new Set(welleMarkets.map(wm => wm.market_id))];
     if (welleMarketIds.length > 0) {
-      const { data: additionalMarkets } = await supabase.from('markets').select('id, chain').in('id', welleMarketIds);
+      const { data: additionalMarkets } = await freshClient.from('markets').select('id, chain').in('id', welleMarketIds);
       if (additionalMarkets) {
         // Merge with existing markets, avoiding duplicates
         const existingIds = new Set(markets.map(m => m.id));
@@ -1833,7 +1845,7 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
     }
 
     // Get number of GLs for goal calculation
-    const { count: glCount } = await supabase.from('gebietsleiter').select('id', { count: 'exact', head: true });
+    const { count: glCount } = await freshClient.from('gebietsleiter').select('id', { count: 'exact', head: true });
     const numGLs = glCount || 1;
 
     // Helper to get calendar week from date

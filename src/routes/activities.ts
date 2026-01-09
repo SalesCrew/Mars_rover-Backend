@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { supabase } from '../config/supabase';
+import { supabase, createFreshClient } from '../config/supabase';
 
 const router = Router();
 
@@ -27,8 +27,10 @@ router.get('/', async (req: Request, res: Response) => {
     
     console.log('📊 Fetching combined activities...');
     
+    const freshClient = createFreshClient();
+    
     // Fetch vorbestellungen (wellen_gl_progress)
-    const { data: progressData, error: progressError } = await supabase
+    const { data: progressData, error: progressError } = await freshClient
       .from('wellen_gl_progress')
       .select('*')
       .order('updated_at', { ascending: false })
@@ -37,7 +39,7 @@ router.get('/', async (req: Request, res: Response) => {
     if (progressError) console.error('Progress error:', progressError);
     
     // Fetch vorverkäufe
-    const { data: vorverkaufData, error: vorverkaufError } = await supabase
+    const { data: vorverkaufData, error: vorverkaufError } = await freshClient
       .from('vorverkauf_entries')
       .select('*')
       .order('created_at', { ascending: false })
@@ -65,11 +67,11 @@ router.get('/', async (req: Request, res: Response) => {
     
     // Fetch related data
     const [glsResult, marketsResult, wellenResult, displaysResult, kartonwareResult] = await Promise.all([
-      glIds.length > 0 ? supabase.from('gebietsleiter').select('id, name').in('id', glIds) : { data: [] },
-      marketIds.length > 0 ? supabase.from('markets').select('id, name, chain, address, city').in('id', marketIds) : { data: [] },
-      welleIds.length > 0 ? supabase.from('wellen').select('id, name').in('id', welleIds) : { data: [] },
-      displayIds.length > 0 ? supabase.from('wellen_displays').select('id, name').in('id', displayIds) : { data: [] },
-      kartonwareIds.length > 0 ? supabase.from('wellen_kartonware').select('id, name').in('id', kartonwareIds) : { data: [] }
+      glIds.length > 0 ? freshClient.from('gebietsleiter').select('id, name').in('id', glIds) : { data: [] },
+      marketIds.length > 0 ? freshClient.from('markets').select('id, name, chain, address, city').in('id', marketIds) : { data: [] },
+      welleIds.length > 0 ? freshClient.from('wellen').select('id, name').in('id', welleIds) : { data: [] },
+      displayIds.length > 0 ? freshClient.from('wellen_displays').select('id, name').in('id', displayIds) : { data: [] },
+      kartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, name').in('id', kartonwareIds) : { data: [] }
     ]);
     
     const gls = glsResult.data || [];
@@ -81,7 +83,7 @@ router.get('/', async (req: Request, res: Response) => {
     // Get welle markets for progress entries
     let welleMarkets: any[] = [];
     if (welleIds.length > 0) {
-      const { data } = await supabase
+      const { data } = await freshClient
         .from('wellen_markets')
         .select('welle_id, market_id')
         .in('welle_id', welleIds);
@@ -90,7 +92,7 @@ router.get('/', async (req: Request, res: Response) => {
       // Get those market details
       const progressMarketIds = [...new Set(welleMarkets.map(wm => wm.market_id))];
       if (progressMarketIds.length > 0) {
-        const { data: progressMarketsData } = await supabase
+        const { data: progressMarketsData } = await freshClient
           .from('markets')
           .select('id, name, chain, address, city')
           .in('id', progressMarketIds);
@@ -182,7 +184,9 @@ router.put('/vorbestellung/:id', async (req: Request, res: Response) => {
     
     console.log(`📝 Updating vorbestellung ${id}...`);
     
-    const { data, error } = await supabase
+    const freshClient = createFreshClient();
+    
+    const { data, error } = await freshClient
       .from('wellen_gl_progress')
       .update({ current_number, updated_at: new Date().toISOString() })
       .eq('id', id)
@@ -209,11 +213,13 @@ router.put('/vorverkauf/:id', async (req: Request, res: Response) => {
     
     console.log(`📝 Updating vorverkauf ${id}...`);
     
+    const freshClient = createFreshClient();
+    
     const updateData: any = {};
     if (reason !== undefined) updateData.reason = reason;
     if (notes !== undefined) updateData.notes = notes;
     
-    const { data, error } = await supabase
+    const { data, error } = await freshClient
       .from('vorverkauf_entries')
       .update(updateData)
       .eq('id', id)
@@ -239,15 +245,17 @@ router.delete('/:type/:id', async (req: Request, res: Response) => {
     
     console.log(`🗑️ Deleting ${type} ${id}...`);
     
+    const freshClient = createFreshClient();
+    
     if (type === 'vorbestellung') {
-      const { error } = await supabase
+      const { error } = await freshClient
         .from('wellen_gl_progress')
         .delete()
         .eq('id', id);
       
       if (error) throw error;
     } else if (type === 'vorverkauf') {
-      const { error } = await supabase
+      const { error } = await freshClient
         .from('vorverkauf_entries')
         .delete()
         .eq('id', id);

@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { supabase } from '../config/supabase';
+import { supabase, createFreshClient } from '../config/supabase';
 import bcrypt from 'bcrypt';
 
 const router = Router();
@@ -12,7 +12,9 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     console.log('📋 Fetching all gebietsleiter...');
     
-    const { data, error } = await supabase
+    const freshClient = createFreshClient();
+    
+    const { data, error } = await freshClient
       .from('gebietsleiter')
       .select('id, name, address, postal_code, city, phone, email, profile_picture_url, is_active, created_at, updated_at')
       .neq('is_active', false) // Filter out inactive/deleted GLs
@@ -39,8 +41,10 @@ router.get('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     console.log(`📋 Fetching gebietsleiter ${id}...`);
+    
+    const freshClient = createFreshClient();
 
-    const { data, error } = await supabase
+    const { data, error } = await freshClient
       .from('gebietsleiter')
       .select('id, name, address, postal_code, city, phone, email, profile_picture_url, created_at, updated_at')
       .eq('id', id)
@@ -104,10 +108,12 @@ router.post('/', async (req: Request, res: Response) => {
 
     const authUserId = authData.user.id;
     console.log(`✅ Created Supabase Auth user: ${authUserId}`);
+    
+    const freshClient = createFreshClient();
 
     // Step 2: Create entry in users table with role 'gl'
     console.log('👤 Creating users table entry...');
-    const { error: userError } = await supabase
+    const { error: userError } = await freshClient
       .from('users')
       .insert({
         id: authUserId,
@@ -128,7 +134,7 @@ router.post('/', async (req: Request, res: Response) => {
 
     // Step 3: Insert into gebietsleiter table
     console.log('📋 Creating gebietsleiter table entry...');
-    const { data, error } = await supabase
+    const { data, error } = await freshClient
       .from('gebietsleiter')
       .insert({
         id: authUserId, // Use same ID as auth user for consistency
@@ -148,7 +154,7 @@ router.post('/', async (req: Request, res: Response) => {
       console.error('Gebietsleiter table error:', error);
       
       // Clean up on failure
-      await supabase.from('users').delete().eq('id', authUserId);
+      await freshClient.from('users').delete().eq('id', authUserId);
       await supabase.auth.admin.deleteUser(authUserId);
       
       // Check for unique constraint violation (duplicate email)
@@ -175,6 +181,8 @@ router.put('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     console.log(`✏️ Updating gebietsleiter ${id}...`);
+    
+    const freshClient = createFreshClient();
 
     const { name, address, postalCode, city, phone, email, password, profilePictureUrl } = req.body;
 
@@ -194,7 +202,7 @@ router.put('/:id', async (req: Request, res: Response) => {
       updateData.password_hash = await bcrypt.hash(password, saltRounds);
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await freshClient
       .from('gebietsleiter')
       .update(updateData)
       .eq('id', id)
@@ -228,6 +236,8 @@ router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     console.log(`🗑️ Deactivating gebietsleiter ${id}...`);
+    
+    const freshClient = createFreshClient();
 
     // 1. Delete the Supabase Auth user so they can't login anymore
     // The GL id is the same as the auth user id
@@ -243,7 +253,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
 
     // 2. Mark the GL as inactive instead of deleting the data
     // This preserves progress tracking data
-    const { error: updateError } = await supabase
+    const { error: updateError } = await freshClient
       .from('gebietsleiter')
       .update({ 
         is_active: false,
@@ -254,7 +264,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
     if (updateError) {
       console.error('Supabase error marking GL as inactive:', updateError);
       // If update fails, try to delete as fallback (old behavior)
-      const { error: deleteError } = await supabase
+      const { error: deleteError } = await freshClient
         .from('gebietsleiter')
         .delete()
         .eq('id', id);
@@ -282,6 +292,8 @@ router.post('/:id/change-password', async (req: Request, res: Response) => {
     const { currentPassword, newPassword } = req.body;
     
     console.log(`🔐 Password change request for gebietsleiter ${id}...`);
+    
+    const freshClient = createFreshClient();
 
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ error: 'Current password and new password are required' });
@@ -292,7 +304,7 @@ router.post('/:id/change-password', async (req: Request, res: Response) => {
     }
 
     // Get the gebietsleiter email
-    const { data: gl, error: glError } = await supabase
+    const { data: gl, error: glError } = await freshClient
       .from('gebietsleiter')
       .select('email')
       .eq('id', id)
@@ -340,12 +352,14 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     console.log(`📊 Fetching dashboard stats for GL ${id}...`);
+    
+    const freshClient = createFreshClient();
 
     const currentYear = new Date().getFullYear();
     const yearStart = new Date(currentYear, 0, 1).toISOString();
 
     // 1. Get GL's total vorbesteller value YTD (from wellen_gl_progress)
-    const { data: glProgress, error: progressError } = await supabase
+    const { data: glProgress, error: progressError } = await freshClient
       .from('wellen_gl_progress')
       .select('current_number, item_type, item_id')
       .eq('gebietsleiter_id', id)
@@ -360,7 +374,7 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
     let glYearTotal = 0;
 
     if (displayIds.length > 0) {
-      const { data: displays } = await supabase
+      const { data: displays } = await freshClient
         .from('wellen_displays')
         .select('id, item_value')
         .in('id', displayIds);
@@ -374,7 +388,7 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
     }
 
     if (kartonwareIds.length > 0) {
-      const { data: kartonware } = await supabase
+      const { data: kartonware } = await freshClient
         .from('wellen_kartonware')
         .select('id, item_value')
         .in('id', kartonwareIds);
@@ -388,10 +402,10 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
     }
 
     // 2. Get agency average (all GLs' total)
-    const { data: allGLs } = await supabase.from('gebietsleiter').select('id');
+    const { data: allGLs } = await freshClient.from('gebietsleiter').select('id');
     const glCount = allGLs?.length || 1;
 
-    const { data: allProgress } = await supabase
+    const { data: allProgress } = await freshClient
       .from('wellen_gl_progress')
       .select('current_number, item_type, item_id, gebietsleiter_id')
       .gte('created_at', yearStart);
@@ -401,7 +415,7 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
     const allKartonwareIds = [...new Set(allProgress?.filter(p => p.item_type === 'kartonware').map(p => p.item_id) || [])];
 
     if (allDisplayIds.length > 0) {
-      const { data: displays } = await supabase.from('wellen_displays').select('id, item_value').in('id', allDisplayIds);
+      const { data: displays } = await freshClient.from('wellen_displays').select('id, item_value').in('id', allDisplayIds);
       if (displays && allProgress) {
         allProgress.filter(p => p.item_type === 'display').forEach(p => {
           const display = displays.find(d => d.id === p.item_id);
@@ -411,7 +425,7 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
     }
 
     if (allKartonwareIds.length > 0) {
-      const { data: kartonware } = await supabase.from('wellen_kartonware').select('id, item_value').in('id', allKartonwareIds);
+      const { data: kartonware } = await freshClient.from('wellen_kartonware').select('id, item_value').in('id', allKartonwareIds);
       if (kartonware && allProgress) {
         allProgress.filter(p => p.item_type === 'kartonware').forEach(p => {
           const item = kartonware.find(k => k.id === p.item_id);
@@ -424,14 +438,14 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
     const percentageChange = agencyAverage > 0 ? ((glYearTotal - agencyAverage) / agencyAverage) * 100 : 0;
 
     // 3. Get Vorverkauf count (from vorverkauf_submissions table)
-    const { count: vorverkaufCount } = await supabase
+    const { count: vorverkaufCount } = await freshClient
       .from('vorverkauf_submissions')
       .select('id', { count: 'exact', head: true })
       .eq('gebietsleiter_id', id);
 
     // 4. Get Vorbestellung count (unique submissions - group by market_id + date)
     // Each batch submission to a market on a day counts as 1 Vorbestellung
-    const { data: vorbestellerProgress } = await supabase
+    const { data: vorbestellerProgress } = await freshClient
       .from('wellen_gl_progress')
       .select('market_id, created_at')
       .eq('gebietsleiter_id', id)
@@ -446,7 +460,7 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
     const vorbestellungCount = uniqueVorbestellungen.size;
 
     // 5. Get total markets assigned to this GL (via gebietsleiter_id field in markets table)
-    const { count: totalAssignedMarkets } = await supabase
+    const { count: totalAssignedMarkets } = await freshClient
       .from('markets')
       .select('id', { count: 'exact', head: true })
       .eq('gebietsleiter_id', id)
@@ -456,27 +470,27 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
     // Sources: market visits (last_visit_date), vorverkauf_submissions, wellen_gl_progress, vorverkauf_entries
     
     // Get markets with last_visit_date for this GL
-    const { data: visitedMarketsData } = await supabase
+    const { data: visitedMarketsData } = await freshClient
       .from('markets')
       .select('id, last_visit_date')
       .eq('gebietsleiter_id', id)
       .not('last_visit_date', 'is', null);
 
     // Get vorbesteller progress (market + date)
-    const { data: vorbestellerVisits } = await supabase
+    const { data: vorbestellerVisits } = await freshClient
       .from('wellen_gl_progress')
       .select('market_id, created_at')
       .eq('gebietsleiter_id', id)
       .not('market_id', 'is', null);
 
     // Get vorverkauf submissions (market + date)
-    const { data: vorverkaufVisits } = await supabase
+    const { data: vorverkaufVisits } = await freshClient
       .from('vorverkauf_submissions')
       .select('market_id, created_at')
       .eq('gebietsleiter_id', id);
 
     // Get produktersatz entries (market + date)
-    const { data: produktersatzVisits } = await supabase
+    const { data: produktersatzVisits } = await freshClient
       .from('vorverkauf_entries')
       .select('market_id, created_at')
       .eq('gebietsleiter_id', id);
@@ -560,13 +574,15 @@ router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     console.log(`📍 Fetching smart suggested markets for GL ${id}...`);
+    
+    const freshClient = createFreshClient();
 
     const now = new Date();
     const currentKW = getCurrentKWNumber();
     const currentDay = getCurrentDayAbbr();
 
     // 1. Get ALL markets assigned to this GL (via gebietsleiter_id field)
-    const { data: glMarkets } = await supabase
+    const { data: glMarkets } = await freshClient
       .from('markets')
       .select('id, name, address, city, postal_code, chain, frequency, last_visit_date, current_visits')
       .eq('gebietsleiter_id', id)
@@ -580,7 +596,7 @@ router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
     const marketIds = glMarkets.map(m => m.id);
 
     // 2. Get active Vorbesteller waves with KW days
-    const { data: vorbestellerWaves } = await supabase
+    const { data: vorbestellerWaves } = await freshClient
       .from('wellen')
       .select('id, name')
       .eq('status', 'active');
@@ -589,7 +605,7 @@ router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
     let vorbestellerKwDays: { welle_id: string; kw: string; days: string[] }[] = [];
     if (vorbestellerWaves && vorbestellerWaves.length > 0) {
       const waveIds = vorbestellerWaves.map(w => w.id);
-      const { data: kwDaysData } = await supabase
+      const { data: kwDaysData } = await freshClient
         .from('wellen_kw_days')
         .select('welle_id, kw, days')
         .in('welle_id', waveIds);
@@ -602,7 +618,7 @@ router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
     let vorbestellerMarketIds: Set<string> = new Set();
     if (vorbestellerWaves && vorbestellerWaves.length > 0) {
       const waveIds = vorbestellerWaves.map(w => w.id);
-      const { data: wellenMarkets } = await supabase
+      const { data: wellenMarkets } = await freshClient
         .from('wellen_markets')
         .select('market_id, welle_id')
         .in('welle_id', waveIds)
@@ -622,7 +638,7 @@ router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
     });
 
     // 3. Get active Vorverkauf waves
-    const { data: vorverkaufWaves } = await supabase
+    const { data: vorverkaufWaves } = await freshClient
       .from('vorverkauf_wellen')
       .select('id, name, start_date, end_date')
       .eq('status', 'active');
@@ -631,7 +647,7 @@ router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
     let vorverkaufMarketData: Map<string, { endDate: Date; daysUntilEnd: number }> = new Map();
     if (vorverkaufWaves && vorverkaufWaves.length > 0) {
       const waveIds = vorverkaufWaves.map(w => w.id);
-      const { data: vvMarkets } = await supabase
+      const { data: vvMarkets } = await freshClient
         .from('vorverkauf_wellen_markets')
         .select('market_id, welle_id')
         .in('welle_id', waveIds)

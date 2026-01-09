@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { supabase } from '../config/supabase';
+import { supabase, createFreshClient } from '../config/supabase';
 
 const router = Router();
 
@@ -20,14 +20,16 @@ const determineStatus = (startDate: string, endDate: string): 'upcoming' | 'acti
 // ============================================================================
 router.get('/', async (_req: Request, res: Response) => {
   try {
+    const freshClient = createFreshClient();
+    
     // First update statuses based on dates (ignore errors if function doesn't exist)
     try {
-      await supabase.rpc('update_vorverkauf_welle_status');
+      await freshClient.rpc('update_vorverkauf_welle_status');
     } catch {
       // Function might not exist yet, ignore
     }
 
-    const { data: wellen, error } = await supabase
+    const { data: wellen, error } = await freshClient
       .from('vorverkauf_wellen')
       .select('*')
       .order('start_date', { ascending: false });
@@ -36,7 +38,7 @@ router.get('/', async (_req: Request, res: Response) => {
 
     // Get market counts for each welle
     const wellenWithCounts = await Promise.all((wellen || []).map(async (welle) => {
-      const { data: markets } = await supabase
+      const { data: markets } = await freshClient
         .from('vorverkauf_wellen_markets')
         .select('market_id')
         .eq('welle_id', welle.id);
@@ -70,9 +72,11 @@ router.get('/gl/:glId', async (req: Request, res: Response) => {
     const { glId } = req.params;
 
     console.log('Fetching vorverkauf wellen for GL:', glId);
+    
+    const freshClient = createFreshClient();
 
     // Get ALL active/upcoming wellen first (since markets may not be assigned to GL yet)
-    const { data: wellen, error: wellenError } = await supabase
+    const { data: wellen, error: wellenError } = await freshClient
       .from('vorverkauf_wellen')
       .select('*')
       .order('start_date', { ascending: true });
@@ -107,8 +111,10 @@ router.get('/gl/:glId', async (req: Request, res: Response) => {
 router.get('/submissions/:waveId', async (req: Request, res: Response) => {
   try {
     const { waveId } = req.params;
+    
+    const freshClient = createFreshClient();
 
-    const { data: submissions, error: submissionsError } = await supabase
+    const { data: submissions, error: submissionsError } = await freshClient
       .from('vorverkauf_submissions')
       .select(`
         *,
@@ -125,7 +131,7 @@ router.get('/submissions/:waveId', async (req: Request, res: Response) => {
 
     // Get products for each submission
     const submissionsWithProducts = await Promise.all((submissions || []).map(async (sub) => {
-      const { data: products } = await supabase
+      const { data: products } = await freshClient
         .from('vorverkauf_submission_products')
         .select(`
           *,
@@ -174,9 +180,11 @@ router.get('/submissions/:waveId', async (req: Request, res: Response) => {
 router.get('/stats/:waveId', async (req: Request, res: Response) => {
   try {
     const { waveId } = req.params;
+    
+    const freshClient = createFreshClient();
 
     // Get submission count
-    const { data: submissions, error: submissionsError } = await supabase
+    const { data: submissions, error: submissionsError } = await freshClient
       .from('vorverkauf_submissions')
       .select('id, gebietsleiter_id, market_id')
       .eq('vorverkauf_welle_id', waveId);
@@ -190,7 +198,7 @@ router.get('/stats/:waveId', async (req: Request, res: Response) => {
     let totalProducts = 0;
 
     if (submissionIds.length > 0) {
-      const { data: products } = await supabase
+      const { data: products } = await freshClient
         .from('vorverkauf_submission_products')
         .select('quantity, reason')
         .in('submission_id', submissionIds);
@@ -222,8 +230,10 @@ router.get('/stats/:waveId', async (req: Request, res: Response) => {
 router.get('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    
+    const freshClient = createFreshClient();
 
-    const { data: welle, error } = await supabase
+    const { data: welle, error } = await freshClient
       .from('vorverkauf_wellen')
       .select('*')
       .eq('id', id)
@@ -235,7 +245,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     }
 
     // Get assigned markets
-    const { data: markets } = await supabase
+    const { data: markets } = await freshClient
       .from('vorverkauf_wellen_markets')
       .select('market_id')
       .eq('welle_id', id);
@@ -267,11 +277,13 @@ router.post('/', async (req: Request, res: Response) => {
     if (!name || !startDate || !endDate) {
       return res.status(400).json({ error: 'Name, startDate, and endDate are required' });
     }
+    
+    const freshClient = createFreshClient();
 
     const status = determineStatus(startDate, endDate);
 
     // Insert welle
-    const { data: welle, error: welleError } = await supabase
+    const { data: welle, error: welleError } = await freshClient
       .from('vorverkauf_wellen')
       .insert({
         name,
@@ -292,7 +304,7 @@ router.post('/', async (req: Request, res: Response) => {
         market_id: marketId
       }));
 
-      const { error: marketsError } = await supabase
+      const { error: marketsError } = await freshClient
         .from('vorverkauf_wellen_markets')
         .insert(marketInserts);
 
@@ -326,11 +338,13 @@ router.put('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { name, image, startDate, endDate, assignedMarketIds } = req.body;
+    
+    const freshClient = createFreshClient();
 
     const status = determineStatus(startDate, endDate);
 
     // Update welle
-    const { data: welle, error: welleError } = await supabase
+    const { data: welle, error: welleError } = await freshClient
       .from('vorverkauf_wellen')
       .update({
         name,
@@ -348,7 +362,7 @@ router.put('/:id', async (req: Request, res: Response) => {
     // Update market assignments
     if (assignedMarketIds !== undefined) {
       // Delete existing assignments
-      await supabase
+      await freshClient
         .from('vorverkauf_wellen_markets')
         .delete()
         .eq('welle_id', id);
@@ -360,7 +374,7 @@ router.put('/:id', async (req: Request, res: Response) => {
           market_id: marketId
         }));
 
-        await supabase
+        await freshClient
           .from('vorverkauf_wellen_markets')
           .insert(marketInserts);
       }
@@ -389,8 +403,10 @@ router.put('/:id', async (req: Request, res: Response) => {
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    
+    const freshClient = createFreshClient();
 
-    const { error } = await supabase
+    const { error } = await freshClient
       .from('vorverkauf_wellen')
       .delete()
       .eq('id', id);
@@ -413,9 +429,11 @@ router.get('/:id/markets', async (req: Request, res: Response) => {
     const { id } = req.params;
 
     console.log('Fetching markets for vorverkauf welle:', id);
+    
+    const freshClient = createFreshClient();
 
     // Get markets assigned to this welle
-    const { data: welleMarkets, error: welleMarketsError } = await supabase
+    const { data: welleMarkets, error: welleMarketsError } = await freshClient
       .from('vorverkauf_wellen_markets')
       .select('market_id')
       .eq('welle_id', id);
@@ -435,7 +453,7 @@ router.get('/:id/markets', async (req: Request, res: Response) => {
     }
 
     // Get all market details for assigned markets
-    const { data: markets, error: marketsError } = await supabase
+    const { data: markets, error: marketsError } = await freshClient
       .from('markets')
       .select('*')
       .in('id', marketIds);
@@ -481,9 +499,11 @@ router.post('/submit', async (req: Request, res: Response) => {
         error: 'welleId, gebietsleiter_id, market_id, and products are required' 
       });
     }
+    
+    const freshClient = createFreshClient();
 
     // Create submission entry
-    const { data: submission, error: submissionError } = await supabase
+    const { data: submission, error: submissionError } = await freshClient
       .from('vorverkauf_submissions')
       .insert({
         vorverkauf_welle_id: welleId,
@@ -504,7 +524,7 @@ router.post('/submit', async (req: Request, res: Response) => {
       reason: p.reason
     }));
 
-    const { error: productsError } = await supabase
+    const { error: productsError } = await freshClient
       .from('vorverkauf_submission_products')
       .insert(productInserts);
 
@@ -512,14 +532,14 @@ router.post('/submit', async (req: Request, res: Response) => {
 
     // Update market visit count
     const today = new Date().toISOString().split('T')[0];
-    const { data: market } = await supabase
+    const { data: market } = await freshClient
       .from('markets')
       .select('last_visit_date, current_visits')
       .eq('id', market_id)
       .single();
 
     if (market && market.last_visit_date !== today) {
-      await supabase
+      await freshClient
         .from('markets')
         .update({
           current_visits: (market.current_visits || 0) + 1,

@@ -1,5 +1,5 @@
 import express, { Request, Response } from 'express';
-import { supabase } from '../config/supabase';
+import { supabase, createFreshClient } from '../config/supabase';
 
 const router = express.Router();
 
@@ -8,7 +8,9 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const { target_gl, limit = '100', offset = '0' } = req.query;
     
-    let query = supabase
+    const freshClient = createFreshClient();
+    
+    let query = freshClient
       .from('action_history')
       .select('*')
       .order('timestamp', { ascending: false })
@@ -64,7 +66,9 @@ router.post('/', async (req: Request, res: Response) => {
       });
     }
     
-    const { data, error } = await supabase
+    const freshClient = createFreshClient();
+    
+    const { data, error } = await freshClient
       .from('action_history')
       .insert([{
         action_type,
@@ -99,7 +103,9 @@ router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     
-    const { error } = await supabase
+    const freshClient = createFreshClient();
+    
+    const { error } = await freshClient
       .from('action_history')
       .delete()
       .eq('id', id);

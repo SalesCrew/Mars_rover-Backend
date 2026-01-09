@@ -1,5 +1,5 @@
 import express, { Router, Request, Response } from 'express';
-import { supabase } from '../config/supabase';
+import { supabase, createFreshClient } from '../config/supabase';
 
 const router: Router = express.Router();
 
@@ -39,7 +39,8 @@ router.post('/login', async (req: Request, res: Response) => {
     console.log('✅ Supabase Auth success, user ID:', authData.user.id);
 
     // Get user profile from users table
-    const { data: profile, error: profileError } = await supabase
+    const freshClient = createFreshClient();
+    const { data: profile, error: profileError } = await freshClient
       .from('users')
       .select('*')
       .eq('id', authData.user.id)
@@ -105,7 +106,8 @@ router.post('/register', async (req: Request, res: Response) => {
     }
 
     // Create profile in users table
-    const { error: profileError } = await supabase
+    const freshClient = createFreshClient();
+    const { error: profileError } = await freshClient
       .from('users')
       .insert({
         id: authData.user.id,

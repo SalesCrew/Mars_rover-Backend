@@ -1,5 +1,5 @@
 import express from 'express';
-import { supabase } from '../config/supabase.js';
+import { supabase, createFreshClient } from '../config/supabase.js';
 
 const router = express.Router();
 
@@ -34,7 +34,9 @@ const transformProductToDB = (product: any) => ({
 // GET /api/products - Get all products
 router.get('/', async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const freshClient = createFreshClient();
+    
+    const { data, error } = await freshClient
       .from('products')
       .select('*')
       .order('name', { ascending: true });
@@ -55,7 +57,9 @@ router.get('/', async (req, res) => {
 // GET /api/products/:id - Get single product
 router.get('/:id', async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const freshClient = createFreshClient();
+    
+    const { data, error } = await freshClient
       .from('products')
       .select('*')
       .eq('id', req.params.id)
@@ -76,10 +80,12 @@ router.get('/:id', async (req, res) => {
 // POST /api/products - Create products (bulk insert)
 router.post('/', async (req, res) => {
   try {
+    const freshClient = createFreshClient();
+    
     const products = Array.isArray(req.body) ? req.body : [req.body];
     const dbProducts = products.map(transformProductToDB);
 
-    const { data, error } = await supabase
+    const { data, error } = await freshClient
       .from('products')
       .insert(dbProducts)
       .select();
@@ -100,6 +106,8 @@ router.post('/', async (req, res) => {
 // PUT /api/products/:id - Update product
 router.put('/:id', async (req, res) => {
   try {
+    const freshClient = createFreshClient();
+    
     const updates: any = {};
     
     if (req.body.name !== undefined) updates.name = req.body.name;
@@ -112,7 +120,7 @@ router.put('/:id', async (req, res) => {
     if (req.body.sku !== undefined) updates.sku = req.body.sku || null;
     if (req.body.paletteProducts !== undefined) updates.palette_products = req.body.paletteProducts || null;
 
-    const { data, error } = await supabase
+    const { data, error } = await freshClient
       .from('products')
       .update(updates)
       .eq('id', req.params.id)
@@ -134,7 +142,9 @@ router.put('/:id', async (req, res) => {
 // DELETE /api/products/:id - Delete product
 router.delete('/:id', async (req, res) => {
   try {
-    const { error } = await supabase
+    const freshClient = createFreshClient();
+    
+    const { error } = await freshClient
       .from('products')
       .delete()
       .eq('id', req.params.id);

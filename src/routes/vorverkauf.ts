@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { supabase } from '../config/supabase';
+import { supabase, createFreshClient } from '../config/supabase';
 
 const router = Router();
 
@@ -9,12 +9,14 @@ const router = Router();
 router.get('/', async (req: Request, res: Response) => {
   try {
     console.log('📦 Fetching all vorverkauf entries...');
+    
+    const freshClient = createFreshClient();
 
     // Get query params for filtering
     const { glId, search } = req.query;
 
     // Fetch all entries
-    let query = supabase
+    let query = freshClient
       .from('vorverkauf_entries')
       .select('*')
       .order('created_at', { ascending: false });
@@ -38,9 +40,9 @@ router.get('/', async (req: Request, res: Response) => {
     const entryIds = entries.map(e => e.id);
 
     const [glsResult, marketsResult, itemsResult] = await Promise.all([
-      glIds.length > 0 ? supabase.from('gebietsleiter').select('id, name').in('id', glIds) : { data: [] },
-      marketIds.length > 0 ? supabase.from('markets').select('id, name, chain, address, city, postal_code').in('id', marketIds) : { data: [] },
-      entryIds.length > 0 ? supabase.from('vorverkauf_items').select('*').in('vorverkauf_entry_id', entryIds) : { data: [] }
+      glIds.length > 0 ? freshClient.from('gebietsleiter').select('id, name').in('id', glIds) : { data: [] },
+      marketIds.length > 0 ? freshClient.from('markets').select('id, name, chain, address, city, postal_code').in('id', marketIds) : { data: [] },
+      entryIds.length > 0 ? freshClient.from('vorverkauf_items').select('*').in('vorverkauf_entry_id', entryIds) : { data: [] }
     ]);
 
     const gls = glsResult.data || [];
@@ -52,7 +54,7 @@ router.get('/', async (req: Request, res: Response) => {
     let products: any[] = [];
     if (productIds.length > 0) {
       console.log('Looking up product IDs:', productIds);
-      const { data, error: productError } = await supabase.from('products').select('*').in('id', productIds);
+      const { data, error: productError } = await freshClient.from('products').select('*').in('id', productIds);
       if (productError) console.error('Product lookup error:', productError);
       console.log('Found products:', data?.length || 0);
       products = data || [];
@@ -122,8 +124,10 @@ router.get('/', async (req: Request, res: Response) => {
 router.get('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    
+    const freshClient = createFreshClient();
 
-    const { data: entry, error: entryError } = await supabase
+    const { data: entry, error: entryError } = await freshClient
       .from('vorverkauf_entries')
       .select('*')
       .eq('id', id)
@@ -136,9 +140,9 @@ router.get('/:id', async (req: Request, res: Response) => {
 
     // Get related data
     const [glResult, marketResult, itemsResult] = await Promise.all([
-      supabase.from('gebietsleiter').select('id, name').eq('id', entry.gebietsleiter_id).single(),
-      supabase.from('markets').select('id, name, chain, address, city, postal_code').eq('id', entry.market_id).single(),
-      supabase.from('vorverkauf_items').select('*').eq('vorverkauf_entry_id', entry.id)
+      freshClient.from('gebietsleiter').select('id, name').eq('id', entry.gebietsleiter_id).single(),
+      freshClient.from('markets').select('id, name, chain, address, city, postal_code').eq('id', entry.market_id).single(),
+      freshClient.from('vorverkauf_items').select('*').eq('vorverkauf_entry_id', entry.id)
     ]);
 
     const gl = glResult.data;
@@ -149,7 +153,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     const productIds = items.map(i => i.product_id);
     let products: any[] = [];
     if (productIds.length > 0) {
-      const { data } = await supabase.from('products').select('id, name, brand, size').in('id', productIds);
+      const { data } = await freshClient.from('products').select('id, name, brand, size').in('id', productIds);
       products = data || [];
     }
 
@@ -195,6 +199,8 @@ router.post('/', async (req: Request, res: Response) => {
 
     console.log('📦 Creating vorverkauf entry...');
     console.log('Request body:', JSON.stringify(req.body, null, 2));
+    
+    const freshClient = createFreshClient();
 
     // Support both old format (items) and new format (take_out_items + replace_items)
     let allItems: any[] = [];
@@ -217,7 +223,7 @@ router.post('/', async (req: Request, res: Response) => {
     }
 
     // Create the main entry
-    const { data: entry, error: entryError } = await supabase
+    const { data: entry, error: entryError } = await freshClient
       .from('vorverkauf_entries')
       .insert({
         gebietsleiter_id,
@@ -243,7 +249,7 @@ router.post('/', async (req: Request, res: Response) => {
 
     console.log('Items to insert:', itemsToInsert);
 
-    const { error: itemsError } = await supabase
+    const { error: itemsError } = await freshClient
       .from('vorverkauf_items')
       .insert(itemsToInsert);
 
@@ -272,9 +278,11 @@ router.delete('/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
 
     console.log(`🗑️ Deleting vorverkauf entry ${id}...`);
+    
+    const freshClient = createFreshClient();
 
     // Items will be deleted automatically due to CASCADE
-    const { error } = await supabase
+    const { error } = await freshClient
       .from('vorverkauf_entries')
       .delete()
       .eq('id', id);
@@ -294,13 +302,15 @@ router.delete('/:id', async (req: Request, res: Response) => {
 // ============================================================================
 router.get('/stats/summary', async (req: Request, res: Response) => {
   try {
-    const { data: entries, error } = await supabase
+    const freshClient = createFreshClient();
+    
+    const { data: entries, error } = await freshClient
       .from('vorverkauf_entries')
       .select('id, reason, created_at');
 
     if (error) throw error;
 
-    const { data: items } = await supabase
+    const { data: items } = await freshClient
       .from('vorverkauf_items')
       .select('quantity');
 

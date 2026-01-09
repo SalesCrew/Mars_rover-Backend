@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { supabase } from '../config/supabase';
+import { supabase, createFreshClient } from '../config/supabase';
 
 const router = Router();
 
@@ -11,6 +11,8 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     console.log('📋 Fetching all markets...');
     
+    const freshClient = createFreshClient();
+    
     // Fetch ALL markets using pagination (Supabase has 1000 row limit per request)
     let allMarkets: any[] = [];
     let from = 0;
@@ -18,7 +20,7 @@ router.get('/', async (req: Request, res: Response) => {
     let hasMore = true;
 
     while (hasMore) {
-      const { data, error } = await supabase
+      const { data, error } = await freshClient
         .from('markets')
         .select('*')
         .order('name', { ascending: true })
@@ -55,6 +57,8 @@ router.get('/', async (req: Request, res: Response) => {
 router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
   try {
     console.log('🔄 Starting GL ID backfill...');
+    
+    const freshClient = createFreshClient();
 
     // Helper function to normalize names for matching
     const normalizeName = (name: string | null | undefined): string => {
@@ -68,7 +72,7 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
     };
 
     // Fetch all GLs
-    const { data: gls, error: glError } = await supabase
+    const { data: gls, error: glError } = await freshClient
       .from('gebietsleiter')
       .select('id, name, email')
       .eq('is_active', true);
@@ -91,7 +95,7 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
     }
 
     // Fetch markets with no gebietsleiter_id (they might have gebietsleiter_name or gebietsleiter_email)
-    const { data: marketsToUpdate, error: marketsError } = await supabase
+    const { data: marketsToUpdate, error: marketsError } = await freshClient
       .from('markets')
       .select('id, gebietsleiter_name, gebietsleiter_email, gebietsleiter_id')
       .or('gebietsleiter_id.is.null,gebietsleiter_id.eq.');
@@ -128,7 +132,7 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
 
       if (matchedGL) {
         // Update the market with the GL ID and email
-        const { error: updateError } = await supabase
+        const { error: updateError } = await freshClient
           .from('markets')
           .update({
             gebietsleiter_id: matchedGL.id,
@@ -158,7 +162,7 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
     // Fetch detailed info for unmatched markets
     const unmatchedMarkets: Array<{ id: string; name: string; glName: string | null; glEmail: string | null }> = [];
     if (unmatchedMarketIds.length > 0) {
-      const { data: unmatchedMarketsData } = await supabase
+      const { data: unmatchedMarketsData } = await freshClient
         .from('markets')
         .select('id, name, gebietsleiter_name, gebietsleiter_email')
         .in('id', unmatchedMarketIds);
@@ -196,8 +200,10 @@ router.get('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     console.log(`📋 Fetching market ${id}...`);
+    
+    const freshClient = createFreshClient();
 
-    const { data, error } = await supabase
+    const { data, error } = await freshClient
       .from('markets')
       .select('*')
       .eq('id', id)
@@ -228,7 +234,9 @@ router.post('/', async (req: Request, res: Response) => {
   try {
     console.log('➕ Creating new market...');
     
-    const { data, error } = await supabase
+    const freshClient = createFreshClient();
+    
+    const { data, error } = await freshClient
       .from('markets')
       .insert(req.body)
       .select()
@@ -260,8 +268,10 @@ router.post('/import', async (req: Request, res: Response) => {
     }
 
     console.log(`📥 Importing ${markets.length} markets...`);
+    
+    const freshClient = createFreshClient();
 
-    const { data, error } = await supabase
+    const { data, error } = await freshClient
       .from('markets')
       .upsert(markets, { 
         onConflict: 'id',
@@ -293,8 +303,10 @@ router.put('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     console.log(`✏️ Updating market ${id}...`);
+    
+    const freshClient = createFreshClient();
 
-    const { data, error } = await supabase
+    const { data, error } = await freshClient
       .from('markets')
       .update(req.body)
       .eq('id', id)
@@ -324,9 +336,11 @@ router.post('/:id/visit', async (req: Request, res: Response) => {
     const { gl_id } = req.body; // Optional: track which GL visited
     
     console.log(`📍 Recording visit for market ${id}...`);
+    
+    const freshClient = createFreshClient();
 
     // Get current market data
-    const { data: market, error: fetchError } = await supabase
+    const { data: market, error: fetchError } = await freshClient
       .from('markets')
       .select('current_visits, last_visit_date')
       .eq('id', id)
@@ -358,7 +372,7 @@ router.post('/:id/visit', async (req: Request, res: Response) => {
     // Increment visit count and update last visit date
     const newVisitCount = (market.current_visits || 0) + 1;
     
-    const { data: updated, error: updateError } = await supabase
+    const { data: updated, error: updateError } = await freshClient
       .from('markets')
       .update({
         current_visits: newVisitCount,
@@ -394,8 +408,10 @@ router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     console.log(`🗑️ Deleting market ${id}...`);
+    
+    const freshClient = createFreshClient();
 
-    const { error } = await supabase
+    const { error } = await freshClient
       .from('markets')
       .delete()
       .eq('id', id);
