@@ -914,6 +914,22 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           progressData = [...progressData, ...(data || [])];
         }
 
+        // Fetch palette and schuette progress for value calculation
+        {
+          let query = freshClient
+            .from('wellen_gl_progress')
+            .select('current_number, item_type, item_id, gebietsleiter_id, value_per_unit')
+            .eq('welle_id', welle.id)
+            .in('item_type', ['palette', 'schuette']);
+          
+          if (glFilter.length > 0) {
+            query = query.in('gebietsleiter_id', glFilter);
+          }
+          
+          const { data } = await query;
+          progressData = [...progressData, ...(data || [])];
+        }
+
         // Calculate display aggregates
         let displayCount = 0;
         let displayTarget = 0;
