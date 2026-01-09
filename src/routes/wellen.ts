@@ -950,6 +950,9 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
               if (kw) {
                 currentValue += progress.current_number * (kw.item_value || 0);
               }
+            } else if (progress.item_type === 'palette' || progress.item_type === 'schuette') {
+              // For palette/schuette, use stored value_per_unit
+              currentValue += progress.current_number * (progress.value_per_unit || 0);
             }
           }
         }
@@ -1126,7 +1129,7 @@ router.get('/', async (req: Request, res: Response) => {
         // Calculate progress aggregates
         const { data: progressData } = await freshClient
           .from('wellen_gl_progress')
-          .select('current_number, item_type, item_id, gebietsleiter_id')
+          .select('current_number, item_type, item_id, gebietsleiter_id, value_per_unit')
           .eq('welle_id', welle.id);
 
         const uniqueGLs = new Set((progressData || []).map(p => p.gebietsleiter_id)).size;
@@ -1262,7 +1265,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 
     const { data: progressData } = await supabase
       .from('wellen_gl_progress')
-      .select('current_number, item_type, item_id, gebietsleiter_id')
+      .select('current_number, item_type, item_id, gebietsleiter_id, value_per_unit')
       .eq('welle_id', id);
 
     const uniqueGLs = new Set((progressData || []).map(p => p.gebietsleiter_id)).size;
@@ -1877,13 +1880,20 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
       const existingValue = existingMap.get(key) || 0;
       const newTotal = existingValue + item.current_number;
       
-      return {
+      const entry: any = {
         welle_id: welleId,
         gebietsleiter_id,
         item_type: item.item_type,
         item_id: item.item_id,
         current_number: newTotal
       };
+      
+      // Store value_per_unit for palette/schuette products
+      if ((item.item_type === 'palette' || item.item_type === 'schuette') && item.value_per_unit !== undefined) {
+        entry.value_per_unit = item.value_per_unit;
+      }
+      
+      return entry;
     });
 
     const { error } = await freshClient
