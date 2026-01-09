@@ -14,6 +14,7 @@ const transformProductFromDB = (dbProduct: any) => ({
   palletSize: dbProduct.pallet_size || undefined,
   price: parseFloat(dbProduct.price),
   sku: dbProduct.sku || undefined,
+  paletteProducts: dbProduct.palette_products || undefined,
 });
 
 // Transform from API format to DB format
@@ -27,6 +28,7 @@ const transformProductToDB = (product: any) => ({
   pallet_size: product.palletSize || null,
   price: product.price,
   sku: product.sku || null,
+  palette_products: product.paletteProducts || null,
 });
 
 // GET /api/products - Get all products
@@ -108,6 +110,7 @@ router.put('/:id', async (req, res) => {
     if (req.body.palletSize !== undefined) updates.pallet_size = req.body.palletSize || null;
     if (req.body.price !== undefined) updates.price = req.body.price;
     if (req.body.sku !== undefined) updates.sku = req.body.sku || null;
+    if (req.body.paletteProducts !== undefined) updates.palette_products = req.body.paletteProducts || null;
 
     const { data, error } = await supabase
       .from('products')
