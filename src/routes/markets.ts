@@ -500,7 +500,41 @@ router.get('/:id/history', async (req: Request, res: Response) => {
       }
     }
 
-    // 3. Get market visit history from markets table
+    // 3. Get Produkttausch entries (vorverkauf_entries)
+    const { data: produkttauschData } = await freshClient
+      .from('vorverkauf_entries')
+      .select('*, gebietsleiter(name)')
+      .eq('market_id', id)
+      .order('created_at', { ascending: false });
+    
+    if (produkttauschData) {
+      for (const entry of produkttauschData) {
+        // Get items for this entry
+        const { data: items } = await freshClient
+          .from('vorverkauf_items')
+          .select('*, products(name)')
+          .eq('vorverkauf_entry_id', entry.id);
+        
+        activities.push({
+          id: entry.id,
+          type: 'produkttausch',
+          date: entry.created_at,
+          glName: entry.gebietsleiter?.name || 'Unbekannt',
+          glId: entry.gebietsleiter_id,
+          details: {
+            reason: entry.reason,
+            items: (items || []).map((i: any) => ({
+              name: i.products?.name || 'Produkt',
+              quantity: i.quantity,
+              itemType: i.item_type
+            })),
+            notes: entry.notes
+          }
+        });
+      }
+    }
+
+    // 4. Get market visit history from markets table
     const { data: marketData } = await freshClient
       .from('markets')
       .select('last_visit_date, current_visits, gebietsleiter_name')
