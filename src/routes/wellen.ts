@@ -1450,8 +1450,9 @@ router.post('/', async (req: Request, res: Response) => {
         const p = paletteItems[index];
         console.log(`  Palette ${index}: ${p.name}, products: ${p.products?.length || 0}`);
         
-        // Insert palette
-        const { data: palette, error: paletteError } = await supabase
+        // Insert palette - use fresh client
+        const freshClient = createFreshClient();
+        const { data: palette, error: paletteError } = await freshClient
           .from('wellen_paletten')
           .insert({
             welle_id: welle.id,
@@ -1480,7 +1481,7 @@ router.post('/', async (req: Request, res: Response) => {
             product_order: prodIndex
           }));
 
-          const { error: productsError } = await supabase
+          const { error: productsError } = await freshClient
             .from('wellen_paletten_products')
             .insert(productsToInsert);
 
@@ -1497,8 +1498,9 @@ router.post('/', async (req: Request, res: Response) => {
         const s = schutteItems[index];
         console.log(`  Schütte ${index}: ${s.name}, products: ${s.products?.length || 0}`);
         
-        // Insert schütte
-        const { data: schuette, error: schutteError } = await supabase
+        // Insert schütte - use fresh client
+        const freshClient = createFreshClient();
+        const { data: schuette, error: schutteError } = await freshClient
           .from('wellen_schuetten')
           .insert({
             welle_id: welle.id,
@@ -1527,7 +1529,7 @@ router.post('/', async (req: Request, res: Response) => {
             product_order: prodIndex
           }));
 
-          const { error: productsError } = await supabase
+          const { error: productsError } = await freshClient
             .from('wellen_schuetten_products')
             .insert(productsToInsert);
 
