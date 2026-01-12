@@ -258,6 +258,25 @@ router.post('/', async (req: Request, res: Response) => {
       throw itemsError;
     }
 
+    // Update market visit count (multiple actions same day = 1 visit)
+    const today = new Date().toISOString().split('T')[0];
+    const { data: market } = await freshClient
+      .from('markets')
+      .select('last_visit_date, current_visits')
+      .eq('id', market_id)
+      .single();
+
+    if (market && market.last_visit_date !== today) {
+      await freshClient
+        .from('markets')
+        .update({
+          current_visits: (market.current_visits || 0) + 1,
+          last_visit_date: today
+        })
+        .eq('id', market_id);
+      console.log(`📍 Recorded visit for market ${market_id}`);
+    }
+
     console.log(`✅ Created vorverkauf entry with ${allItems.length} items`);
     res.status(201).json({
       message: 'Vorverkauf entry created successfully',

@@ -1870,7 +1870,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
 router.post('/:id/progress/batch', async (req: Request, res: Response) => {
   try {
     const { id: welleId } = req.params;
-    const { gebietsleiter_id, items } = req.body;
+    const { gebietsleiter_id, market_id, items } = req.body;
 
     console.log(`📊 Batch updating GL progress for welle ${welleId}...`);
     
@@ -1903,6 +1903,7 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
       const entry: any = {
         welle_id: welleId,
         gebietsleiter_id,
+        market_id: market_id || null, // Save market_id for tracking
         item_type: item.item_type,
         item_id: item.item_id,
         current_number: newTotal
@@ -1923,6 +1924,52 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
       });
 
     if (error) throw error;
+
+    // Log each submission separately for history/audit (each action is a new row)
+    if (market_id) {
+      const submissionLogs = items.map((item: any) => ({
+        welle_id: welleId,
+        gebietsleiter_id,
+        market_id,
+        item_type: item.item_type,
+        item_id: item.item_id,
+        quantity: item.current_number,
+        value_per_unit: item.value_per_unit || null
+      }));
+
+      const { error: logError } = await freshClient
+        .from('wellen_submissions')
+        .insert(submissionLogs);
+
+      if (logError) {
+        console.warn('⚠️ Could not log submissions:', logError.message);
+        // Don't fail the whole request if logging fails
+      } else {
+        console.log(`📝 Logged ${submissionLogs.length} submissions for market ${market_id}`);
+      }
+    }
+
+    // Update market visit count (if market_id is provided)
+    if (market_id) {
+      const today = new Date().toISOString().split('T')[0];
+      const { data: market } = await freshClient
+        .from('markets')
+        .select('last_visit_date, current_visits')
+        .eq('id', market_id)
+        .single();
+
+      // Only increment if not already visited today (multiple actions same day = 1 visit)
+      if (market && market.last_visit_date !== today) {
+        await freshClient
+          .from('markets')
+          .update({
+            current_visits: (market.current_visits || 0) + 1,
+            last_visit_date: today
+          })
+          .eq('id', market_id);
+        console.log(`📍 Recorded visit for market ${market_id}`);
+      }
+    }
 
     console.log(`✅ Updated ${items.length} progress entries (cumulative)`);
     res.json({ 

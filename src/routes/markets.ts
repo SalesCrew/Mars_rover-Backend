@@ -401,6 +401,137 @@ router.post('/:id/visit', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/markets/:id/history
+ * Get all activities/history for a specific market
+ */
+router.get('/:id/history', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    console.log(`📜 Fetching history for market ${id}...`);
+    
+    const freshClient = createFreshClient();
+    const activities: any[] = [];
+
+    // 1. Get Vorbesteller submissions from wellen_submissions table (individual actions)
+    const { data: submissionsData } = await freshClient
+      .from('wellen_submissions')
+      .select('*, wellen(name), gebietsleiter(name)')
+      .eq('market_id', id)
+      .order('created_at', { ascending: false });
+    
+    if (submissionsData && submissionsData.length > 0) {
+      // Get item names
+      const displayIds = submissionsData.filter(s => s.item_type === 'display').map(s => s.item_id);
+      const kartonwareIds = submissionsData.filter(s => s.item_type === 'kartonware').map(s => s.item_id);
+      const paletteIds = submissionsData.filter(s => s.item_type === 'palette').map(s => s.item_id);
+      const schutteIds = submissionsData.filter(s => s.item_type === 'schuette').map(s => s.item_id);
+      
+      const [displaysRes, kartonwareRes, palettenRes, schuttenRes] = await Promise.all([
+        displayIds.length > 0 ? freshClient.from('wellen_displays').select('id, name').in('id', displayIds) : { data: [] },
+        kartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, name').in('id', kartonwareIds) : { data: [] },
+        paletteIds.length > 0 ? freshClient.from('wellen_paletten').select('id, name').in('id', paletteIds) : { data: [] },
+        schutteIds.length > 0 ? freshClient.from('wellen_schuetten').select('id, name').in('id', schutteIds) : { data: [] }
+      ]);
+      
+      const displays = displaysRes.data || [];
+      const kartonware = kartonwareRes.data || [];
+      const paletten = palettenRes.data || [];
+      const schutten = schuttenRes.data || [];
+      
+      for (const s of submissionsData) {
+        let itemName = 'Unbekannt';
+        if (s.item_type === 'display') {
+          itemName = displays.find((d: any) => d.id === s.item_id)?.name || 'Display';
+        } else if (s.item_type === 'kartonware') {
+          itemName = kartonware.find((k: any) => k.id === s.item_id)?.name || 'Kartonware';
+        } else if (s.item_type === 'palette') {
+          itemName = paletten.find((pl: any) => pl.id === s.item_id)?.name || 'Palette';
+        } else if (s.item_type === 'schuette') {
+          itemName = schutten.find((sc: any) => sc.id === s.item_id)?.name || 'Schütte';
+        }
+        
+        activities.push({
+          id: s.id,
+          type: 'vorbesteller',
+          date: s.created_at,
+          glName: s.gebietsleiter?.name || 'Unbekannt',
+          glId: s.gebietsleiter_id,
+          details: {
+            welleName: s.wellen?.name || 'Unbekannt',
+            itemType: s.item_type,
+            itemName,
+            quantity: s.quantity
+          }
+        });
+      }
+    }
+
+    // 2. Get Vorverkauf submissions
+    const { data: vorverkaufData } = await freshClient
+      .from('vorverkauf_submissions')
+      .select('*, gebietsleiter(name), vorverkauf_wellen(name)')
+      .eq('market_id', id)
+      .order('created_at', { ascending: false });
+    
+    if (vorverkaufData) {
+      // Get products for each submission
+      for (const sub of vorverkaufData) {
+        const { data: products } = await freshClient
+          .from('vorverkauf_submission_products')
+          .select('*, products(name)')
+          .eq('submission_id', sub.id);
+        
+        activities.push({
+          id: sub.id,
+          type: 'vorverkauf',
+          date: sub.created_at,
+          glName: sub.gebietsleiter?.name || 'Unbekannt',
+          glId: sub.gebietsleiter_id,
+          details: {
+            welleName: sub.vorverkauf_wellen?.name || 'Vorverkauf',
+            products: (products || []).map((p: any) => ({
+              name: p.products?.name || 'Produkt',
+              quantity: p.quantity,
+              reason: p.reason
+            })),
+            notes: sub.notes
+          }
+        });
+      }
+    }
+
+    // 3. Get market visit history from markets table
+    const { data: marketData } = await freshClient
+      .from('markets')
+      .select('last_visit_date, current_visits, gebietsleiter_name')
+      .eq('id', id)
+      .single();
+    
+    if (marketData && marketData.last_visit_date) {
+      activities.push({
+        id: `visit-${id}`,
+        type: 'marktbesuch',
+        date: marketData.last_visit_date,
+        glName: marketData.gebietsleiter_name || 'Unbekannt',
+        glId: null,
+        details: {
+          visitCount: marketData.current_visits || 1
+        }
+      });
+    }
+
+    // Sort all activities by date (newest first)
+    activities.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+    console.log(`✅ Fetched ${activities.length} history entries for market ${id}`);
+    res.json(activities);
+  } catch (error: any) {
+    console.error('Error fetching market history:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+/**
  * DELETE /api/markets/:id
  * Delete a market
  */
@@ -425,6 +556,103 @@ router.delete('/:id', async (req: Request, res: Response) => {
     res.status(204).send();
   } catch (error: any) {
     console.error('Error deleting market:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/markets/sync-visits
+ * Recalculate all market visits from historical DB data
+ * Sources: vorverkauf_submissions, vorverkauf_entries, wellen_gl_progress
+ * Same market + same day = 1 visit
+ */
+router.post('/sync-visits', async (_req: Request, res: Response) => {
+  try {
+    console.log('🔄 Syncing market visits from historical data...');
+    
+    const freshClient = createFreshClient();
+
+    // 1. Get all vorverkauf_submissions (Vorverkauf waves)
+    const { data: vorverkaufSubmissions } = await freshClient
+      .from('vorverkauf_submissions')
+      .select('market_id, created_at');
+
+    // 2. Get all vorverkauf_entries (Produkttausch)
+    const { data: vorverkaufEntries } = await freshClient
+      .from('vorverkauf_entries')
+      .select('market_id, created_at');
+
+    // 3. Get all wellen_submissions (Vorbesteller) - individual submissions with market_id
+    const { data: wellenSubmissions } = await freshClient
+      .from('wellen_submissions')
+      .select('market_id, created_at');
+
+    // Build a map of market_id -> Set of unique dates
+    const marketVisitDates: Record<string, Set<string>> = {};
+
+    const addVisit = (marketId: string, dateStr: string) => {
+      if (!marketId) return;
+      const date = new Date(dateStr).toISOString().split('T')[0]; // YYYY-MM-DD
+      if (!marketVisitDates[marketId]) {
+        marketVisitDates[marketId] = new Set();
+      }
+      marketVisitDates[marketId].add(date);
+    };
+
+    // Add vorverkauf submissions
+    for (const sub of (vorverkaufSubmissions || [])) {
+      addVisit(sub.market_id, sub.created_at);
+    }
+
+    // Add vorverkauf entries (produkttausch)
+    for (const entry of (vorverkaufEntries || [])) {
+      addVisit(entry.market_id, entry.created_at);
+    }
+
+    // Add wellen submissions (vorbesteller) - individual submissions
+    for (const sub of (wellenSubmissions || [])) {
+      if (sub.market_id) {
+        addVisit(sub.market_id, sub.created_at);
+      }
+    }
+
+    // Calculate totals and find most recent date
+    const updates: { marketId: string; visits: number; lastDate: string }[] = [];
+    
+    for (const [marketId, dates] of Object.entries(marketVisitDates)) {
+      const sortedDates = Array.from(dates).sort();
+      const lastDate = sortedDates[sortedDates.length - 1];
+      updates.push({
+        marketId,
+        visits: dates.size,
+        lastDate
+      });
+    }
+
+    // Update markets in batches
+    let updatedCount = 0;
+    for (const update of updates) {
+      const { error } = await freshClient
+        .from('markets')
+        .update({
+          current_visits: update.visits,
+          last_visit_date: update.lastDate
+        })
+        .eq('id', update.marketId);
+      
+      if (!error) {
+        updatedCount++;
+      }
+    }
+
+    console.log(`✅ Synced visits for ${updatedCount} markets`);
+    res.json({
+      message: 'Visits synced successfully',
+      marketsUpdated: updatedCount,
+      totalUniqueVisits: updates.reduce((sum, u) => sum + u.visits, 0)
+    });
+  } catch (error: any) {
+    console.error('Error syncing market visits:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
