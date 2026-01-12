@@ -1070,11 +1070,12 @@ router.get('/', async (req: Request, res: Response) => {
           .order('kartonware_order', { ascending: true });
 
         // Fetch palettes with their products
-        const { data: paletten } = await freshClient
+        const { data: paletten, error: palError } = await freshClient
           .from('wellen_paletten')
           .select('*')
           .eq('welle_id', welle.id)
           .order('palette_order', { ascending: true });
+        console.log(`🎨 Fetched palettes for welle ${welle.id}:`, paletten?.length || 0, 'error:', palError?.message || 'none');
 
         // Fetch palette products for each palette
         const palettenWithProducts = await Promise.all(
@@ -1093,11 +1094,12 @@ router.get('/', async (req: Request, res: Response) => {
         );
 
         // Fetch schütten with their products
-        const { data: schuetten } = await freshClient
+        const { data: schuetten, error: schError } = await freshClient
           .from('wellen_schuetten')
           .select('*')
           .eq('welle_id', welle.id)
           .order('schuette_order', { ascending: true });
+        console.log(`📦 Fetched schuetten for welle ${welle.id}:`, schuetten?.length || 0, 'error:', schError?.message || 'none');
 
         // Fetch schütte products for each schütte
         const schuettenWithProducts = await Promise.all(
