@@ -2205,10 +2205,6 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
       }
     }
 
-    // Get number of GLs for goal calculation
-    const { count: glCount } = await freshClient.from('gebietsleiter').select('id', { count: 'exact', head: true });
-    const numGLs = glCount || 1;
-
     // Helper to get calendar week from date
     const getKW = (dateStr: string) => {
       const date = new Date(dateStr);
@@ -2278,21 +2274,79 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
       }
     }
 
-    // Calculate goals per GL (total goals / number of GLs)
-    const totalDisplayGoal = displays.reduce((sum, d) => sum + (d.target_number || 0), 0);
-    const totalKartonwareGoal = kartonware.reduce((sum, k) => sum + (k.target_number || 0), 0);
-    const glDisplayGoal = Math.ceil(totalDisplayGoal / numGLs);
-    const glKartonwareGoal = Math.ceil(totalKartonwareGoal / numGLs);
-
-    // Set goals for each chain (proportional based on typical chain distribution)
-    chainData.billa.goalDisplays = Math.ceil(glDisplayGoal * 0.35);
-    chainData.billa.goalKartonware = Math.ceil(glKartonwareGoal * 0.35);
-    chainData.spar.goalDisplays = Math.ceil(glDisplayGoal * 0.30);
-    chainData.spar.goalKartonware = Math.ceil(glKartonwareGoal * 0.30);
-    chainData.zoofachhandel.goalDisplays = Math.ceil(glDisplayGoal * 0.20);
-    chainData.zoofachhandel.goalKartonware = Math.ceil(glKartonwareGoal * 0.20);
-    chainData.hagebau.goalDisplays = Math.ceil(glDisplayGoal * 0.15);
-    chainData.hagebau.goalKartonware = Math.ceil(glKartonwareGoal * 0.15);
+    // Calculate goals using proportional formula:
+    // GL Goal = Total Target × (GL's Markets in Wave / Total Markets in Wave)
+    
+    // Get GL's markets
+    const { data: glMarkets } = await freshClient
+      .from('markets')
+      .select('id, chain')
+      .eq('gebietsleiter_id', glId);
+    const glMarketIds = new Set((glMarkets || []).map(m => m.id));
+    
+    // Count GL's markets per chain group
+    const glMarketsPerChain: Record<string, number> = { billa: 0, spar: 0, zoofachhandel: 0, hagebau: 0 };
+    for (const market of (glMarkets || [])) {
+      for (const [group, chains] of Object.entries(chainGroups)) {
+        if (chains.includes(market.chain)) {
+          glMarketsPerChain[group]++;
+          break;
+        }
+      }
+    }
+    
+    // For each welle, calculate proportional goal for this GL
+    const glGoalsPerChain: Record<string, { displays: number; kartonware: number }> = {
+      billa: { displays: 0, kartonware: 0 },
+      spar: { displays: 0, kartonware: 0 },
+      zoofachhandel: { displays: 0, kartonware: 0 },
+      hagebau: { displays: 0, kartonware: 0 }
+    };
+    
+    // Process each welle to calculate proportional goals
+    for (const welleId of welleIds) {
+      // Get total markets in this welle
+      const welleMarketsForThis = welleMarkets.filter(wm => wm.welle_id === welleId);
+      const totalMarketsInWelle = welleMarketsForThis.length;
+      if (totalMarketsInWelle === 0) continue;
+      
+      // Count how many of the GL's markets are in this welle
+      const glMarketsInWelle = welleMarketsForThis.filter(wm => glMarketIds.has(wm.market_id)).length;
+      if (glMarketsInWelle === 0) continue;
+      
+      // Calculate GL's ratio for this welle
+      const glRatio = glMarketsInWelle / totalMarketsInWelle;
+      
+      // Get displays and kartonware targets for this welle
+      const welleDisplays = displays.filter(d => d.welle_id === welleId);
+      const welleKartonware = kartonware.filter(k => k.welle_id === welleId);
+      
+      const welleDisplayTarget = welleDisplays.reduce((sum, d) => sum + (d.target_number || 0), 0);
+      const welleKartonwareTarget = welleKartonware.reduce((sum, k) => sum + (k.target_number || 0), 0);
+      
+      // Calculate GL's proportional goal for this welle
+      const glDisplayGoalForWelle = Math.round(welleDisplayTarget * glRatio * 10) / 10;
+      const glKartonwareGoalForWelle = Math.round(welleKartonwareTarget * glRatio * 10) / 10;
+      
+      // Determine chain group for this welle's markets (use first market's chain)
+      const firstMarketId = welleMarketsForThis[0]?.market_id;
+      const chainGroup = firstMarketId ? getChainGroupByMarket(firstMarketId) : null;
+      
+      if (chainGroup && glGoalsPerChain[chainGroup]) {
+        glGoalsPerChain[chainGroup].displays += glDisplayGoalForWelle;
+        glGoalsPerChain[chainGroup].kartonware += glKartonwareGoalForWelle;
+      }
+    }
+    
+    // Set goals for each chain
+    chainData.billa.goalDisplays = Math.round(glGoalsPerChain.billa.displays * 10) / 10;
+    chainData.billa.goalKartonware = Math.round(glGoalsPerChain.billa.kartonware * 10) / 10;
+    chainData.spar.goalDisplays = Math.round(glGoalsPerChain.spar.displays * 10) / 10;
+    chainData.spar.goalKartonware = Math.round(glGoalsPerChain.spar.kartonware * 10) / 10;
+    chainData.zoofachhandel.goalDisplays = Math.round(glGoalsPerChain.zoofachhandel.displays * 10) / 10;
+    chainData.zoofachhandel.goalKartonware = Math.round(glGoalsPerChain.zoofachhandel.kartonware * 10) / 10;
+    chainData.hagebau.goalDisplays = Math.round(glGoalsPerChain.hagebau.displays * 10) / 10;
+    chainData.hagebau.goalKartonware = Math.round(glGoalsPerChain.hagebau.kartonware * 10) / 10;
 
     // Convert to response format
     const formatChainResponse = (chain: string) => {
