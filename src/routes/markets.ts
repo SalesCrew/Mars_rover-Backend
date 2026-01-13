@@ -420,34 +420,43 @@ router.get('/:id/history', async (req: Request, res: Response) => {
       .order('created_at', { ascending: false });
     
     if (submissionsData && submissionsData.length > 0) {
-      // Get item names
+      // Get item names from correct tables
       const displayIds = submissionsData.filter(s => s.item_type === 'display').map(s => s.item_id);
       const kartonwareIds = submissionsData.filter(s => s.item_type === 'kartonware').map(s => s.item_id);
-      const paletteIds = submissionsData.filter(s => s.item_type === 'palette').map(s => s.item_id);
-      const schutteIds = submissionsData.filter(s => s.item_type === 'schuette').map(s => s.item_id);
+      const paletteProductIds = submissionsData.filter(s => s.item_type === 'palette').map(s => s.item_id);
+      const schutteProductIds = submissionsData.filter(s => s.item_type === 'schuette').map(s => s.item_id);
       
-      const [displaysRes, kartonwareRes, palettenRes, schuttenRes] = await Promise.all([
+      const [displaysRes, kartonwareRes, paletteProductsRes, schutteProductsRes] = await Promise.all([
         displayIds.length > 0 ? freshClient.from('wellen_displays').select('id, name').in('id', displayIds) : { data: [] },
         kartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, name').in('id', kartonwareIds) : { data: [] },
-        paletteIds.length > 0 ? freshClient.from('wellen_paletten').select('id, name').in('id', paletteIds) : { data: [] },
-        schutteIds.length > 0 ? freshClient.from('wellen_schuetten').select('id, name').in('id', schutteIds) : { data: [] }
+        paletteProductIds.length > 0 ? freshClient.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('id', paletteProductIds) : { data: [] },
+        schutteProductIds.length > 0 ? freshClient.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('id', schutteProductIds) : { data: [] }
       ]);
       
       const displays = displaysRes.data || [];
       const kartonware = kartonwareRes.data || [];
-      const paletten = palettenRes.data || [];
+      const paletteProducts = paletteProductsRes.data || [];
+      const schutteProducts = schutteProductsRes.data || [];
+      
+      // Fetch parent palette/schuette names
+      const paletteParentIds = [...new Set((paletteProducts || []).map((p: any) => p.palette_id))].filter(Boolean);
+      const schutteParentIds = [...new Set((schutteProducts || []).map((p: any) => p.schuette_id))].filter(Boolean);
+      
+      const [palettesRes, schuttenRes] = await Promise.all([
+        paletteParentIds.length > 0 ? freshClient.from('wellen_paletten').select('id, name').in('id', paletteParentIds) : { data: [] },
+        schutteParentIds.length > 0 ? freshClient.from('wellen_schuetten').select('id, name').in('id', schutteParentIds) : { data: [] }
+      ]);
+      
+      const palettes = palettesRes.data || [];
       const schutten = schuttenRes.data || [];
       
-      for (const s of submissionsData) {
+      // Process display/kartonware entries (standard, no grouping needed)
+      for (const s of submissionsData.filter(sub => sub.item_type === 'display' || sub.item_type === 'kartonware')) {
         let itemName = 'Unbekannt';
         if (s.item_type === 'display') {
           itemName = displays.find((d: any) => d.id === s.item_id)?.name || 'Display';
         } else if (s.item_type === 'kartonware') {
           itemName = kartonware.find((k: any) => k.id === s.item_id)?.name || 'Kartonware';
-        } else if (s.item_type === 'palette') {
-          itemName = paletten.find((pl: any) => pl.id === s.item_id)?.name || 'Palette';
-        } else if (s.item_type === 'schuette') {
-          itemName = schutten.find((sc: any) => sc.id === s.item_id)?.name || 'Schütte';
         }
         
         activities.push({
@@ -461,6 +470,100 @@ router.get('/:id/history', async (req: Request, res: Response) => {
             itemType: s.item_type,
             itemName,
             quantity: s.quantity
+          }
+        });
+      }
+      
+      // Group palette submissions by parent palette (within same welle and time window)
+      const paletteSubmissions = submissionsData.filter(sub => sub.item_type === 'palette');
+      const paletteGroups = new Map<string, any[]>();
+      
+      for (const sub of paletteSubmissions) {
+        const product = paletteProducts.find((p: any) => p.id === sub.item_id);
+        const parentId = product?.palette_id || 'unknown';
+        const timeBucket = Math.floor(new Date(sub.created_at).getTime() / (5 * 60 * 1000));
+        const key = `${sub.welle_id}|${parentId}|${timeBucket}`;
+        
+        if (!paletteGroups.has(key)) {
+          paletteGroups.set(key, []);
+        }
+        paletteGroups.get(key)!.push({ ...sub, product });
+      }
+      
+      for (const [, subs] of paletteGroups) {
+        const firstSub = subs[0];
+        const parentPalette = palettes.find((p: any) => p.id === firstSub.product?.palette_id);
+        
+        const products = subs.map((sub: any) => ({
+          id: sub.item_id,
+          name: sub.product?.name || 'Produkt',
+          quantity: sub.quantity,
+          valuePerUnit: sub.value_per_unit || sub.product?.value_per_ve || 0
+        }));
+        
+        const totalValue = products.reduce((sum: number, p: any) => sum + (p.quantity * p.valuePerUnit), 0);
+        
+        activities.push({
+          id: subs.map((s: any) => s.id).join(','),
+          type: 'vorbesteller',
+          date: firstSub.created_at,
+          glName: firstSub.gebietsleiter?.name || 'Unbekannt',
+          glId: firstSub.gebietsleiter_id,
+          details: {
+            welleName: firstSub.wellen?.name || 'Unbekannt',
+            itemType: 'palette',
+            itemName: parentPalette?.name || 'Palette',
+            parentId: firstSub.product?.palette_id,
+            products,
+            totalValue,
+            quantity: 1
+          }
+        });
+      }
+      
+      // Group schuette submissions by parent schuette (within same welle and time window)
+      const schutteSubmissions = submissionsData.filter(sub => sub.item_type === 'schuette');
+      const schutteGroups = new Map<string, any[]>();
+      
+      for (const sub of schutteSubmissions) {
+        const product = schutteProducts.find((p: any) => p.id === sub.item_id);
+        const parentId = product?.schuette_id || 'unknown';
+        const timeBucket = Math.floor(new Date(sub.created_at).getTime() / (5 * 60 * 1000));
+        const key = `${sub.welle_id}|${parentId}|${timeBucket}`;
+        
+        if (!schutteGroups.has(key)) {
+          schutteGroups.set(key, []);
+        }
+        schutteGroups.get(key)!.push({ ...sub, product });
+      }
+      
+      for (const [, subs] of schutteGroups) {
+        const firstSub = subs[0];
+        const parentSchutte = schutten.find((s: any) => s.id === firstSub.product?.schuette_id);
+        
+        const products = subs.map((sub: any) => ({
+          id: sub.item_id,
+          name: sub.product?.name || 'Produkt',
+          quantity: sub.quantity,
+          valuePerUnit: sub.value_per_unit || sub.product?.value_per_ve || 0
+        }));
+        
+        const totalValue = products.reduce((sum: number, p: any) => sum + (p.quantity * p.valuePerUnit), 0);
+        
+        activities.push({
+          id: subs.map((s: any) => s.id).join(','),
+          type: 'vorbesteller',
+          date: firstSub.created_at,
+          glName: firstSub.gebietsleiter?.name || 'Unbekannt',
+          glId: firstSub.gebietsleiter_id,
+          details: {
+            welleName: firstSub.wellen?.name || 'Unbekannt',
+            itemType: 'schuette',
+            itemName: parentSchutte?.name || 'Schütte',
+            parentId: firstSub.product?.schuette_id,
+            products,
+            totalValue,
+            quantity: 1
           }
         });
       }
