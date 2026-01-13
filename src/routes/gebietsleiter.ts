@@ -793,9 +793,9 @@ router.get('/:id/profile-stats', async (req: Request, res: Response) => {
 
     // 2. Get unique markets visited this month (from wellen_submissions, vorverkauf_submissions, vorverkauf_entries)
     const [wellenSubs, vorverkaufSubs, produkttauschEntries] = await Promise.all([
-      freshClient.from('wellen_submissions').select('market_id').eq('gebietsleiter_id', id).gte('created_at', currentMonthStart).lte('created_at', currentMonthEnd),
-      freshClient.from('vorverkauf_submissions').select('market_id').eq('gebietsleiter_id', id).gte('created_at', currentMonthStart).lte('created_at', currentMonthEnd),
-      freshClient.from('vorverkauf_entries').select('market_id').eq('gebietsleiter_id', id).gte('created_at', currentMonthStart).lte('created_at', currentMonthEnd)
+      freshClient.from('wellen_submissions').select('market_id, created_at').eq('gebietsleiter_id', id).gte('created_at', currentMonthStart).lte('created_at', currentMonthEnd),
+      freshClient.from('vorverkauf_submissions').select('market_id, created_at').eq('gebietsleiter_id', id).gte('created_at', currentMonthStart).lte('created_at', currentMonthEnd),
+      freshClient.from('vorverkauf_entries').select('market_id, created_at').eq('gebietsleiter_id', id).gte('created_at', currentMonthStart).lte('created_at', currentMonthEnd)
     ]);
 
     const currentMonthMarkets = new Set([
@@ -807,9 +807,9 @@ router.get('/:id/profile-stats', async (req: Request, res: Response) => {
 
     // 3. Get previous month visits for comparison
     const [wellenSubsPrev, vorverkaufSubsPrev, produkttauschEntriesPrev] = await Promise.all([
-      freshClient.from('wellen_submissions').select('market_id').eq('gebietsleiter_id', id).gte('created_at', prevMonthStart).lte('created_at', prevMonthEnd),
-      freshClient.from('vorverkauf_submissions').select('market_id').eq('gebietsleiter_id', id).gte('created_at', prevMonthStart).lte('created_at', prevMonthEnd),
-      freshClient.from('vorverkauf_entries').select('market_id').eq('gebietsleiter_id', id).gte('created_at', prevMonthStart).lte('created_at', prevMonthEnd)
+      freshClient.from('wellen_submissions').select('market_id, created_at').eq('gebietsleiter_id', id).gte('created_at', prevMonthStart).lte('created_at', prevMonthEnd),
+      freshClient.from('vorverkauf_submissions').select('market_id, created_at').eq('gebietsleiter_id', id).gte('created_at', prevMonthStart).lte('created_at', prevMonthEnd),
+      freshClient.from('vorverkauf_entries').select('market_id, created_at').eq('gebietsleiter_id', id).gte('created_at', prevMonthStart).lte('created_at', prevMonthEnd)
     ]);
 
     const prevMonthMarkets = new Set([
