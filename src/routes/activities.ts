@@ -249,13 +249,55 @@ router.delete('/:type/:id', async (req: Request, res: Response) => {
     const freshClient = createFreshClient();
     
     if (type === 'vorbestellung') {
+      // First get the submission details to update wellen_gl_progress
+      const { data: submission, error: fetchError } = await freshClient
+        .from('wellen_submissions')
+        .select('welle_id, gebietsleiter_id, item_type, item_id, quantity')
+        .eq('id', id)
+        .single();
+      
+      if (fetchError) {
+        console.warn('Could not fetch submission details:', fetchError.message);
+      }
+      
+      // Delete from wellen_submissions
       const { error } = await freshClient
         .from('wellen_submissions')
         .delete()
         .eq('id', id);
       
       if (error) throw error;
+      
+      // Also decrement the count in wellen_gl_progress
+      if (submission) {
+        const { data: progress } = await freshClient
+          .from('wellen_gl_progress')
+          .select('id, current_number')
+          .eq('welle_id', submission.welle_id)
+          .eq('gebietsleiter_id', submission.gebietsleiter_id)
+          .eq('item_type', submission.item_type)
+          .eq('item_id', submission.item_id)
+          .single();
+        
+        if (progress) {
+          const newCount = Math.max(0, (progress.current_number || 0) - (submission.quantity || 0));
+          await freshClient
+            .from('wellen_gl_progress')
+            .update({ current_number: newCount, updated_at: new Date().toISOString() })
+            .eq('id', progress.id);
+          console.log(`📉 Decremented wellen_gl_progress by ${submission.quantity}, new count: ${newCount}`);
+        }
+      }
     } else if (type === 'vorverkauf') {
+      // Delete from vorverkauf_entries (Produkttausch)
+      const { error } = await freshClient
+        .from('vorverkauf_entries')
+        .delete()
+        .eq('id', id);
+      
+      if (error) throw error;
+    } else if (type === 'produkttausch') {
+      // Alias for vorverkauf_entries
       const { error } = await freshClient
         .from('vorverkauf_entries')
         .delete()
