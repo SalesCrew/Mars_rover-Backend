@@ -910,13 +910,58 @@ router.get('/:id/profile-stats', async (req: Request, res: Response) => {
       }
     }
 
+    // 7. Get this month's Vorverkäufe and Produkttausch counts
+    const vorverkaufeCount = (vorverkaufSubs.data || []).length;
+    const produkttauschCount = (produkttauschEntries.data || []).length;
+
+    // 8. Get top 3 visited markets
+    const sortedMarketVisits = Object.entries(allMarketVisits)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3);
+    
+    const topMarkets = await Promise.all(
+      sortedMarketVisits.map(async ([marketId, visitCount]) => {
+        const { data: market } = await freshClient
+          .from('markets')
+          .select('id, name, chain, address, city, postal_code')
+          .eq('id', marketId)
+          .single();
+        
+        // Get last visit date for this market from all sources
+        const allVisits = [
+          ...(wellenSubs.data || []).filter(s => s.market_id === marketId),
+          ...(wellenSubsPrev.data || []).filter(s => s.market_id === marketId),
+          ...(vorverkaufSubs.data || []).filter(s => s.market_id === marketId),
+          ...(vorverkaufSubsPrev.data || []).filter(s => s.market_id === marketId),
+          ...(produkttauschEntries.data || []).filter(e => e.market_id === marketId),
+          ...(produkttauschEntriesPrev.data || []).filter(e => e.market_id === marketId)
+        ];
+        
+        const lastVisit = allVisits.length > 0 
+          ? allVisits.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0].created_at
+          : null;
+        
+        return {
+          id: market?.id || marketId,
+          name: market?.name || 'Unbekannt',
+          chain: market?.chain || '',
+          address: market?.address || '',
+          visitCount,
+          lastVisit: lastVisit || ''
+        };
+      })
+    );
+
     res.json({
       monthlyVisits,
       totalMarkets: totalMarkets || 0,
       monthChangePercent,
       sellInSuccessRate,
       sellInChangePercent,
-      mostVisitedMarket
+      mostVisitedMarket,
+      vorverkaufeCount,
+      produkttauschCount,
+      topMarkets
     });
   } catch (error: any) {
     console.error('❌ Error fetching profile stats:', error);
