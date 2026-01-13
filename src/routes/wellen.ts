@@ -2083,13 +2083,17 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     const marketIds = [...new Set(progressEntries.map(p => p.market_id).filter(Boolean))];
     const displayIds = progressEntries.filter(p => p.item_type === 'display').map(p => p.item_id).filter(Boolean);
     const kartonwareIds = progressEntries.filter(p => p.item_type === 'kartonware').map(p => p.item_id).filter(Boolean);
+    const paletteProductIds = progressEntries.filter(p => p.item_type === 'palette').map(p => p.item_id).filter(Boolean);
+    const schutteProductIds = progressEntries.filter(p => p.item_type === 'schuette').map(p => p.item_id).filter(Boolean);
 
-    const [glsResult, glDetailsResult, marketsResult, displaysResult, kartonwareResult] = await Promise.all([
+    const [glsResult, glDetailsResult, marketsResult, displaysResult, kartonwareResult, paletteProductsResult, schutteProductsResult] = await Promise.all([
       glIds.length > 0 ? freshClient.from('users').select('id, email').in('id', glIds) : { data: [] },
       glIds.length > 0 ? freshClient.from('gebietsleiter').select('id, name').in('id', glIds) : { data: [] },
       marketIds.length > 0 ? freshClient.from('markets').select('id, name, chain').in('id', marketIds) : { data: [] },
       displayIds.length > 0 ? freshClient.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
-      kartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] }
+      kartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] },
+      paletteProductIds.length > 0 ? freshClient.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('id', paletteProductIds) : { data: [] },
+      schutteProductIds.length > 0 ? freshClient.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('id', schutteProductIds) : { data: [] }
     ]);
 
     const gls = glsResult.data || [];
@@ -2097,8 +2101,28 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     const markets = marketsResult.data || [];
     const displays = displaysResult.data || [];
     const kartonware = kartonwareResult.data || [];
+    const paletteProducts = paletteProductsResult.data || [];
+    const schutteProducts = schutteProductsResult.data || [];
 
-    const response = progressEntries.map(entry => {
+    // Fetch parent palette/schuette names
+    const paletteIds = [...new Set((paletteProducts || []).map((p: any) => p.palette_id))].filter(Boolean);
+    const schutteIds = [...new Set((schutteProducts || []).map((p: any) => p.schuette_id))].filter(Boolean);
+    
+    const [palettesResult, schuttenResult] = await Promise.all([
+      paletteIds.length > 0 ? freshClient.from('wellen_paletten').select('id, name').in('id', paletteIds) : { data: [] },
+      schutteIds.length > 0 ? freshClient.from('wellen_schuetten').select('id, name').in('id', schutteIds) : { data: [] }
+    ]);
+    
+    const palettes = palettesResult.data || [];
+    const schutten = schuttenResult.data || [];
+
+    // Separate entries by type
+    const displayKartonwareEntries = progressEntries.filter(p => p.item_type === 'display' || p.item_type === 'kartonware');
+    const paletteEntries = progressEntries.filter(p => p.item_type === 'palette');
+    const schutteEntries = progressEntries.filter(p => p.item_type === 'schuette');
+
+    // Process display/kartonware entries (standard)
+    const standardResponses = displayKartonwareEntries.map(entry => {
       const gl = glDetails.find((g: any) => g.id === entry.gebietsleiter_id);
       const glUser = gls.find((u: any) => u.id === entry.gebietsleiter_id);
       const market = markets.find((m: any) => m.id === entry.market_id);
@@ -2112,14 +2136,112 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
         glEmail: glUser?.email || '',
         marketName: market?.name || 'Unknown',
         marketChain: market?.chain || '',
-        itemType: entry.item_type,
+        itemType: entry.item_type as 'display' | 'kartonware',
         itemName: item?.name || 'Unknown',
         quantity: entry.current_number,
-        value: entry.current_number * (item?.item_value || 0),
+        value: entry.current_number * (item?.item_value || entry.value_per_unit || 0),
         timestamp: entry.created_at,
         photoUrl: entry.photo_url
       };
     });
+
+    // Group palette entries by parent palette (per GL and market)
+    const paletteGroups = new Map<string, any[]>();
+    for (const entry of paletteEntries) {
+      const product = paletteProducts.find((p: any) => p.id === entry.item_id);
+      const parentId = product?.palette_id || 'unknown';
+      const key = `${entry.gebietsleiter_id}|${entry.market_id}|${parentId}`;
+      if (!paletteGroups.has(key)) {
+        paletteGroups.set(key, []);
+      }
+      paletteGroups.get(key)!.push({ ...entry, product });
+    }
+
+    const paletteResponses: any[] = [];
+    for (const [, entries] of paletteGroups) {
+      const firstEntry = entries[0];
+      const gl = glDetails.find((g: any) => g.id === firstEntry.gebietsleiter_id);
+      const glUser = gls.find((u: any) => u.id === firstEntry.gebietsleiter_id);
+      const market = markets.find((m: any) => m.id === firstEntry.market_id);
+      const parentPalette = palettes.find((p: any) => p.id === firstEntry.product?.palette_id);
+
+      const products = entries.map((e: any) => ({
+        id: e.item_id,
+        name: e.product?.name || 'Produkt',
+        quantity: e.current_number,
+        valuePerUnit: e.value_per_unit || e.product?.value_per_ve || 0,
+        value: e.current_number * (e.value_per_unit || e.product?.value_per_ve || 0)
+      }));
+
+      const totalValue = products.reduce((sum: number, p: any) => sum + p.value, 0);
+
+      paletteResponses.push({
+        id: entries.map((e: any) => e.id).join(','),
+        glName: gl?.name || 'Unknown',
+        glEmail: glUser?.email || '',
+        marketName: market?.name || 'Unknown',
+        marketChain: market?.chain || '',
+        itemType: 'palette' as const,
+        itemName: parentPalette?.name || 'Palette',
+        parentId: firstEntry.product?.palette_id,
+        products,
+        quantity: 1,
+        value: totalValue,
+        timestamp: firstEntry.created_at,
+        photoUrl: firstEntry.photo_url
+      });
+    }
+
+    // Group schuette entries by parent schuette (per GL and market)
+    const schutteGroups = new Map<string, any[]>();
+    for (const entry of schutteEntries) {
+      const product = schutteProducts.find((p: any) => p.id === entry.item_id);
+      const parentId = product?.schuette_id || 'unknown';
+      const key = `${entry.gebietsleiter_id}|${entry.market_id}|${parentId}`;
+      if (!schutteGroups.has(key)) {
+        schutteGroups.set(key, []);
+      }
+      schutteGroups.get(key)!.push({ ...entry, product });
+    }
+
+    const schutteResponses: any[] = [];
+    for (const [, entries] of schutteGroups) {
+      const firstEntry = entries[0];
+      const gl = glDetails.find((g: any) => g.id === firstEntry.gebietsleiter_id);
+      const glUser = gls.find((u: any) => u.id === firstEntry.gebietsleiter_id);
+      const market = markets.find((m: any) => m.id === firstEntry.market_id);
+      const parentSchutte = schutten.find((s: any) => s.id === firstEntry.product?.schuette_id);
+
+      const products = entries.map((e: any) => ({
+        id: e.item_id,
+        name: e.product?.name || 'Produkt',
+        quantity: e.current_number,
+        valuePerUnit: e.value_per_unit || e.product?.value_per_ve || 0,
+        value: e.current_number * (e.value_per_unit || e.product?.value_per_ve || 0)
+      }));
+
+      const totalValue = products.reduce((sum: number, p: any) => sum + p.value, 0);
+
+      schutteResponses.push({
+        id: entries.map((e: any) => e.id).join(','),
+        glName: gl?.name || 'Unknown',
+        glEmail: glUser?.email || '',
+        marketName: market?.name || 'Unknown',
+        marketChain: market?.chain || '',
+        itemType: 'schuette' as const,
+        itemName: parentSchutte?.name || 'Schütte',
+        parentId: firstEntry.product?.schuette_id,
+        products,
+        quantity: 1,
+        value: totalValue,
+        timestamp: firstEntry.created_at,
+        photoUrl: firstEntry.photo_url
+      });
+    }
+
+    // Combine and sort by timestamp
+    const response = [...standardResponses, ...paletteResponses, ...schutteResponses]
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
     res.json(response);
   } catch (error: any) {
