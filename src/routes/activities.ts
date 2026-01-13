@@ -176,30 +176,30 @@ router.get('/', async (req: Request, res: Response) => {
 });
 
 // ============================================================================
-// UPDATE VORBESTELLUNG (wellen_gl_progress)
+// UPDATE VORBESTELLUNG (wellen_submissions)
 // ============================================================================
 router.put('/vorbestellung/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { current_number } = req.body;
     
-    console.log(`📝 Updating vorbestellung ${id}...`);
+    console.log(`📝 Updating vorbestellung submission ${id} to quantity ${current_number}...`);
     
     const freshClient = createFreshClient();
     
     const { data, error } = await freshClient
-      .from('wellen_gl_progress')
-      .update({ current_number, updated_at: new Date().toISOString() })
+      .from('wellen_submissions')
+      .update({ quantity: current_number })
       .eq('id', id)
       .select()
       .single();
     
     if (error) throw error;
     
-    console.log(`✅ Updated vorbestellung ${id}`);
+    console.log(`✅ Updated vorbestellung submission ${id}`);
     res.json(data);
   } catch (error: any) {
-    console.error('❌ Error updating vorbestellung:', error);
+    console.error('❌ Error updating vorbestellung submission:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
@@ -250,7 +250,7 @@ router.delete('/:type/:id', async (req: Request, res: Response) => {
     
     if (type === 'vorbestellung') {
       const { error } = await freshClient
-        .from('wellen_gl_progress')
+        .from('wellen_submissions')
         .delete()
         .eq('id', id);
       
