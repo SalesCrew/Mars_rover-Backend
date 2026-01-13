@@ -323,7 +323,7 @@ router.get('/pending/:glId', async (req: Request, res: Response) => {
     const entryIds = entries.map(e => e.id);
 
     const [marketsResult, itemsResult] = await Promise.all([
-      marketIds.length > 0 ? freshClient.from('markets').select('id, name, chain').in('id', marketIds) : { data: [] },
+      marketIds.length > 0 ? freshClient.from('markets').select('id, name, chain, address, city, postal_code').in('id', marketIds) : { data: [] },
       entryIds.length > 0 ? freshClient.from('vorverkauf_items').select('*').in('vorverkauf_entry_id', entryIds) : { data: [] }
     ]);
 
@@ -375,6 +375,9 @@ router.get('/pending/:glId', async (req: Request, res: Response) => {
         marketId: entry.market_id,
         marketName: market?.name || 'Unknown',
         marketChain: market?.chain || '',
+        marketAddress: market?.address || '',
+        marketCity: market?.city || '',
+        marketPostalCode: market?.postal_code || '',
         takeOutCount: takeOutItems.reduce((sum, i) => sum + i.quantity, 0),
         replaceCount: replaceItems.reduce((sum, i) => sum + i.quantity, 0),
         takeOutProducts,
