@@ -5,7 +5,7 @@ const router = Router();
 
 interface Activity {
   id: string;
-  type: 'vorbestellung' | 'vorverkauf';
+  type: 'vorbestellung' | 'vorverkauf' | 'produkttausch_pending';
   glId: string;
   glName: string;
   marketId: string;
@@ -15,6 +15,7 @@ interface Activity {
   action: string;
   details: any;
   createdAt: string;
+  status?: 'pending' | 'completed';
 }
 
 // ============================================================================
@@ -299,22 +300,25 @@ router.get('/', async (req: Request, res: Response) => {
     const vorverkaufActivities: Activity[] = (vorverkaufData || []).map(v => {
       const gl = gls.find((g: any) => g.id === v.gebietsleiter_id);
       const market = markets.find((m: any) => m.id === v.market_id);
+      const isPending = v.status === 'pending';
       
       return {
         id: v.id,
-        type: 'vorverkauf' as const,
+        type: isPending ? 'produkttausch_pending' as const : 'vorverkauf' as const,
         glId: v.gebietsleiter_id,
         glName: gl?.name || 'Unknown',
         marketId: v.market_id,
         marketChain: market?.chain || 'Unknown',
         marketAddress: market?.address || '',
         marketCity: market?.city || '',
-        action: `Vorverkauf: ${v.reason}`,
+        action: isPending ? `Vorgemerkt: ${v.reason}` : `Vorverkauf: ${v.reason}`,
         details: {
           reason: v.reason,
-          notes: v.notes
+          notes: v.notes,
+          status: v.status || 'completed'
         },
-        createdAt: v.created_at
+        createdAt: v.created_at,
+        status: v.status || 'completed'
       };
     });
     

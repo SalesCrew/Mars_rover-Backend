@@ -195,10 +195,13 @@ router.get('/:id', async (req: Request, res: Response) => {
 // ============================================================================
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { gebietsleiter_id, market_id, reason, notes, items, take_out_items, replace_items } = req.body;
+    const { gebietsleiter_id, market_id, reason, notes, items, take_out_items, replace_items, status } = req.body;
 
     console.log('📦 Creating vorverkauf entry...');
     console.log('Request body:', JSON.stringify(req.body, null, 2));
+    
+    // Validate status
+    const entryStatus = status === 'pending' ? 'pending' : 'completed';
     
     const freshClient = createFreshClient();
 
@@ -229,7 +232,8 @@ router.post('/', async (req: Request, res: Response) => {
         gebietsleiter_id,
         market_id,
         reason,
-        notes: notes || null
+        notes: notes || null,
+        status: entryStatus
       })
       .select()
       .single();
@@ -277,14 +281,181 @@ router.post('/', async (req: Request, res: Response) => {
       console.log(`📍 Recorded visit for market ${market_id}`);
     }
 
-    console.log(`✅ Created vorverkauf entry with ${allItems.length} items`);
+    console.log(`✅ Created vorverkauf entry with ${allItems.length} items (status: ${entryStatus})`);
     res.status(201).json({
       message: 'Vorverkauf entry created successfully',
       id: entry.id,
-      itemsCount: allItems.length
+      itemsCount: allItems.length,
+      status: entryStatus
     });
   } catch (error: any) {
     console.error('❌ Error creating vorverkauf entry:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ============================================================================
+// GET PENDING ENTRIES FOR GL
+// ============================================================================
+router.get('/pending/:glId', async (req: Request, res: Response) => {
+  try {
+    const { glId } = req.params;
+    console.log(`📋 Fetching pending entries for GL ${glId}...`);
+    
+    const freshClient = createFreshClient();
+
+    // Fetch pending entries for this GL
+    const { data: entries, error: entriesError } = await freshClient
+      .from('vorverkauf_entries')
+      .select('*')
+      .eq('gebietsleiter_id', glId)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false });
+
+    if (entriesError) throw entriesError;
+
+    if (!entries || entries.length === 0) {
+      return res.json([]);
+    }
+
+    // Get market info and items
+    const marketIds = [...new Set(entries.map(e => e.market_id))];
+    const entryIds = entries.map(e => e.id);
+
+    const [marketsResult, itemsResult] = await Promise.all([
+      marketIds.length > 0 ? freshClient.from('markets').select('id, name, chain').in('id', marketIds) : { data: [] },
+      entryIds.length > 0 ? freshClient.from('vorverkauf_items').select('*').in('vorverkauf_entry_id', entryIds) : { data: [] }
+    ]);
+
+    const markets = marketsResult.data || [];
+    const items = itemsResult.data || [];
+
+    // Get product info
+    const productIds = [...new Set(items.map(i => i.product_id).filter(Boolean))];
+    let products: any[] = [];
+    if (productIds.length > 0) {
+      const { data } = await freshClient.from('products').select('*').in('id', productIds);
+      products = data || [];
+    }
+
+    // Build response
+    const response = entries.map(entry => {
+      const market = markets.find((m: any) => m.id === entry.market_id);
+      const entryItems = items.filter(i => i.vorverkauf_entry_id === entry.id);
+      const takeOutItems = entryItems.filter(i => i.item_type === 'take_out');
+      const replaceItems = entryItems.filter(i => i.item_type === 'replace');
+
+      const takeOutProducts = takeOutItems.map(item => {
+        const product = products.find((p: any) => String(p.id) === String(item.product_id));
+        return {
+          id: item.id,
+          productId: item.product_id,
+          name: product?.name || 'Unknown',
+          quantity: item.quantity,
+          price: product?.price || 0
+        };
+      });
+
+      const replaceProducts = replaceItems.map(item => {
+        const product = products.find((p: any) => String(p.id) === String(item.product_id));
+        return {
+          id: item.id,
+          productId: item.product_id,
+          name: product?.name || 'Unknown',
+          quantity: item.quantity,
+          price: product?.price || 0
+        };
+      });
+
+      const takeOutValue = takeOutProducts.reduce((sum, p) => sum + (p.price * p.quantity), 0);
+      const replaceValue = replaceProducts.reduce((sum, p) => sum + (p.price * p.quantity), 0);
+
+      return {
+        id: entry.id,
+        marketId: entry.market_id,
+        marketName: market?.name || 'Unknown',
+        marketChain: market?.chain || '',
+        takeOutCount: takeOutItems.reduce((sum, i) => sum + i.quantity, 0),
+        replaceCount: replaceItems.reduce((sum, i) => sum + i.quantity, 0),
+        takeOutProducts,
+        replaceProducts,
+        takeOutValue,
+        replaceValue,
+        notes: entry.notes,
+        createdAt: entry.created_at
+      };
+    });
+
+    console.log(`✅ Found ${response.length} pending entries for GL ${glId}`);
+    res.json(response);
+  } catch (error: any) {
+    console.error('❌ Error fetching pending entries:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ============================================================================
+// FULFILL PENDING ENTRY
+// ============================================================================
+router.put('/:id/fulfill', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    console.log(`✅ Fulfilling pending entry ${id}...`);
+    
+    const freshClient = createFreshClient();
+
+    // Get the entry first
+    const { data: entry, error: getError } = await freshClient
+      .from('vorverkauf_entries')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (getError) throw getError;
+    if (!entry) {
+      return res.status(404).json({ error: 'Entry not found' });
+    }
+    if (entry.status !== 'pending') {
+      return res.status(400).json({ error: 'Entry is not pending' });
+    }
+
+    // Update status to completed
+    const { error: updateError } = await freshClient
+      .from('vorverkauf_entries')
+      .update({ 
+        status: 'completed',
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id);
+
+    if (updateError) throw updateError;
+
+    // Update market visit count (multiple actions same day = 1 visit)
+    const today = new Date().toISOString().split('T')[0];
+    const { data: market } = await freshClient
+      .from('markets')
+      .select('last_visit_date, current_visits')
+      .eq('id', entry.market_id)
+      .single();
+
+    if (market && market.last_visit_date !== today) {
+      await freshClient
+        .from('markets')
+        .update({
+          current_visits: (market.current_visits || 0) + 1,
+          last_visit_date: today
+        })
+        .eq('id', entry.market_id);
+      console.log(`📍 Recorded visit for market ${entry.market_id}`);
+    }
+
+    console.log(`✅ Fulfilled pending entry ${id}`);
+    res.json({ 
+      message: 'Entry fulfilled successfully',
+      id: entry.id 
+    });
+  } catch (error: any) {
+    console.error('❌ Error fulfilling entry:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
