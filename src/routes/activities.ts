@@ -100,6 +100,20 @@ router.get('/', async (req: Request, res: Response) => {
     const palettes = palettesResult.data || [];
     const schutten = schuttenResult.data || [];
     
+    // Fetch vorverkauf items
+    const vorverkaufEntryIds = (vorverkaufData || []).map(v => v.id);
+    const vorverkaufItemsResult = vorverkaufEntryIds.length > 0 
+      ? await freshClient.from('vorverkauf_items').select('*').in('vorverkauf_entry_id', vorverkaufEntryIds)
+      : { data: [] };
+    const vorverkaufItems = vorverkaufItemsResult.data || [];
+    
+    // Fetch product info for vorverkauf items
+    const vorverkaufProductIds = [...new Set(vorverkaufItems.map(i => i.product_id))].filter(Boolean);
+    const vorverkaufProductsResult = vorverkaufProductIds.length > 0
+      ? await freshClient.from('products').select('*').in('id', vorverkaufProductIds)
+      : { data: [] };
+    const vorverkaufProducts = vorverkaufProductsResult.data || [];
+    
     // Get welle markets for progress entries
     let welleMarkets: any[] = [];
     if (welleIds.length > 0) {
@@ -302,6 +316,37 @@ router.get('/', async (req: Request, res: Response) => {
       const market = markets.find((m: any) => m.id === v.market_id);
       const isPending = v.status === 'pending';
       
+      // Get items for this entry
+      const entryItems = vorverkaufItems.filter(i => i.vorverkauf_entry_id === v.id);
+      const takeOutItems = entryItems.filter(i => i.item_type === 'take_out');
+      const replaceItems = entryItems.filter(i => i.item_type === 'replace');
+      
+      // Map items to products
+      const takeOutProducts = takeOutItems.map(item => {
+        const product = vorverkaufProducts.find((p: any) => String(p.id) === String(item.product_id));
+        return {
+          id: item.id,
+          productId: item.product_id,
+          name: product?.name || 'Unknown',
+          quantity: item.quantity,
+          price: product?.price || 0
+        };
+      });
+      
+      const replaceProducts = replaceItems.map(item => {
+        const product = vorverkaufProducts.find((p: any) => String(p.id) === String(item.product_id));
+        return {
+          id: item.id,
+          productId: item.product_id,
+          name: product?.name || 'Unknown',
+          quantity: item.quantity,
+          price: product?.price || 0
+        };
+      });
+      
+      const takeOutValue = takeOutProducts.reduce((sum, p) => sum + (p.price * p.quantity), 0);
+      const replaceValue = replaceProducts.reduce((sum, p) => sum + (p.price * p.quantity), 0);
+      
       return {
         id: v.id,
         type: isPending ? 'produkttausch_pending' as const : 'vorverkauf' as const,
@@ -315,7 +360,11 @@ router.get('/', async (req: Request, res: Response) => {
         details: {
           reason: v.reason,
           notes: v.notes,
-          status: v.status || 'completed'
+          status: v.status || 'completed',
+          takeOutProducts,
+          replaceProducts,
+          takeOutValue,
+          replaceValue
         },
         createdAt: v.created_at,
         status: v.status || 'completed'
@@ -521,8 +570,8 @@ router.delete('/:type/:id', async (req: Request, res: Response) => {
       }
       
       console.log(`✅ Deleted ${ids.length} submission(s)`);
-    } else if (type === 'vorverkauf') {
-      // Delete from vorverkauf_entries (Produkttausch)
+    } else if (type === 'vorverkauf' || type === 'produkttausch_pending') {
+      // Delete from vorverkauf_entries (Produkttausch - both completed and pending)
       const { error } = await freshClient
         .from('vorverkauf_entries')
         .delete()
