@@ -29,11 +29,11 @@ router.get('/', async (req: Request, res: Response) => {
     
     const freshClient = createFreshClient();
     
-    // Fetch vorbestellungen (wellen_gl_progress)
+    // Fetch vorbestellungen (wellen_submissions - individual market submissions)
     const { data: progressData, error: progressError } = await freshClient
-      .from('wellen_gl_progress')
+      .from('wellen_submissions')
       .select('*')
-      .order('updated_at', { ascending: false })
+      .order('created_at', { ascending: false })
       .range(0, 100);
     
     if (progressError) console.error('Progress error:', progressError);
@@ -57,6 +57,7 @@ router.get('/', async (req: Request, res: Response) => {
     
     const marketIds = [
       ...new Set([
+        ...(progressData || []).map(p => p.market_id),
         ...(vorverkaufData || []).map(v => v.market_id)
       ])
     ].filter(Boolean);
@@ -102,7 +103,7 @@ router.get('/', async (req: Request, res: Response) => {
       }
     }
     
-    // Transform vorbestellungen
+    // Transform vorbestellungen (from wellen_submissions)
     const progressActivities: Activity[] = (progressData || []).map(p => {
       const gl = gls.find((g: any) => g.id === p.gebietsleiter_id);
       const welle = wellen.find((w: any) => w.id === p.welle_id);
@@ -110,9 +111,8 @@ router.get('/', async (req: Request, res: Response) => {
         ? displays.find((d: any) => d.id === p.item_id)
         : kartonware.find((k: any) => k.id === p.item_id);
       
-      // Find a market for this welle
-      const welleMarket = welleMarkets.find(wm => wm.welle_id === p.welle_id);
-      const market = welleMarket ? markets.find((m: any) => m.id === welleMarket.market_id) : null;
+      // Get market directly from submission
+      const market = markets.find((m: any) => m.id === p.market_id);
       
       const itemName = item?.name || (p.item_type === 'display' ? 'Display' : 'Kartonware');
       
@@ -121,20 +121,21 @@ router.get('/', async (req: Request, res: Response) => {
         type: 'vorbestellung' as const,
         glId: p.gebietsleiter_id,
         glName: gl?.name || 'Unknown',
-        marketId: market?.id || '',
-        marketChain: market?.chain || welle?.name || 'Welle',
+        marketId: p.market_id || '',
+        marketChain: market?.chain || 'Unknown',
         marketAddress: market?.address || '',
-        marketCity: market?.city || '',
-        action: `+${p.current_number} ${p.item_type === 'display' ? 'Display' : 'Kartonware'}`,
+        marketCity: market?.city || market?.name || '',
+        action: `+${p.quantity} ${p.item_type === 'display' ? 'Display' : p.item_type === 'kartonware' ? 'Kartonware' : p.item_type}`,
         details: {
           welleId: p.welle_id,
           welleName: welle?.name || 'Unknown',
           itemId: p.item_id,
           itemName,
           itemType: p.item_type,
-          quantity: p.current_number
+          quantity: p.quantity,
+          marketName: market?.name || 'Unknown'
         },
-        createdAt: p.updated_at || p.created_at
+        createdAt: p.created_at
       };
     });
     
