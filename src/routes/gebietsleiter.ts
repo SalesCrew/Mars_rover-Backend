@@ -761,6 +761,130 @@ router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * GET /api/gebietsleiter/:id/profile-stats
+ * Get profile statistics for a GL
+ */
+router.get('/:id/profile-stats', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    console.log(`📊 Fetching profile stats for GL ${id}...`);
+    
+    const freshClient = createFreshClient();
+
+    const now = new Date();
+    const currentMonth = now.getMonth();
+    const currentYear = now.getFullYear();
+    
+    // Get current month start/end
+    const currentMonthStart = new Date(currentYear, currentMonth, 1).toISOString();
+    const currentMonthEnd = new Date(currentYear, currentMonth + 1, 0, 23, 59, 59).toISOString();
+    
+    // Get previous month start/end
+    const prevMonthStart = new Date(currentYear, currentMonth - 1, 1).toISOString();
+    const prevMonthEnd = new Date(currentYear, currentMonth, 0, 23, 59, 59).toISOString();
+
+    // 1. Get GL's total markets
+    const { count: totalMarkets } = await freshClient
+      .from('markets')
+      .select('id', { count: 'exact', head: true })
+      .eq('gebietsleiter_id', id)
+      .eq('is_active', true);
+
+    // 2. Get unique markets visited this month (from wellen_submissions, vorverkauf_submissions, vorverkauf_entries)
+    const [wellenSubs, vorverkaufSubs, produkttauschEntries] = await Promise.all([
+      freshClient.from('wellen_submissions').select('market_id').eq('gebietsleiter_id', id).gte('created_at', currentMonthStart).lte('created_at', currentMonthEnd),
+      freshClient.from('vorverkauf_submissions').select('market_id').eq('gebietsleiter_id', id).gte('created_at', currentMonthStart).lte('created_at', currentMonthEnd),
+      freshClient.from('vorverkauf_entries').select('market_id').eq('gebietsleiter_id', id).gte('created_at', currentMonthStart).lte('created_at', currentMonthEnd)
+    ]);
+
+    const currentMonthMarkets = new Set([
+      ...(wellenSubs.data || []).map(s => s.market_id),
+      ...(vorverkaufSubs.data || []).map(s => s.market_id),
+      ...(produkttauschEntries.data || []).map(e => e.market_id)
+    ]);
+    const monthlyVisits = currentMonthMarkets.size;
+
+    // 3. Get previous month visits for comparison
+    const [wellenSubsPrev, vorverkaufSubsPrev, produkttauschEntriesPrev] = await Promise.all([
+      freshClient.from('wellen_submissions').select('market_id').eq('gebietsleiter_id', id).gte('created_at', prevMonthStart).lte('created_at', prevMonthEnd),
+      freshClient.from('vorverkauf_submissions').select('market_id').eq('gebietsleiter_id', id).gte('created_at', prevMonthStart).lte('created_at', prevMonthEnd),
+      freshClient.from('vorverkauf_entries').select('market_id').eq('gebietsleiter_id', id).gte('created_at', prevMonthStart).lte('created_at', prevMonthEnd)
+    ]);
+
+    const prevMonthMarkets = new Set([
+      ...(wellenSubsPrev.data || []).map(s => s.market_id),
+      ...(vorverkaufSubsPrev.data || []).map(s => s.market_id),
+      ...(produkttauschEntriesPrev.data || []).map(e => e.market_id)
+    ]);
+    const prevMonthVisits = prevMonthMarkets.size;
+    const monthChangePercent = prevMonthVisits > 0 ? Math.round(((monthlyVisits - prevMonthVisits) / prevMonthVisits) * 100) : 0;
+
+    // 4. Get Vorbesteller success rate (markets with vorbesteller / total markets)
+    const { data: vorbestellerProgress } = await freshClient
+      .from('wellen_gl_progress')
+      .select('welle_id, item_type')
+      .eq('gebietsleiter_id', id)
+      .gt('current_number', 0);
+
+    const wellenWithProgress = new Set((vorbestellerProgress || []).map(p => p.welle_id));
+    
+    // Get total markets in wellen for this GL
+    let totalWellenMarkets = 0;
+    let marketsWithVorbesteller = 0;
+    
+    if (wellenWithProgress.size > 0) {
+      const { data: wellenMarkets } = await freshClient
+        .from('wellen_markets')
+        .select('market_id, welle_id')
+        .in('welle_id', Array.from(wellenWithProgress));
+      
+      // Filter to only markets that belong to this GL
+      const { data: glMarkets } = await freshClient
+        .from('markets')
+        .select('id')
+        .eq('gebietsleiter_id', id);
+      
+      const glMarketIds = new Set((glMarkets || []).map(m => m.id));
+      const relevantWellenMarkets = (wellenMarkets || []).filter(wm => glMarketIds.has(wm.market_id));
+      totalWellenMarkets = new Set(relevantWellenMarkets.map(wm => wm.market_id)).size;
+      
+      // Markets that have vorbesteller progress
+      const { data: progressMarkets } = await freshClient
+        .from('wellen_submissions')
+        .select('market_id')
+        .eq('gebietsleiter_id', id);
+      
+      marketsWithVorbesteller = new Set((progressMarkets || []).map(p => p.market_id)).size;
+    }
+
+    const sellInSuccessRate = totalWellenMarkets > 0 ? Math.round((marketsWithVorbesteller / totalWellenMarkets) * 100) : 0;
+
+    // 5. Get previous month sell-in rate for comparison
+    const { data: prevVorbestellerProgress } = await freshClient
+      .from('wellen_submissions')
+      .select('market_id')
+      .eq('gebietsleiter_id', id)
+      .gte('created_at', prevMonthStart)
+      .lte('created_at', prevMonthEnd);
+
+    const prevMonthVorbestellerMarkets = new Set((prevVorbestellerProgress || []).map(p => p.market_id)).size;
+    const prevSellInRate = totalWellenMarkets > 0 ? Math.round((prevMonthVorbestellerMarkets / totalWellenMarkets) * 100) : 0;
+    const sellInChangePercent = prevSellInRate > 0 ? Math.round(sellInSuccessRate - prevSellInRate) : 0;
+
+    res.json({
+      monthlyVisits,
+      totalMarkets: totalMarkets || 0,
+      monthChangePercent,
+      sellInSuccessRate,
+      sellInChangePercent
+    });
+  } catch (error: any) {
+    console.error('❌ Error fetching profile stats:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
 export default router;
 
 
