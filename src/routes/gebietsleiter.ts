@@ -910,8 +910,9 @@ router.get('/:id/profile-stats', async (req: Request, res: Response) => {
       }
     }
 
-    // 7. Get this month's Vorverkäufe and Produkttausch counts
+    // 7. Get this month's Vorverkäufe, Vorbesteller, and Produkttausch counts
     const vorverkaufeCount = (vorverkaufSubs.data || []).length;
+    const vorbestellerCount = (wellenSubs.data || []).length;
     const produkttauschCount = (produkttauschEntries.data || []).length;
 
     // 8. Get top 3 visited markets
@@ -960,6 +961,7 @@ router.get('/:id/profile-stats', async (req: Request, res: Response) => {
       sellInChangePercent,
       mostVisitedMarket,
       vorverkaufeCount,
+      vorbestellerCount,
       produkttauschCount,
       topMarkets
     });
