@@ -971,6 +971,63 @@ router.get('/:id/profile-stats', async (req: Request, res: Response) => {
   }
 });
 
+// ============================================================================
+// ONBOARDING ENDPOINTS
+// ============================================================================
+
+// Check if GL has read a specific onboarding feature
+router.get('/:id/onboarding/:featureKey', async (req: Request, res: Response) => {
+  try {
+    const { id, featureKey } = req.params;
+    
+    console.log(`📖 Checking onboarding status for GL ${id}, feature: ${featureKey}`);
+    
+    const freshClient = createFreshClient();
+    
+    const { data, error } = await freshClient
+      .from('gl_onboarding_reads')
+      .select('id')
+      .eq('gl_id', id)
+      .eq('feature_key', featureKey)
+      .maybeSingle();
+    
+    if (error) throw error;
+    
+    res.json({ hasRead: !!data });
+  } catch (error: any) {
+    console.error('❌ Error checking onboarding status:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// Mark an onboarding feature as read
+router.post('/:id/onboarding/:featureKey', async (req: Request, res: Response) => {
+  try {
+    const { id, featureKey } = req.params;
+    
+    console.log(`✅ Marking onboarding as read for GL ${id}, feature: ${featureKey}`);
+    
+    const freshClient = createFreshClient();
+    
+    const { error } = await freshClient
+      .from('gl_onboarding_reads')
+      .upsert({
+        gl_id: id,
+        feature_key: featureKey,
+        read_at: new Date().toISOString()
+      }, {
+        onConflict: 'gl_id,feature_key'
+      });
+    
+    if (error) throw error;
+    
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('❌ Error marking onboarding as read:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
 export default router;
 
 
