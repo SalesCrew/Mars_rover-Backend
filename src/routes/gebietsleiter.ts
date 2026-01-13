@@ -872,12 +872,51 @@ router.get('/:id/profile-stats', async (req: Request, res: Response) => {
     const prevSellInRate = totalWellenMarkets > 0 ? Math.round((prevMonthVorbestellerMarkets / totalWellenMarkets) * 100) : 0;
     const sellInChangePercent = prevSellInRate > 0 ? Math.round(sellInSuccessRate - prevSellInRate) : 0;
 
+    // 6. Get most visited market - combine all submission types
+    const allMarketVisits: Record<string, number> = {};
+    
+    const addMarketVisit = (marketId: string) => {
+      if (!marketId) return;
+      allMarketVisits[marketId] = (allMarketVisits[marketId] || 0) + 1;
+    };
+    
+    (wellenSubs.data || []).forEach(s => addMarketVisit(s.market_id));
+    (wellenSubsPrev.data || []).forEach(s => addMarketVisit(s.market_id));
+    (vorverkaufSubs.data || []).forEach(s => addMarketVisit(s.market_id));
+    (vorverkaufSubsPrev.data || []).forEach(s => addMarketVisit(s.market_id));
+    (produkttauschEntries.data || []).forEach(e => addMarketVisit(e.market_id));
+    (produkttauschEntriesPrev.data || []).forEach(e => addMarketVisit(e.market_id));
+    
+    // Find market with most visits
+    let mostVisitedMarket = { name: 'Keine Daten', chain: '', visitCount: 0 };
+    
+    if (Object.keys(allMarketVisits).length > 0) {
+      const sortedMarkets = Object.entries(allMarketVisits).sort((a, b) => b[1] - a[1]);
+      const topMarketId = sortedMarkets[0][0];
+      const topMarketVisits = sortedMarkets[0][1];
+      
+      const { data: topMarket } = await freshClient
+        .from('markets')
+        .select('name, chain')
+        .eq('id', topMarketId)
+        .single();
+      
+      if (topMarket) {
+        mostVisitedMarket = {
+          name: topMarket.name || 'Unbekannt',
+          chain: topMarket.chain || '',
+          visitCount: topMarketVisits
+        };
+      }
+    }
+
     res.json({
       monthlyVisits,
       totalMarkets: totalMarkets || 0,
       monthChangePercent,
       sellInSuccessRate,
-      sellInChangePercent
+      sellInChangePercent,
+      mostVisitedMarket
     });
   } catch (error: any) {
     console.error('❌ Error fetching profile stats:', error);
