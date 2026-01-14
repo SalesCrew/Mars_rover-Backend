@@ -1795,105 +1795,206 @@ router.put('/:id', async (req: Request, res: Response) => {
       }
     }
 
-    // Delete and recreate palettes with products
-    // First delete products (due to foreign key), then palettes
+    // Smart update palettes - preserve IDs for existing items
     const { data: existingPalettes } = await freshClient
       .from('wellen_paletten')
       .select('id')
       .eq('welle_id', id);
     
-    if (existingPalettes && existingPalettes.length > 0) {
-      const paletteIds = existingPalettes.map(p => p.id);
-      await freshClient.from('wellen_paletten_products').delete().in('palette_id', paletteIds);
-      await freshClient.from('wellen_paletten').delete().eq('welle_id', id);
+    const existingPaletteIds = (existingPalettes || []).map(p => p.id);
+    const incomingPaletteIds = (paletteItems || []).filter((p: any) => p.id).map((p: any) => p.id);
+    
+    // Delete palettes that are no longer in the incoming list (and their products)
+    const palettesToDelete = existingPaletteIds.filter(existingId => !incomingPaletteIds.includes(existingId));
+    if (palettesToDelete.length > 0) {
+      await freshClient.from('wellen_paletten_products').delete().in('palette_id', palettesToDelete);
+      await freshClient.from('wellen_paletten').delete().in('id', palettesToDelete);
+      console.log(`🗑️ Deleted ${palettesToDelete.length} removed palettes`);
     }
     
     if (paletteItems && paletteItems.length > 0) {
       for (let index = 0; index < paletteItems.length; index++) {
         const p = paletteItems[index];
+        let paletteId = p.id;
         
-        const { data: palette, error: paletteError } = await freshClient
-          .from('wellen_paletten')
-          .insert({
-            welle_id: id,
-            name: p.name,
-            size: p.size || null,
-            picture_url: p.picture || null,
-            palette_order: index
-          })
-          .select()
-          .single();
+        if (paletteId && existingPaletteIds.includes(paletteId)) {
+          // UPDATE existing palette (preserve ID)
+          await freshClient
+            .from('wellen_paletten')
+            .update({
+              name: p.name,
+              size: p.size || null,
+              picture_url: p.picture || null,
+              palette_order: index
+            })
+            .eq('id', paletteId);
+        } else {
+          // INSERT new palette
+          const { data: newPalette, error: paletteError } = await freshClient
+            .from('wellen_paletten')
+            .insert({
+              welle_id: id,
+              name: p.name,
+              size: p.size || null,
+              picture_url: p.picture || null,
+              palette_order: index
+            })
+            .select()
+            .single();
 
-        if (paletteError) throw paletteError;
+          if (paletteError) throw paletteError;
+          paletteId = newPalette.id;
+        }
 
+        // Smart update products for this palette
+        const { data: existingProducts } = await freshClient
+          .from('wellen_paletten_products')
+          .select('id')
+          .eq('palette_id', paletteId);
+        
+        const existingProductIds = (existingProducts || []).map(prod => prod.id);
+        const incomingProductIds = (p.products || []).filter((prod: any) => prod.id).map((prod: any) => prod.id);
+        
+        // Delete products that are no longer in the incoming list
+        const productsToDelete = existingProductIds.filter(existingId => !incomingProductIds.includes(existingId));
+        if (productsToDelete.length > 0) {
+          await freshClient.from('wellen_paletten_products').delete().in('id', productsToDelete);
+        }
+        
+        // Update or insert products
         if (p.products && p.products.length > 0) {
-          const productsToInsert = p.products.map((prod: any, prodIndex: number) => ({
-            palette_id: palette.id,
-            name: prod.name,
-            value_per_ve: parseFloat(prod.value) || 0,
-            ve: parseInt(prod.ve) || 0,
-            ean: prod.ean || null,
-            product_order: prodIndex
-          }));
-
-          const { error: productsError } = await freshClient
-            .from('wellen_paletten_products')
-            .insert(productsToInsert);
-
-          if (productsError) throw productsError;
+          for (let prodIndex = 0; prodIndex < p.products.length; prodIndex++) {
+            const prod = p.products[prodIndex];
+            if (prod.id && existingProductIds.includes(prod.id)) {
+              // UPDATE existing product (preserve ID)
+              await freshClient
+                .from('wellen_paletten_products')
+                .update({
+                  name: prod.name,
+                  value_per_ve: parseFloat(prod.value) || 0,
+                  ve: parseInt(prod.ve) || 0,
+                  ean: prod.ean || null,
+                  product_order: prodIndex
+                })
+                .eq('id', prod.id);
+            } else {
+              // INSERT new product
+              await freshClient
+                .from('wellen_paletten_products')
+                .insert({
+                  palette_id: paletteId,
+                  name: prod.name,
+                  value_per_ve: parseFloat(prod.value) || 0,
+                  ve: parseInt(prod.ve) || 0,
+                  ean: prod.ean || null,
+                  product_order: prodIndex
+                });
+            }
+          }
         }
       }
-      console.log(`✅ Updated ${paletteItems.length} palettes with products`);
+      console.log(`✅ Updated ${paletteItems.length} palettes with products (IDs preserved)`);
     }
 
-    // Delete and recreate schütten with products
+    // Smart update schütten - preserve IDs for existing items
     const { data: existingSchuetten } = await freshClient
       .from('wellen_schuetten')
       .select('id')
       .eq('welle_id', id);
     
-    if (existingSchuetten && existingSchuetten.length > 0) {
-      const schutteIds = existingSchuetten.map(s => s.id);
-      await freshClient.from('wellen_schuetten_products').delete().in('schuette_id', schutteIds);
-      await freshClient.from('wellen_schuetten').delete().eq('welle_id', id);
+    const existingSchutteIds = (existingSchuetten || []).map(s => s.id);
+    const incomingSchutteIds = (schutteItems || []).filter((s: any) => s.id).map((s: any) => s.id);
+    
+    // Delete schuetten that are no longer in the incoming list (and their products)
+    const schuttenToDelete = existingSchutteIds.filter(existingId => !incomingSchutteIds.includes(existingId));
+    if (schuttenToDelete.length > 0) {
+      await freshClient.from('wellen_schuetten_products').delete().in('schuette_id', schuttenToDelete);
+      await freshClient.from('wellen_schuetten').delete().in('id', schuttenToDelete);
+      console.log(`🗑️ Deleted ${schuttenToDelete.length} removed schütten`);
     }
     
     if (schutteItems && schutteItems.length > 0) {
       for (let index = 0; index < schutteItems.length; index++) {
         const s = schutteItems[index];
+        let schutteId = s.id;
         
-        const { data: schuette, error: schutteError } = await freshClient
-          .from('wellen_schuetten')
-          .insert({
-            welle_id: id,
-            name: s.name,
-            size: s.size || null,
-            picture_url: s.picture || null,
-            schuette_order: index
-          })
-          .select()
-          .single();
+        if (schutteId && existingSchutteIds.includes(schutteId)) {
+          // UPDATE existing schutte (preserve ID)
+          await freshClient
+            .from('wellen_schuetten')
+            .update({
+              name: s.name,
+              size: s.size || null,
+              picture_url: s.picture || null,
+              schuette_order: index
+            })
+            .eq('id', schutteId);
+        } else {
+          // INSERT new schutte
+          const { data: newSchutte, error: schutteError } = await freshClient
+            .from('wellen_schuetten')
+            .insert({
+              welle_id: id,
+              name: s.name,
+              size: s.size || null,
+              picture_url: s.picture || null,
+              schuette_order: index
+            })
+            .select()
+            .single();
 
-        if (schutteError) throw schutteError;
+          if (schutteError) throw schutteError;
+          schutteId = newSchutte.id;
+        }
 
+        // Smart update products for this schutte
+        const { data: existingProducts } = await freshClient
+          .from('wellen_schuetten_products')
+          .select('id')
+          .eq('schuette_id', schutteId);
+        
+        const existingProductIds = (existingProducts || []).map(prod => prod.id);
+        const incomingProductIds = (s.products || []).filter((prod: any) => prod.id).map((prod: any) => prod.id);
+        
+        // Delete products that are no longer in the incoming list
+        const productsToDelete = existingProductIds.filter(existingId => !incomingProductIds.includes(existingId));
+        if (productsToDelete.length > 0) {
+          await freshClient.from('wellen_schuetten_products').delete().in('id', productsToDelete);
+        }
+        
+        // Update or insert products
         if (s.products && s.products.length > 0) {
-          const productsToInsert = s.products.map((prod: any, prodIndex: number) => ({
-            schuette_id: schuette.id,
-            name: prod.name,
-            value_per_ve: parseFloat(prod.value) || 0,
-            ve: parseInt(prod.ve) || 0,
-            ean: prod.ean || null,
-            product_order: prodIndex
-          }));
-
-          const { error: productsError } = await freshClient
-            .from('wellen_schuetten_products')
-            .insert(productsToInsert);
-
-          if (productsError) throw productsError;
+          for (let prodIndex = 0; prodIndex < s.products.length; prodIndex++) {
+            const prod = s.products[prodIndex];
+            if (prod.id && existingProductIds.includes(prod.id)) {
+              // UPDATE existing product (preserve ID)
+              await freshClient
+                .from('wellen_schuetten_products')
+                .update({
+                  name: prod.name,
+                  value_per_ve: parseFloat(prod.value) || 0,
+                  ve: parseInt(prod.ve) || 0,
+                  ean: prod.ean || null,
+                  product_order: prodIndex
+                })
+                .eq('id', prod.id);
+            } else {
+              // INSERT new product
+              await freshClient
+                .from('wellen_schuetten_products')
+                .insert({
+                  schuette_id: schutteId,
+                  name: prod.name,
+                  value_per_ve: parseFloat(prod.value) || 0,
+                  ve: parseInt(prod.ve) || 0,
+                  ean: prod.ean || null,
+                  product_order: prodIndex
+                });
+            }
+          }
         }
       }
-      console.log(`✅ Updated ${schutteItems.length} schütten with products`);
+      console.log(`✅ Updated ${schutteItems.length} schütten with products (IDs preserved)`);
     }
 
     // Delete and recreate KW days
@@ -2189,12 +2290,41 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     const markets = marketsResult.data || [];
     const displays = displaysResult.data || [];
     const kartonware = kartonwareResult.data || [];
-    const paletteProducts = paletteProductsResult.data || [];
-    const schutteProducts = schutteProductsResult.data || [];
+    let paletteProducts = paletteProductsResult.data || [];
+    let schutteProducts = schutteProductsResult.data || [];
 
-    // Fetch parent palette/schuette names
-    const paletteIds = [...new Set((paletteProducts || []).map((p: any) => p.palette_id))].filter(Boolean);
-    const schutteIds = [...new Set((schutteProducts || []).map((p: any) => p.schuette_id))].filter(Boolean);
+    // If no products found by ID (orphaned submissions due to welle edit), fetch ALL products for this welle
+    if (paletteProducts.length === 0 && paletteProductIds.length > 0) {
+      const { data: wellePalettes } = await freshClient.from('wellen_paletten').select('id').eq('welle_id', welleId);
+      if (wellePalettes && wellePalettes.length > 0) {
+        const paletteIdsForWelle = wellePalettes.map((p: any) => p.id);
+        const { data: allProds } = await freshClient.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('palette_id', paletteIdsForWelle);
+        paletteProducts = allProds || [];
+      }
+    }
+    
+    if (schutteProducts.length === 0 && schutteProductIds.length > 0) {
+      const { data: welleSchuetten } = await freshClient.from('wellen_schuetten').select('id').eq('welle_id', welleId);
+      if (welleSchuetten && welleSchuetten.length > 0) {
+        const schutteIdsForWelle = welleSchuetten.map((s: any) => s.id);
+        const { data: allProds } = await freshClient.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('schuette_id', schutteIdsForWelle);
+        schutteProducts = allProds || [];
+      }
+    }
+
+    // Fetch parent palette/schuette names - get all for this welle if products were orphaned
+    let paletteIds = [...new Set((paletteProducts || []).map((p: any) => p.palette_id))].filter(Boolean);
+    let schutteIds = [...new Set((schutteProducts || []).map((p: any) => p.schuette_id))].filter(Boolean);
+    
+    // If still no parent IDs, fetch directly from welle
+    if (paletteIds.length === 0 && paletteProductIds.length > 0) {
+      const { data: wellePalettes } = await freshClient.from('wellen_paletten').select('id').eq('welle_id', welleId);
+      paletteIds = (wellePalettes || []).map((p: any) => p.id);
+    }
+    if (schutteIds.length === 0 && schutteProductIds.length > 0) {
+      const { data: welleSchuetten } = await freshClient.from('wellen_schuetten').select('id').eq('welle_id', welleId);
+      schutteIds = (welleSchuetten || []).map((s: any) => s.id);
+    }
     
     const [palettesResult, schuttenResult] = await Promise.all([
       paletteIds.length > 0 ? freshClient.from('wellen_paletten').select('id, name').in('id', paletteIds) : { data: [] },
@@ -2236,8 +2366,13 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     // Group palette entries by parent palette (per GL, market, AND timestamp for same submission batch)
     const paletteGroups = new Map<string, any[]>();
     for (const entry of paletteEntries) {
-      const product = paletteProducts.find((p: any) => p.id === entry.item_id);
-      const parentId = product?.palette_id || 'unknown';
+      // Try direct ID match first, then fallback to value match
+      let product = paletteProducts.find((p: any) => p.id === entry.item_id);
+      if (!product && entry.value_per_unit) {
+        // Try to match by value_per_unit (best effort for orphaned submissions)
+        product = paletteProducts.find((p: any) => p.value_per_ve === entry.value_per_unit);
+      }
+      const parentId = product?.palette_id || (palettes.length === 1 ? palettes[0].id : 'unknown');
       // Group by GL + market + palette + timestamp (rounded to same minute for batch grouping)
       const timestampKey = new Date(entry.created_at).toISOString().slice(0, 16);
       const key = `${entry.gebietsleiter_id}|${entry.market_id}|${parentId}|${timestampKey}`;
@@ -2285,8 +2420,13 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     // Group schuette entries by parent schuette (per GL, market, AND timestamp)
     const schutteGroups = new Map<string, any[]>();
     for (const entry of schutteEntries) {
-      const product = schutteProducts.find((p: any) => p.id === entry.item_id);
-      const parentId = product?.schuette_id || 'unknown';
+      // Try direct ID match first, then fallback to value match
+      let product = schutteProducts.find((p: any) => p.id === entry.item_id);
+      if (!product && entry.value_per_unit) {
+        // Try to match by value_per_unit (best effort for orphaned submissions)
+        product = schutteProducts.find((p: any) => p.value_per_ve === entry.value_per_unit);
+      }
+      const parentId = product?.schuette_id || (schutten.length === 1 ? schutten[0].id : 'unknown');
       const timestampKey = new Date(entry.created_at).toISOString().slice(0, 16);
       const key = `${entry.gebietsleiter_id}|${entry.market_id}|${parentId}|${timestampKey}`;
       if (!schutteGroups.has(key)) {
@@ -2695,6 +2835,292 @@ router.delete('/delete-image', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('❌ Error deleting image:', error);
     res.status(500).json({ error: error.message || 'Failed to delete image' });
+  }
+});
+
+// ============================================================================
+// GET WAVE MARKETS WITH VISIT STATUS - For markets modal
+// ============================================================================
+router.get('/:id/markets-status', async (req: Request, res: Response) => {
+  try {
+    const { id: welleId } = req.params;
+
+    // Get wave details
+    const { data: welle, error: welleError } = await supabase
+      .from('wellen')
+      .select('id, name, start_date, end_date')
+      .eq('id', welleId)
+      .single();
+
+    if (welleError || !welle) {
+      return res.status(404).json({ error: 'Wave not found' });
+    }
+
+    // Get assigned market IDs from wellen_markets table
+    const { data: wellenMarkets, error: wellenMarketsError } = await supabase
+      .from('wellen_markets')
+      .select('market_id')
+      .eq('welle_id', welleId);
+
+    if (wellenMarketsError) {
+      return res.status(500).json({ error: wellenMarketsError.message });
+    }
+
+    const assignedMarketIds = (wellenMarkets || []).map(wm => wm.market_id);
+
+    if (assignedMarketIds.length === 0) {
+      return res.json({ visited: [], notVisited: [], visitedCount: 0, totalCount: 0 });
+    }
+
+    // Get all assigned markets
+    const { data: markets, error: marketsError } = await supabase
+      .from('markets')
+      .select('id, name, chain, address, city, gebietsleiter_name')
+      .in('id', assignedMarketIds);
+
+    if (marketsError) {
+      return res.status(500).json({ error: marketsError.message });
+    }
+
+    // Get all submissions for this wave (each submission is a visit with progress)
+    const { data: submissions, error: submissionsError } = await supabase
+      .from('wellen_submissions')
+      .select('*')
+      .eq('welle_id', welleId)
+      .order('created_at', { ascending: false });
+
+    if (submissionsError) {
+      return res.status(500).json({ error: submissionsError.message });
+    }
+
+    // Get GL details for submissions
+    const glIds = [...new Set((submissions || []).map(s => s.gebietsleiter_id).filter(Boolean))];
+    const { data: glDetails } = await supabase
+      .from('gebietsleiter')
+      .select('id, name')
+      .in('id', glIds.length > 0 ? glIds : ['__none__']);
+
+    // Get item details for submissions
+    const displayIds = (submissions || []).filter(s => s.item_type === 'display').map(s => s.item_id).filter(Boolean);
+    const kartonwareIds = (submissions || []).filter(s => s.item_type === 'kartonware').map(s => s.item_id).filter(Boolean);
+    const paletteProductIds = (submissions || []).filter(s => s.item_type === 'palette').map(s => s.item_id).filter(Boolean);
+    const schutteProductIds = (submissions || []).filter(s => s.item_type === 'schuette').map(s => s.item_id).filter(Boolean);
+
+    const [displaysResult, kartonwareResult, paletteProductsResult, schutteProductsResult] = await Promise.all([
+      displayIds.length > 0 ? supabase.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
+      kartonwareIds.length > 0 ? supabase.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] },
+      paletteProductIds.length > 0 ? supabase.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('id', paletteProductIds) : { data: [] },
+      schutteProductIds.length > 0 ? supabase.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('id', schutteProductIds) : { data: [] }
+    ]);
+
+    const displays = displaysResult.data || [];
+    const kartonware = kartonwareResult.data || [];
+    let paletteProducts = paletteProductsResult.data || [];
+    let schutteProducts = schutteProductsResult.data || [];
+
+    // If no products found by ID (orphaned submissions due to welle edit), fetch ALL products for this welle
+    if (paletteProducts.length === 0 && paletteProductIds.length > 0) {
+      const { data: wellePalettes } = await supabase.from('wellen_paletten').select('id').eq('welle_id', welleId);
+      if (wellePalettes && wellePalettes.length > 0) {
+        const paletteIdsForWelle = wellePalettes.map((p: any) => p.id);
+        const { data: allProds } = await supabase.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('palette_id', paletteIdsForWelle);
+        paletteProducts = allProds || [];
+      }
+    }
+    
+    if (schutteProducts.length === 0 && schutteProductIds.length > 0) {
+      const { data: welleSchuetten } = await supabase.from('wellen_schuetten').select('id').eq('welle_id', welleId);
+      if (welleSchuetten && welleSchuetten.length > 0) {
+        const schutteIdsForWelle = welleSchuetten.map((s: any) => s.id);
+        const { data: allProds } = await supabase.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('schuette_id', schutteIdsForWelle);
+        schutteProducts = allProds || [];
+      }
+    }
+
+    // Get parent palette/schuette names - fetch all for this welle if products were orphaned
+    let paletteIds = [...new Set(paletteProducts.map((p: any) => p.palette_id))].filter(Boolean);
+    let schutteIds = [...new Set(schutteProducts.map((p: any) => p.schuette_id))].filter(Boolean);
+    
+    // If still no parent IDs, fetch directly from welle
+    if (paletteIds.length === 0 && paletteProductIds.length > 0) {
+      const { data: wellePalettes } = await supabase.from('wellen_paletten').select('id').eq('welle_id', welleId);
+      paletteIds = (wellePalettes || []).map((p: any) => p.id);
+    }
+    if (schutteIds.length === 0 && schutteProductIds.length > 0) {
+      const { data: welleSchuetten } = await supabase.from('wellen_schuetten').select('id').eq('welle_id', welleId);
+      schutteIds = (welleSchuetten || []).map((s: any) => s.id);
+    }
+    
+    const [palettesResult, schuttenResult] = await Promise.all([
+      paletteIds.length > 0 ? supabase.from('wellen_paletten').select('id, name').in('id', paletteIds) : { data: [] },
+      schutteIds.length > 0 ? supabase.from('wellen_schuetten').select('id, name').in('id', schutteIds) : { data: [] }
+    ]);
+    
+    const palettes = palettesResult.data || [];
+    const schutten = schuttenResult.data || [];
+
+    // Group submissions by market
+    const submissionsByMarket = new Map<string, any[]>();
+    for (const sub of (submissions || [])) {
+      if (!submissionsByMarket.has(sub.market_id)) {
+        submissionsByMarket.set(sub.market_id, []);
+      }
+      submissionsByMarket.get(sub.market_id)!.push(sub);
+    }
+
+    // Build visited markets with their activity details
+    const visited: any[] = [];
+    const notVisited: any[] = [];
+
+    for (const market of (markets || [])) {
+      const marketSubs = submissionsByMarket.get(market.id) || [];
+      
+      if (marketSubs.length > 0) {
+        // Find the first (most recent) submission's GL and date
+        const firstSub = marketSubs[0];
+        const gl = (glDetails || []).find((g: any) => g.id === firstSub.gebietsleiter_id);
+        
+        // Build activity entries grouped by timestamp
+        const activities: any[] = [];
+        const subsByTimestamp = new Map<string, any[]>();
+        
+        for (const sub of marketSubs) {
+          const tsKey = new Date(sub.created_at).toISOString().slice(0, 16);
+          if (!subsByTimestamp.has(tsKey)) {
+            subsByTimestamp.set(tsKey, []);
+          }
+          subsByTimestamp.get(tsKey)!.push(sub);
+        }
+
+        for (const [, subs] of subsByTimestamp) {
+          const subGl = (glDetails || []).find((g: any) => g.id === subs[0].gebietsleiter_id);
+          
+          // Separate display/kartonware from palette/schuette
+          const displayKartonwareSubs = subs.filter((s: any) => s.item_type === 'display' || s.item_type === 'kartonware');
+          const paletteSubs = subs.filter((s: any) => s.item_type === 'palette');
+          const schuetteSubs = subs.filter((s: any) => s.item_type === 'schuette');
+          
+          const items: any[] = [];
+          
+          // Process display/kartonware individually
+          for (const s of displayKartonwareSubs) {
+            let itemName = 'Unknown';
+            let itemValue = 0;
+            if (s.item_type === 'display') {
+              const d = displays.find((x: any) => x.id === s.item_id);
+              itemName = d?.name || 'Display';
+              itemValue = (d?.item_value || 0) * s.quantity;
+            } else {
+              const k = kartonware.find((x: any) => x.id === s.item_id);
+              itemName = k?.name || 'Kartonware';
+              itemValue = (k?.item_value || 0) * s.quantity;
+            }
+            items.push({ type: s.item_type, name: itemName, quantity: s.quantity, value: itemValue });
+          }
+          
+          // Group palette products by parent palette
+          const paletteGroups = new Map<string, any[]>();
+          for (const s of paletteSubs) {
+            // Try direct ID match first, then fallback to value match
+            let p = paletteProducts.find((x: any) => x.id === s.item_id);
+            if (!p && s.value_per_unit) {
+              p = paletteProducts.find((x: any) => x.value_per_ve === s.value_per_unit);
+            }
+            const parentId = p?.palette_id || (palettes.length === 1 ? palettes[0].id : 'unknown');
+            if (!paletteGroups.has(parentId)) paletteGroups.set(parentId, []);
+            paletteGroups.get(parentId)!.push({ ...s, product: p });
+          }
+          for (const [parentId, groupSubs] of paletteGroups) {
+            const parent = palettes.find((x: any) => x.id === parentId);
+            const products = groupSubs.map((gs: any) => ({
+              name: gs.product?.name || 'Produkt',
+              quantity: gs.quantity,
+              value: (gs.value_per_unit || gs.product?.value_per_ve || 0) * gs.quantity
+            }));
+            const totalValue = products.reduce((sum: number, p: any) => sum + p.value, 0);
+            items.push({
+              type: 'palette',
+              name: parent?.name || (palettes.length > 0 ? palettes[0].name : 'Palette'),
+              quantity: 1,
+              value: totalValue,
+              products
+            });
+          }
+          
+          // Group schuette products by parent schuette
+          const schutteGroups = new Map<string, any[]>();
+          for (const s of schuetteSubs) {
+            // Try direct ID match first, then fallback to value match
+            let p = schutteProducts.find((x: any) => x.id === s.item_id);
+            if (!p && s.value_per_unit) {
+              p = schutteProducts.find((x: any) => x.value_per_ve === s.value_per_unit);
+            }
+            const parentId = p?.schuette_id || (schutten.length === 1 ? schutten[0].id : 'unknown');
+            if (!schutteGroups.has(parentId)) schutteGroups.set(parentId, []);
+            schutteGroups.get(parentId)!.push({ ...s, product: p });
+          }
+          for (const [parentId, groupSubs] of schutteGroups) {
+            const parent = schutten.find((x: any) => x.id === parentId);
+            const products = groupSubs.map((gs: any) => ({
+              name: gs.product?.name || 'Produkt',
+              quantity: gs.quantity,
+              value: (gs.value_per_unit || gs.product?.value_per_ve || 0) * gs.quantity
+            }));
+            const totalValue = products.reduce((sum: number, p: any) => sum + p.value, 0);
+            items.push({
+              type: 'schuette',
+              name: parent?.name || (schutten.length > 0 ? schutten[0].name : 'Schütte'),
+              quantity: 1,
+              value: totalValue,
+              products
+            });
+          }
+
+          activities.push({
+            glName: subGl?.name || 'Unknown',
+            timestamp: subs[0].created_at,
+            items,
+            totalValue: items.reduce((sum: number, i: any) => sum + i.value, 0)
+          });
+        }
+
+        visited.push({
+          id: market.id,
+          name: market.name,
+          chain: market.chain,
+          address: market.address,
+          city: market.city,
+          gebietsleiter: market.gebietsleiter_name,
+          visitedBy: gl?.name || 'Unknown',
+          visitedAt: firstSub.created_at,
+          activities
+        });
+      } else {
+        notVisited.push({
+          id: market.id,
+          name: market.name,
+          chain: market.chain,
+          address: market.address,
+          city: market.city,
+          gebietsleiter: market.gebietsleiter_name
+        });
+      }
+    }
+
+    // Sort visited by most recent visit first
+    visited.sort((a, b) => new Date(b.visitedAt).getTime() - new Date(a.visitedAt).getTime());
+    // Sort not visited alphabetically
+    notVisited.sort((a, b) => a.name.localeCompare(b.name));
+
+    res.json({
+      visited,
+      notVisited,
+      visitedCount: visited.length,
+      totalCount: markets?.length || 0
+    });
+  } catch (error: any) {
+    console.error('Error fetching wave markets status:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
 
