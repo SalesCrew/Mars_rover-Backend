@@ -2144,6 +2144,7 @@ router.get('/:id/progress/:glId', async (req: Request, res: Response) => {
 
 // ============================================================================
 // GET ALL PROGRESS FOR A WELLE (ALL GLs) - For detailed view
+// Uses wellen_submissions for individual market-specific entries
 // ============================================================================
 router.get('/:id/all-progress', async (req: Request, res: Response) => {
   try {
@@ -2151,26 +2152,27 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     
     const freshClient = createFreshClient();
     
-    const { data: progressEntries, error: progressError } = await freshClient
-      .from('wellen_gl_progress')
+    // Use wellen_submissions for detailed view (individual submissions with market_id)
+    const { data: submissions, error: submissionsError } = await freshClient
+      .from('wellen_submissions')
       .select('*')
       .eq('welle_id', welleId)
       .order('created_at', { ascending: false });
 
-    if (progressError) {
-      return res.status(500).json({ error: progressError.message });
+    if (submissionsError) {
+      return res.status(500).json({ error: submissionsError.message });
     }
 
-    if (!progressEntries || progressEntries.length === 0) {
+    if (!submissions || submissions.length === 0) {
       return res.json([]);
     }
 
-    const glIds = [...new Set(progressEntries.map(p => p.gebietsleiter_id).filter(Boolean))];
-    const marketIds = [...new Set(progressEntries.map(p => p.market_id).filter(Boolean))];
-    const displayIds = progressEntries.filter(p => p.item_type === 'display').map(p => p.item_id).filter(Boolean);
-    const kartonwareIds = progressEntries.filter(p => p.item_type === 'kartonware').map(p => p.item_id).filter(Boolean);
-    const paletteProductIds = progressEntries.filter(p => p.item_type === 'palette').map(p => p.item_id).filter(Boolean);
-    const schutteProductIds = progressEntries.filter(p => p.item_type === 'schuette').map(p => p.item_id).filter(Boolean);
+    const glIds = [...new Set(submissions.map(p => p.gebietsleiter_id).filter(Boolean))];
+    const marketIds = [...new Set(submissions.map(p => p.market_id).filter(Boolean))];
+    const displayIds = submissions.filter(p => p.item_type === 'display').map(p => p.item_id).filter(Boolean);
+    const kartonwareIds = submissions.filter(p => p.item_type === 'kartonware').map(p => p.item_id).filter(Boolean);
+    const paletteProductIds = submissions.filter(p => p.item_type === 'palette').map(p => p.item_id).filter(Boolean);
+    const schutteProductIds = submissions.filter(p => p.item_type === 'schuette').map(p => p.item_id).filter(Boolean);
 
     const [glsResult, glDetailsResult, marketsResult, displaysResult, kartonwareResult, paletteProductsResult, schutteProductsResult] = await Promise.all([
       glIds.length > 0 ? freshClient.from('users').select('id, email').in('id', glIds) : { data: [] },
@@ -2203,11 +2205,11 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     const schutten = schuttenResult.data || [];
 
     // Separate entries by type
-    const displayKartonwareEntries = progressEntries.filter(p => p.item_type === 'display' || p.item_type === 'kartonware');
-    const paletteEntries = progressEntries.filter(p => p.item_type === 'palette');
-    const schutteEntries = progressEntries.filter(p => p.item_type === 'schuette');
+    const displayKartonwareEntries = submissions.filter(p => p.item_type === 'display' || p.item_type === 'kartonware');
+    const paletteEntries = submissions.filter(p => p.item_type === 'palette');
+    const schutteEntries = submissions.filter(p => p.item_type === 'schuette');
 
-    // Process display/kartonware entries (standard)
+    // Process display/kartonware entries - each submission is separate
     const standardResponses = displayKartonwareEntries.map(entry => {
       const gl = glDetails.find((g: any) => g.id === entry.gebietsleiter_id);
       const glUser = gls.find((u: any) => u.id === entry.gebietsleiter_id);
@@ -2224,19 +2226,21 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
         marketChain: market?.chain || '',
         itemType: entry.item_type as 'display' | 'kartonware',
         itemName: item?.name || 'Unknown',
-        quantity: entry.current_number,
-        value: entry.current_number * (item?.item_value || entry.value_per_unit || 0),
+        quantity: entry.quantity,
+        value: entry.quantity * (item?.item_value || entry.value_per_unit || 0),
         timestamp: entry.created_at,
         photoUrl: entry.photo_url
       };
     });
 
-    // Group palette entries by parent palette (per GL and market)
+    // Group palette entries by parent palette (per GL, market, AND timestamp for same submission batch)
     const paletteGroups = new Map<string, any[]>();
     for (const entry of paletteEntries) {
       const product = paletteProducts.find((p: any) => p.id === entry.item_id);
       const parentId = product?.palette_id || 'unknown';
-      const key = `${entry.gebietsleiter_id}|${entry.market_id}|${parentId}`;
+      // Group by GL + market + palette + timestamp (rounded to same minute for batch grouping)
+      const timestampKey = new Date(entry.created_at).toISOString().slice(0, 16);
+      const key = `${entry.gebietsleiter_id}|${entry.market_id}|${parentId}|${timestampKey}`;
       if (!paletteGroups.has(key)) {
         paletteGroups.set(key, []);
       }
@@ -2254,9 +2258,9 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       const products = entries.map((e: any) => ({
         id: e.item_id,
         name: e.product?.name || 'Produkt',
-        quantity: e.current_number,
+        quantity: e.quantity,
         valuePerUnit: e.value_per_unit || e.product?.value_per_ve || 0,
-        value: e.current_number * (e.value_per_unit || e.product?.value_per_ve || 0)
+        value: e.quantity * (e.value_per_unit || e.product?.value_per_ve || 0)
       }));
 
       const totalValue = products.reduce((sum: number, p: any) => sum + p.value, 0);
@@ -2278,12 +2282,13 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       });
     }
 
-    // Group schuette entries by parent schuette (per GL and market)
+    // Group schuette entries by parent schuette (per GL, market, AND timestamp)
     const schutteGroups = new Map<string, any[]>();
     for (const entry of schutteEntries) {
       const product = schutteProducts.find((p: any) => p.id === entry.item_id);
       const parentId = product?.schuette_id || 'unknown';
-      const key = `${entry.gebietsleiter_id}|${entry.market_id}|${parentId}`;
+      const timestampKey = new Date(entry.created_at).toISOString().slice(0, 16);
+      const key = `${entry.gebietsleiter_id}|${entry.market_id}|${parentId}|${timestampKey}`;
       if (!schutteGroups.has(key)) {
         schutteGroups.set(key, []);
       }
@@ -2301,9 +2306,9 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       const products = entries.map((e: any) => ({
         id: e.item_id,
         name: e.product?.name || 'Produkt',
-        quantity: e.current_number,
+        quantity: e.quantity,
         valuePerUnit: e.value_per_unit || e.product?.value_per_ve || 0,
-        value: e.current_number * (e.value_per_unit || e.product?.value_per_ve || 0)
+        value: e.quantity * (e.value_per_unit || e.product?.value_per_ve || 0)
       }));
 
       const totalValue = products.reduce((sum: number, p: any) => sum + p.value, 0);
