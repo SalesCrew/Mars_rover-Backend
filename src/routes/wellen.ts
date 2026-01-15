@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { supabase, createFreshClient } from '../config/supabase';
+import * as XLSX from 'xlsx';
 
 const router = Router();
 
@@ -1038,26 +1039,88 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           kartonwareCount += progress;
         }
 
+        // #region agent log - Compare progress vs submissions for Billa Plus wave
+        if (welle.name?.includes('Billa Plus') || welle.name?.includes('Billa+')) {
+          // Fetch all submissions for this wave to compare
+          const { data: submissionsForWave } = await freshClient
+            .from('wellen_submissions')
+            .select('item_type, item_id, quantity, gebietsleiter_id')
+            .eq('welle_id', welle.id);
+          
+          // Sum submissions by item
+          const submissionTotals = new Map<string, number>();
+          const progressTotals = new Map<string, number>();
+          
+          for (const sub of (submissionsForWave || [])) {
+            const key = `${sub.item_type}:${sub.item_id}`;
+            submissionTotals.set(key, (submissionTotals.get(key) || 0) + (sub.quantity || 0));
+          }
+          
+          for (const prog of progressData) {
+            const key = `${prog.item_type}:${prog.item_id}`;
+            progressTotals.set(key, (progressTotals.get(key) || 0) + (prog.current_number || 0));
+          }
+          
+          // Find discrepancies
+          const discrepancies: any[] = [];
+          for (const [key, progValue] of progressTotals) {
+            const subValue = submissionTotals.get(key) || 0;
+            if (progValue !== subValue) {
+              discrepancies.push({ key, progressValue: progValue, submissionsSum: subValue, diff: progValue - subValue });
+            }
+          }
+          
+          // Find items with highest progress values
+          const sortedProgress = [...progressData].sort((a, b) => (b.current_number || 0) - (a.current_number || 0)).slice(0, 5);
+          const topProgressItems = sortedProgress.map(p => ({
+            itemType: p.item_type,
+            itemId: p.item_id,
+            progressValue: p.current_number,
+            submissionsSum: submissionTotals.get(`${p.item_type}:${p.item_id}`) || 0,
+            glId: p.gebietsleiter_id
+          }));
+          
+          fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:dashboard/waves:billaPlusCompare',message:'Progress vs Submissions comparison',data:{welleName:welle.name,welleId:welle.id,totalProgressCount:progressData.reduce((s,p)=>s+(p.current_number||0),0),totalSubmissionsCount:(submissionsForWave||[]).reduce((s,p)=>s+(p.quantity||0),0),progressEntriesCount:progressData.length,submissionsEntriesCount:(submissionsForWave||[]).length,displayCount,kartonwareCount,discrepancies:discrepancies.slice(0,10),topProgressItems},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1'})}).catch(()=>{});
+        }
+        // #endregion
+
         // Calculate current value for value-based goals
         let currentValue = 0;
+        // #region agent log
+        const valueBreakdown: any[] = [];
+        // #endregion
         if (welle.goal_type === 'value') {
           for (const progress of progressData) {
             if (progress.item_type === 'display') {
               const display = displays.find(d => d.id === progress.item_id);
               if (display) {
                 currentValue += progress.current_number * (display.item_value || 0);
+                // #region agent log
+                valueBreakdown.push({ type: 'display', itemId: progress.item_id, qty: progress.current_number, itemValue: display.item_value, added: progress.current_number * (display.item_value || 0) });
+                // #endregion
               }
             } else if (progress.item_type === 'kartonware') {
               const kw = kartonware.find(k => k.id === progress.item_id);
               if (kw) {
                 currentValue += progress.current_number * (kw.item_value || 0);
+                // #region agent log
+                valueBreakdown.push({ type: 'kartonware', itemId: progress.item_id, qty: progress.current_number, itemValue: kw.item_value, added: progress.current_number * (kw.item_value || 0) });
+                // #endregion
               }
             } else if (progress.item_type === 'palette' || progress.item_type === 'schuette') {
               // For palette/schuette, use stored value_per_unit
               currentValue += progress.current_number * (progress.value_per_unit || 0);
+              // #region agent log
+              valueBreakdown.push({ type: progress.item_type, itemId: progress.item_id, qty: progress.current_number, valuePerUnit: progress.value_per_unit, added: progress.current_number * (progress.value_per_unit || 0) });
+              // #endregion
             }
           }
         }
+        // #region agent log
+        if (welle.name?.includes('Hagebau')) {
+          fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:dashboard/waves',message:'Card value calculation',data:{welleName:welle.name,currentValue,progressCount:progressData.length,breakdown:valueBreakdown},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A'})}).catch(()=>{});
+        }
+        // #endregion
 
         // Count unique participating GLs
         const participatingGLs = new Set((progressData || []).map(p => p.gebietsleiter_id)).size;
@@ -2067,12 +2130,20 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: gebietsleiter_id, items' });
     }
 
+    // #region agent log - STEP 1: Log incoming request
+    fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:batch:STEP1-REQUEST',message:'Incoming batch request',data:{welleId,gebietsleiter_id,market_id,itemsReceived:items.map((i:any)=>({type:i.item_type,id:i.item_id,current_number:i.current_number,value_per_unit:i.value_per_unit}))},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'BATCH'})}).catch(()=>{});
+    // #endregion
+
     // Fetch existing progress for this GL and welle
-    const { data: existingProgress } = await freshClient
+    const { data: existingProgress, error: fetchError } = await freshClient
       .from('wellen_gl_progress')
       .select('item_type, item_id, current_number')
       .eq('welle_id', welleId)
       .eq('gebietsleiter_id', gebietsleiter_id);
+
+    // #region agent log - STEP 2: Log existing progress fetched
+    fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:batch:STEP2-EXISTING',message:'Existing progress fetched',data:{welleId,gebietsleiter_id,fetchError:fetchError?.message||null,existingProgressCount:existingProgress?.length||0,existingProgress:(existingProgress||[]).map((p:any)=>({type:p.item_type,id:p.item_id,current:p.current_number}))},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'BATCH'})}).catch(()=>{});
+    // #endregion
 
     // Create a map of existing progress for quick lookup
     const existingMap = new Map<string, number>();
@@ -2104,13 +2175,30 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
       return entry;
     });
 
+    // #region agent log - STEP 3: Log calculated entries before upsert
+    fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:batch:STEP3-CALCULATED',message:'Calculated entries for upsert',data:{welleId,gebietsleiter_id,calculatedEntries:progressEntries.map((e:any)=>({type:e.item_type,id:e.item_id,existingBefore:existingMap.get(`${e.item_type}:${e.item_id}`)||0,increment:items.find((i:any)=>i.item_type===e.item_type&&i.item_id===e.item_id)?.current_number||0,newTotal:e.current_number}))},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'BATCH'})}).catch(()=>{});
+    // #endregion
+
     const { error } = await freshClient
       .from('wellen_gl_progress')
       .upsert(progressEntries, {
         onConflict: 'welle_id,gebietsleiter_id,item_type,item_id'
       });
 
+    // #region agent log - STEP 4: Log upsert result
+    fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:batch:STEP4-UPSERT',message:'Upsert completed',data:{welleId,gebietsleiter_id,upsertError:error?.message||null,entriesCount:progressEntries.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'BATCH'})}).catch(()=>{});
+    // #endregion
+
     if (error) throw error;
+
+    // #region agent log - STEP 5: Verify what was actually written
+    const { data: verifyProgress } = await freshClient
+      .from('wellen_gl_progress')
+      .select('item_type, item_id, current_number')
+      .eq('welle_id', welleId)
+      .eq('gebietsleiter_id', gebietsleiter_id);
+    fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:batch:STEP5-VERIFY',message:'Verified progress after upsert',data:{welleId,gebietsleiter_id,verifiedProgress:(verifyProgress||[]).map((p:any)=>({type:p.item_type,id:p.item_id,current:p.current_number}))},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'BATCH'})}).catch(()=>{});
+    // #endregion
 
     // Log each submission separately for history/audit (each action is a new row)
     if (market_id) {
@@ -2175,7 +2263,7 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
 router.post('/:id/progress', async (req: Request, res: Response) => {
   try {
     const { id: welleId } = req.params;
-    const { gebietsleiter_id, item_type, item_id, current_number } = req.body;
+    const { gebietsleiter_id, market_id, item_type, item_id, current_number, value_per_unit } = req.body;
 
     console.log(`📊 Updating GL progress for welle ${welleId}...`);
     
@@ -2194,20 +2282,48 @@ router.post('/:id/progress', async (req: Request, res: Response) => {
     const existingValue = existing?.current_number || 0;
     const newTotal = existingValue + current_number;
 
+    // Build upsert entry
+    const progressEntry: any = {
+      welle_id: welleId,
+      gebietsleiter_id,
+      market_id: market_id || null,
+      item_type,
+      item_id,
+      current_number: newTotal
+    };
+    
+    // Store value_per_unit for palette/schuette products
+    if ((item_type === 'palette' || item_type === 'schuette') && value_per_unit !== undefined) {
+      progressEntry.value_per_unit = value_per_unit;
+    }
+
     // Upsert with cumulative value
     const { error } = await freshClient
       .from('wellen_gl_progress')
-      .upsert({
-        welle_id: welleId,
-        gebietsleiter_id,
-        item_type,
-        item_id,
-        current_number: newTotal
-      }, {
+      .upsert(progressEntry, {
         onConflict: 'welle_id,gebietsleiter_id,item_type,item_id'
       });
 
     if (error) throw error;
+
+    // Also log to wellen_submissions for consistency with batch endpoint
+    if (market_id) {
+      const { error: logError } = await freshClient
+        .from('wellen_submissions')
+        .insert({
+          welle_id: welleId,
+          gebietsleiter_id,
+          market_id,
+          item_type,
+          item_id,
+          quantity: current_number,
+          value_per_unit: value_per_unit || null
+        });
+
+      if (logError) {
+        console.warn('⚠️ Could not log submission:', logError.message);
+      }
+    }
 
     console.log(`✅ Updated progress entry (cumulative: ${existingValue} + ${current_number} = ${newTotal})`);
     res.json({ message: 'Progress updated successfully' });
@@ -2339,7 +2455,21 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     const paletteEntries = submissions.filter(p => p.item_type === 'palette');
     const schutteEntries = submissions.filter(p => p.item_type === 'schuette');
 
+    // #region agent log
+    // Calculate RAW sum directly from submissions (before any grouping/matching)
+    const rawPaletteSum = paletteEntries.reduce((sum, e) => sum + (e.quantity * (e.value_per_unit || 0)), 0);
+    const rawSchutteSum = schutteEntries.reduce((sum, e) => sum + (e.quantity * (e.value_per_unit || 0)), 0);
+    const rawDisplaySum = displayKartonwareEntries.reduce((sum, e) => {
+      const item = e.item_type === 'display' ? displays.find((d: any) => d.id === e.item_id) : kartonware.find((k: any) => k.id === e.item_id);
+      return sum + (e.quantity * (item?.item_value || e.value_per_unit || 0));
+    }, 0);
+    fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:all-progress:rawSums',message:'RAW sums before grouping',data:{welleId,rawPaletteSum,rawSchutteSum,rawDisplaySum,rawTotal:rawPaletteSum+rawSchutteSum+rawDisplaySum,paletteCount:paletteEntries.length,schutteCount:schutteEntries.length,displayCount:displayKartonwareEntries.length,samplePalette:paletteEntries[0]?{qty:paletteEntries[0].quantity,vpu:paletteEntries[0].value_per_unit}:null,sampleSchutte:schutteEntries[0]?{qty:schutteEntries[0].quantity,vpu:schutteEntries[0].value_per_unit}:null},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'E'})}).catch(()=>{});
+    // #endregion
+
     // Process display/kartonware entries - each submission is separate
+    // #region agent log
+    const orphanedDisplayKartonware: any[] = [];
+    // #endregion
     const standardResponses = displayKartonwareEntries.map(entry => {
       const gl = glDetails.find((g: any) => g.id === entry.gebietsleiter_id);
       const glUser = gls.find((u: any) => u.id === entry.gebietsleiter_id);
@@ -2347,6 +2477,12 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       const item = entry.item_type === 'display'
         ? displays.find((d: any) => d.id === entry.item_id)
         : kartonware.find((k: any) => k.id === entry.item_id);
+
+      // #region agent log
+      if (!item && entry.item_type !== 'palette' && entry.item_type !== 'schuette') {
+        orphanedDisplayKartonware.push({ id: entry.id, type: entry.item_type, itemId: entry.item_id, qty: entry.quantity, valuePerUnit: entry.value_per_unit });
+      }
+      // #endregion
 
       return {
         id: entry.id,
@@ -2362,9 +2498,17 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
         photoUrl: entry.photo_url
       };
     });
+    // #region agent log
+    if (orphanedDisplayKartonware.length > 0) {
+      fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:all-progress:orphaned',message:'Orphaned display/kartonware',data:{welleId,orphaned:orphanedDisplayKartonware},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+    }
+    // #endregion
 
     // Group palette entries by parent palette (per GL, market, AND timestamp for same submission batch)
     const paletteGroups = new Map<string, any[]>();
+    // #region agent log
+    const orphanedPaletteEntries: any[] = [];
+    // #endregion
     for (const entry of paletteEntries) {
       // Try direct ID match first, then fallback to value match
       let product = paletteProducts.find((p: any) => p.id === entry.item_id);
@@ -2372,6 +2516,11 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
         // Try to match by value_per_unit (best effort for orphaned submissions)
         product = paletteProducts.find((p: any) => p.value_per_ve === entry.value_per_unit);
       }
+      // #region agent log
+      if (!product) {
+        orphanedPaletteEntries.push({ id: entry.id, itemId: entry.item_id, qty: entry.quantity, valuePerUnit: entry.value_per_unit });
+      }
+      // #endregion
       const parentId = product?.palette_id || (palettes.length === 1 ? palettes[0].id : 'unknown');
       // Group by GL + market + palette + timestamp (rounded to same minute for batch grouping)
       const timestampKey = new Date(entry.created_at).toISOString().slice(0, 16);
@@ -2381,6 +2530,11 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       }
       paletteGroups.get(key)!.push({ ...entry, product });
     }
+    // #region agent log
+    if (orphanedPaletteEntries.length > 0) {
+      fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:all-progress:orphanedPalette',message:'Orphaned palette products',data:{welleId,orphaned:orphanedPaletteEntries,availableProducts:paletteProducts.map((p:any)=>({id:p.id,name:p.name,value:p.value_per_ve}))},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+    }
+    // #endregion
 
     const paletteResponses: any[] = [];
     for (const [, entries] of paletteGroups) {
@@ -2390,13 +2544,22 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       const market = markets.find((m: any) => m.id === firstEntry.market_id);
       const parentPalette = palettes.find((p: any) => p.id === firstEntry.product?.palette_id);
 
-      const products = entries.map((e: any) => ({
-        id: e.item_id,
-        name: e.product?.name || 'Produkt',
-        quantity: e.quantity,
-        valuePerUnit: e.value_per_unit || e.product?.value_per_ve || 0,
-        value: e.quantity * (e.value_per_unit || e.product?.value_per_ve || 0)
-      }));
+      const products = entries.map((e: any) => {
+        // #region agent log
+        const valueUsed = e.value_per_unit || e.product?.value_per_ve || 0;
+        const entryValue = e.quantity * valueUsed;
+        if (!e.product) {
+          fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:paletteProductCalc',message:'Palette product value calc',data:{entryId:e.id,itemId:e.item_id,qty:e.quantity,valuePerUnit:e.value_per_unit,productValuePerVe:e.product?.value_per_ve,valueUsed,entryValue,hasProduct:!!e.product},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D'})}).catch(()=>{});
+        }
+        // #endregion
+        return {
+          id: e.item_id,
+          name: e.product?.name || 'Produkt',
+          quantity: e.quantity,
+          valuePerUnit: valueUsed,
+          value: entryValue
+        };
+      });
 
       const totalValue = products.reduce((sum: number, p: any) => sum + p.value, 0);
 
@@ -2443,13 +2606,22 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       const market = markets.find((m: any) => m.id === firstEntry.market_id);
       const parentSchutte = schutten.find((s: any) => s.id === firstEntry.product?.schuette_id);
 
-      const products = entries.map((e: any) => ({
-        id: e.item_id,
-        name: e.product?.name || 'Produkt',
-        quantity: e.quantity,
-        valuePerUnit: e.value_per_unit || e.product?.value_per_ve || 0,
-        value: e.quantity * (e.value_per_unit || e.product?.value_per_ve || 0)
-      }));
+      const products = entries.map((e: any) => {
+        // #region agent log
+        const valueUsed = e.value_per_unit || e.product?.value_per_ve || 0;
+        const entryValue = e.quantity * valueUsed;
+        if (!e.product) {
+          fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:schutteProductCalc',message:'Schutte product value calc',data:{entryId:e.id,itemId:e.item_id,qty:e.quantity,valuePerUnit:e.value_per_unit,productValuePerVe:e.product?.value_per_ve,valueUsed,entryValue,hasProduct:!!e.product},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D'})}).catch(()=>{});
+        }
+        // #endregion
+        return {
+          id: e.item_id,
+          name: e.product?.name || 'Produkt',
+          quantity: e.quantity,
+          valuePerUnit: valueUsed,
+          value: entryValue
+        };
+      });
 
       const totalValue = products.reduce((sum: number, p: any) => sum + p.value, 0);
 
@@ -2473,6 +2645,14 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     // Combine and sort by timestamp
     const response = [...standardResponses, ...paletteResponses, ...schutteResponses]
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    // #region agent log
+    const totalValue = response.reduce((sum, r) => sum + (r.value || 0), 0);
+    const displayKartonTotal = standardResponses.reduce((sum, r) => sum + (r.value || 0), 0);
+    const paletteTotal = paletteResponses.reduce((sum, r) => sum + (r.value || 0), 0);
+    const schutteTotal = schutteResponses.reduce((sum, r) => sum + (r.value || 0), 0);
+    fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:all-progress',message:'Modal value calculation',data:{welleId,totalValue,displayKartonTotal,paletteTotal,schutteTotal,entriesCount:response.length,submissionsCount:submissions.length,rawPaletteCount:paletteEntries.length,rawSchutteCount:schutteEntries.length,standardCount:standardResponses.length,paletteGroupCount:paletteResponses.length,schutteGroupCount:schutteResponses.length,breakdown:response.map(r=>({type:r.itemType,name:r.itemName,qty:r.quantity,value:r.value}))},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
 
     res.json(response);
   } catch (error: any) {
@@ -3125,6 +3305,265 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error fetching wave markets status:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ============================================================================
+// TEMPORARY: EXPORT WELLEN_SUBMISSIONS TO EXCEL
+// ============================================================================
+router.get('/export/submissions', async (req: Request, res: Response) => {
+  try {
+    const freshClient = createFreshClient();
+    
+    // Get all submissions
+    const { data: submissions, error: subError } = await freshClient
+      .from('wellen_submissions')
+      .select('*')
+      .order('created_at', { ascending: false });
+    
+    if (subError) throw subError;
+    
+    if (!submissions || submissions.length === 0) {
+      return res.status(404).json({ error: 'No submissions found' });
+    }
+    
+    // Collect unique IDs
+    const welleIds = [...new Set(submissions.map(s => s.welle_id).filter(Boolean))];
+    const glIds = [...new Set(submissions.map(s => s.gebietsleiter_id).filter(Boolean))];
+    const marketIds = [...new Set(submissions.map(s => s.market_id).filter(Boolean))];
+    
+    // Fetch wellen names
+    const { data: wellen } = await freshClient
+      .from('wellen')
+      .select('id, name')
+      .in('id', welleIds);
+    const welleMap = new Map((wellen || []).map(w => [w.id, w.name]));
+    
+    // Fetch GL names
+    const { data: gls } = await freshClient
+      .from('gebietsleiter')
+      .select('id, name')
+      .in('id', glIds);
+    const glMap = new Map((gls || []).map(g => [g.id, g.name]));
+    
+    // Fetch market names
+    const { data: markets } = await freshClient
+      .from('markets')
+      .select('id, name, chain, address, city')
+      .in('id', marketIds);
+    const marketMap = new Map((markets || []).map(m => [m.id, m]));
+    
+    // Fetch item names (products, displays, palettes, schuetten)
+    const itemIds = [...new Set(submissions.map(s => s.item_id).filter(Boolean))];
+    
+    // Try to fetch from various product tables
+    const { data: wellenDisplays } = await freshClient
+      .from('wellen_displays')
+      .select('id, name')
+      .in('id', itemIds);
+    
+    const { data: wellenPaletten } = await freshClient
+      .from('wellen_paletten')
+      .select('id, name')
+      .in('id', itemIds);
+    
+    const { data: wellenSchuetten } = await freshClient
+      .from('wellen_schuetten')
+      .select('id, name')
+      .in('id', itemIds);
+    
+    const { data: wellenKartonware } = await freshClient
+      .from('wellen_kartonware')
+      .select('id, name')
+      .in('id', itemIds);
+    
+    // Build item name map
+    const itemMap = new Map<string, string>();
+    (wellenDisplays || []).forEach(d => itemMap.set(d.id, d.name));
+    (wellenPaletten || []).forEach(p => itemMap.set(p.id, p.name));
+    (wellenSchuetten || []).forEach(s => itemMap.set(s.id, s.name));
+    (wellenKartonware || []).forEach(k => itemMap.set(k.id, k.name));
+    
+    // Transform submissions to readable format
+    const excelData = submissions.map(sub => {
+      const market = marketMap.get(sub.market_id);
+      return {
+        'ID': sub.id,
+        'Welle ID': sub.welle_id,
+        'Welle Name': welleMap.get(sub.welle_id) || sub.welle_id,
+        'Gebietsleiter ID': sub.gebietsleiter_id,
+        'Gebietsleiter Name': glMap.get(sub.gebietsleiter_id) || sub.gebietsleiter_id,
+        'Market ID': sub.market_id,
+        'Market Name': market?.name || sub.market_id,
+        'Market Chain': market?.chain || '',
+        'Market Address': market?.address || '',
+        'Market City': market?.city || '',
+        'Item Type': sub.item_type,
+        'Item ID': sub.item_id,
+        'Item Name': itemMap.get(sub.item_id) || sub.item_id,
+        'Quantity': sub.quantity,
+        'Value Per Unit': sub.value_per_unit,
+        'Created At': sub.created_at
+      };
+    });
+    
+    // Create workbook and worksheet
+    const ws = XLSX.utils.json_to_sheet(excelData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Submissions');
+    
+    // Set column widths
+    ws['!cols'] = [
+      { wch: 38 }, // ID
+      { wch: 38 }, // Welle ID
+      { wch: 30 }, // Welle Name
+      { wch: 38 }, // GL ID
+      { wch: 25 }, // GL Name
+      { wch: 38 }, // Market ID
+      { wch: 30 }, // Market Name
+      { wch: 15 }, // Market Chain
+      { wch: 40 }, // Market Address
+      { wch: 20 }, // Market City
+      { wch: 12 }, // Item Type
+      { wch: 38 }, // Item ID
+      { wch: 40 }, // Item Name
+      { wch: 10 }, // Quantity
+      { wch: 15 }, // Value Per Unit
+      { wch: 25 }, // Created At
+    ];
+    
+    // Generate buffer
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    
+    // Set headers and send file
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=wellen_submissions_export.xlsx');
+    res.send(buffer);
+    
+    console.log(`📊 Exported ${submissions.length} submissions to Excel`);
+  } catch (error: any) {
+    console.error('Error exporting submissions:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ============================================================================
+// TEMPORARY: EXPORT WELLEN_GL_PROGRESS TO EXCEL
+// ============================================================================
+router.get('/export/progress', async (req: Request, res: Response) => {
+  try {
+    const freshClient = createFreshClient();
+    
+    // Get all progress entries
+    const { data: progress, error: progressError } = await freshClient
+      .from('wellen_gl_progress')
+      .select('*')
+      .order('updated_at', { ascending: false });
+    
+    if (progressError) throw progressError;
+    
+    if (!progress || progress.length === 0) {
+      return res.status(404).json({ error: 'No progress entries found' });
+    }
+    
+    // Collect unique IDs
+    const welleIds = [...new Set(progress.map(p => p.welle_id).filter(Boolean))];
+    const glIds = [...new Set(progress.map(p => p.gebietsleiter_id).filter(Boolean))];
+    
+    // Fetch wellen names
+    const { data: wellen } = await freshClient
+      .from('wellen')
+      .select('id, name')
+      .in('id', welleIds);
+    const welleMap = new Map((wellen || []).map(w => [w.id, w.name]));
+    
+    // Fetch GL names
+    const { data: gls } = await freshClient
+      .from('gebietsleiter')
+      .select('id, name')
+      .in('id', glIds);
+    const glMap = new Map((gls || []).map(g => [g.id, g.name]));
+    
+    // Fetch item names (products, displays, palettes, schuetten)
+    const itemIds = [...new Set(progress.map(p => p.item_id).filter(Boolean))];
+    
+    // Try to fetch from various product tables
+    const { data: wellenDisplays } = await freshClient
+      .from('wellen_displays')
+      .select('id, name')
+      .in('id', itemIds);
+    
+    const { data: wellenPaletten } = await freshClient
+      .from('wellen_paletten')
+      .select('id, name')
+      .in('id', itemIds);
+    
+    const { data: wellenSchuetten } = await freshClient
+      .from('wellen_schuetten')
+      .select('id, name')
+      .in('id', itemIds);
+    
+    const { data: wellenKartonware } = await freshClient
+      .from('wellen_kartonware')
+      .select('id, name')
+      .in('id', itemIds);
+    
+    // Build item name map
+    const itemMap = new Map<string, string>();
+    (wellenDisplays || []).forEach(d => itemMap.set(d.id, d.name));
+    (wellenPaletten || []).forEach(p => itemMap.set(p.id, p.name));
+    (wellenSchuetten || []).forEach(s => itemMap.set(s.id, s.name));
+    (wellenKartonware || []).forEach(k => itemMap.set(k.id, k.name));
+    
+    // Transform progress to readable format
+    const excelData = progress.map(p => ({
+      'ID': p.id,
+      'Welle ID': p.welle_id,
+      'Welle Name': welleMap.get(p.welle_id) || p.welle_id,
+      'Gebietsleiter ID': p.gebietsleiter_id,
+      'Gebietsleiter Name': glMap.get(p.gebietsleiter_id) || p.gebietsleiter_id,
+      'Item Type': p.item_type,
+      'Item ID': p.item_id,
+      'Item Name': itemMap.get(p.item_id) || p.item_id,
+      'Current Number': p.current_number,
+      'Value Per Unit': p.value_per_unit,
+      'Created At': p.created_at,
+      'Updated At': p.updated_at
+    }));
+    
+    // Create workbook and worksheet
+    const ws = XLSX.utils.json_to_sheet(excelData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Progress');
+    
+    // Set column widths
+    ws['!cols'] = [
+      { wch: 38 }, // ID
+      { wch: 38 }, // Welle ID
+      { wch: 30 }, // Welle Name
+      { wch: 38 }, // GL ID
+      { wch: 25 }, // GL Name
+      { wch: 12 }, // Item Type
+      { wch: 38 }, // Item ID
+      { wch: 40 }, // Item Name
+      { wch: 15 }, // Current Number
+      { wch: 15 }, // Value Per Unit
+      { wch: 25 }, // Created At
+      { wch: 25 }, // Updated At
+    ];
+    
+    // Generate buffer
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    
+    // Set headers and send file
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=wellen_gl_progress_export.xlsx');
+    res.send(buffer);
+    
+    console.log(`📊 Exported ${progress.length} progress entries to Excel`);
+  } catch (error: any) {
+    console.error('Error exporting progress:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
