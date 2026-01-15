@@ -2844,9 +2844,12 @@ router.delete('/delete-image', async (req: Request, res: Response) => {
 router.get('/:id/markets-status', async (req: Request, res: Response) => {
   try {
     const { id: welleId } = req.params;
+    
+    // Use fresh client to avoid any caching issues
+    const freshClient = createFreshClient();
 
     // Get wave details
-    const { data: welle, error: welleError } = await supabase
+    const { data: welle, error: welleError } = await freshClient
       .from('wellen')
       .select('id, name, start_date, end_date')
       .eq('id', welleId)
@@ -2857,7 +2860,7 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
     }
 
     // Get assigned market IDs from wellen_markets table
-    const { data: wellenMarkets, error: wellenMarketsError } = await supabase
+    const { data: wellenMarkets, error: wellenMarketsError } = await freshClient
       .from('wellen_markets')
       .select('market_id')
       .eq('welle_id', welleId);
@@ -2867,13 +2870,15 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
     }
 
     const assignedMarketIds = (wellenMarkets || []).map(wm => wm.market_id);
+    
+    console.log(`📊 Wave ${welleId} markets-status: found ${assignedMarketIds.length} assigned markets`);
 
     if (assignedMarketIds.length === 0) {
       return res.json({ visited: [], notVisited: [], visitedCount: 0, totalCount: 0 });
     }
 
     // Get all assigned markets
-    const { data: markets, error: marketsError } = await supabase
+    const { data: markets, error: marketsError } = await freshClient
       .from('markets')
       .select('id, name, chain, address, city, gebietsleiter_name')
       .in('id', assignedMarketIds);
@@ -2883,7 +2888,7 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
     }
 
     // Get all submissions for this wave (each submission is a visit with progress)
-    const { data: submissions, error: submissionsError } = await supabase
+    const { data: submissions, error: submissionsError } = await freshClient
       .from('wellen_submissions')
       .select('*')
       .eq('welle_id', welleId)
@@ -2895,7 +2900,7 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
 
     // Get GL details for submissions
     const glIds = [...new Set((submissions || []).map(s => s.gebietsleiter_id).filter(Boolean))];
-    const { data: glDetails } = await supabase
+    const { data: glDetails } = await freshClient
       .from('gebietsleiter')
       .select('id, name')
       .in('id', glIds.length > 0 ? glIds : ['__none__']);
@@ -2907,10 +2912,10 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
     const schutteProductIds = (submissions || []).filter(s => s.item_type === 'schuette').map(s => s.item_id).filter(Boolean);
 
     const [displaysResult, kartonwareResult, paletteProductsResult, schutteProductsResult] = await Promise.all([
-      displayIds.length > 0 ? supabase.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
-      kartonwareIds.length > 0 ? supabase.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] },
-      paletteProductIds.length > 0 ? supabase.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('id', paletteProductIds) : { data: [] },
-      schutteProductIds.length > 0 ? supabase.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('id', schutteProductIds) : { data: [] }
+      displayIds.length > 0 ? freshClient.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
+      kartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] },
+      paletteProductIds.length > 0 ? freshClient.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('id', paletteProductIds) : { data: [] },
+      schutteProductIds.length > 0 ? freshClient.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('id', schutteProductIds) : { data: [] }
     ]);
 
     const displays = displaysResult.data || [];
@@ -2920,19 +2925,19 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
 
     // If no products found by ID (orphaned submissions due to welle edit), fetch ALL products for this welle
     if (paletteProducts.length === 0 && paletteProductIds.length > 0) {
-      const { data: wellePalettes } = await supabase.from('wellen_paletten').select('id').eq('welle_id', welleId);
+      const { data: wellePalettes } = await freshClient.from('wellen_paletten').select('id').eq('welle_id', welleId);
       if (wellePalettes && wellePalettes.length > 0) {
         const paletteIdsForWelle = wellePalettes.map((p: any) => p.id);
-        const { data: allProds } = await supabase.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('palette_id', paletteIdsForWelle);
+        const { data: allProds } = await freshClient.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('palette_id', paletteIdsForWelle);
         paletteProducts = allProds || [];
       }
     }
     
     if (schutteProducts.length === 0 && schutteProductIds.length > 0) {
-      const { data: welleSchuetten } = await supabase.from('wellen_schuetten').select('id').eq('welle_id', welleId);
+      const { data: welleSchuetten } = await freshClient.from('wellen_schuetten').select('id').eq('welle_id', welleId);
       if (welleSchuetten && welleSchuetten.length > 0) {
         const schutteIdsForWelle = welleSchuetten.map((s: any) => s.id);
-        const { data: allProds } = await supabase.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('schuette_id', schutteIdsForWelle);
+        const { data: allProds } = await freshClient.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('schuette_id', schutteIdsForWelle);
         schutteProducts = allProds || [];
       }
     }
@@ -2943,17 +2948,17 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
     
     // If still no parent IDs, fetch directly from welle
     if (paletteIds.length === 0 && paletteProductIds.length > 0) {
-      const { data: wellePalettes } = await supabase.from('wellen_paletten').select('id').eq('welle_id', welleId);
+      const { data: wellePalettes } = await freshClient.from('wellen_paletten').select('id').eq('welle_id', welleId);
       paletteIds = (wellePalettes || []).map((p: any) => p.id);
     }
     if (schutteIds.length === 0 && schutteProductIds.length > 0) {
-      const { data: welleSchuetten } = await supabase.from('wellen_schuetten').select('id').eq('welle_id', welleId);
+      const { data: welleSchuetten } = await freshClient.from('wellen_schuetten').select('id').eq('welle_id', welleId);
       schutteIds = (welleSchuetten || []).map((s: any) => s.id);
     }
     
     const [palettesResult, schuttenResult] = await Promise.all([
-      paletteIds.length > 0 ? supabase.from('wellen_paletten').select('id, name').in('id', paletteIds) : { data: [] },
-      schutteIds.length > 0 ? supabase.from('wellen_schuetten').select('id, name').in('id', schutteIds) : { data: [] }
+      paletteIds.length > 0 ? freshClient.from('wellen_paletten').select('id, name').in('id', paletteIds) : { data: [] },
+      schutteIds.length > 0 ? freshClient.from('wellen_schuetten').select('id, name').in('id', schutteIds) : { data: [] }
     ]);
     
     const palettes = palettesResult.data || [];
