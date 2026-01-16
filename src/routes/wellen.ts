@@ -1039,88 +1039,26 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           kartonwareCount += progress;
         }
 
-        // #region agent log - Compare progress vs submissions for Billa Plus wave
-        if (welle.name?.includes('Billa Plus') || welle.name?.includes('Billa+')) {
-          // Fetch all submissions for this wave to compare
-          const { data: submissionsForWave } = await freshClient
-            .from('wellen_submissions')
-            .select('item_type, item_id, quantity, gebietsleiter_id')
-            .eq('welle_id', welle.id);
-          
-          // Sum submissions by item
-          const submissionTotals = new Map<string, number>();
-          const progressTotals = new Map<string, number>();
-          
-          for (const sub of (submissionsForWave || [])) {
-            const key = `${sub.item_type}:${sub.item_id}`;
-            submissionTotals.set(key, (submissionTotals.get(key) || 0) + (sub.quantity || 0));
-          }
-          
-          for (const prog of progressData) {
-            const key = `${prog.item_type}:${prog.item_id}`;
-            progressTotals.set(key, (progressTotals.get(key) || 0) + (prog.current_number || 0));
-          }
-          
-          // Find discrepancies
-          const discrepancies: any[] = [];
-          for (const [key, progValue] of progressTotals) {
-            const subValue = submissionTotals.get(key) || 0;
-            if (progValue !== subValue) {
-              discrepancies.push({ key, progressValue: progValue, submissionsSum: subValue, diff: progValue - subValue });
-            }
-          }
-          
-          // Find items with highest progress values
-          const sortedProgress = [...progressData].sort((a, b) => (b.current_number || 0) - (a.current_number || 0)).slice(0, 5);
-          const topProgressItems = sortedProgress.map(p => ({
-            itemType: p.item_type,
-            itemId: p.item_id,
-            progressValue: p.current_number,
-            submissionsSum: submissionTotals.get(`${p.item_type}:${p.item_id}`) || 0,
-            glId: p.gebietsleiter_id
-          }));
-          
-          fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:dashboard/waves:billaPlusCompare',message:'Progress vs Submissions comparison',data:{welleName:welle.name,welleId:welle.id,totalProgressCount:progressData.reduce((s,p)=>s+(p.current_number||0),0),totalSubmissionsCount:(submissionsForWave||[]).reduce((s,p)=>s+(p.quantity||0),0),progressEntriesCount:progressData.length,submissionsEntriesCount:(submissionsForWave||[]).length,displayCount,kartonwareCount,discrepancies:discrepancies.slice(0,10),topProgressItems},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1'})}).catch(()=>{});
-        }
-        // #endregion
-
         // Calculate current value for value-based goals
         let currentValue = 0;
-        // #region agent log
-        const valueBreakdown: any[] = [];
-        // #endregion
         if (welle.goal_type === 'value') {
           for (const progress of progressData) {
             if (progress.item_type === 'display') {
               const display = displays.find(d => d.id === progress.item_id);
               if (display) {
                 currentValue += progress.current_number * (display.item_value || 0);
-                // #region agent log
-                valueBreakdown.push({ type: 'display', itemId: progress.item_id, qty: progress.current_number, itemValue: display.item_value, added: progress.current_number * (display.item_value || 0) });
-                // #endregion
               }
             } else if (progress.item_type === 'kartonware') {
               const kw = kartonware.find(k => k.id === progress.item_id);
               if (kw) {
                 currentValue += progress.current_number * (kw.item_value || 0);
-                // #region agent log
-                valueBreakdown.push({ type: 'kartonware', itemId: progress.item_id, qty: progress.current_number, itemValue: kw.item_value, added: progress.current_number * (kw.item_value || 0) });
-                // #endregion
               }
             } else if (progress.item_type === 'palette' || progress.item_type === 'schuette') {
               // For palette/schuette, use stored value_per_unit
               currentValue += progress.current_number * (progress.value_per_unit || 0);
-              // #region agent log
-              valueBreakdown.push({ type: progress.item_type, itemId: progress.item_id, qty: progress.current_number, valuePerUnit: progress.value_per_unit, added: progress.current_number * (progress.value_per_unit || 0) });
-              // #endregion
             }
           }
         }
-        // #region agent log
-        if (welle.name?.includes('Hagebau')) {
-          fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:dashboard/waves',message:'Card value calculation',data:{welleName:welle.name,currentValue,progressCount:progressData.length,breakdown:valueBreakdown},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A'})}).catch(()=>{});
-        }
-        // #endregion
 
         // Count unique participating GLs
         const participatingGLs = new Set((progressData || []).map(p => p.gebietsleiter_id)).size;
@@ -2130,20 +2068,12 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: gebietsleiter_id, items' });
     }
 
-    // #region agent log - STEP 1: Log incoming request
-    fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:batch:STEP1-REQUEST',message:'Incoming batch request',data:{welleId,gebietsleiter_id,market_id,itemsReceived:items.map((i:any)=>({type:i.item_type,id:i.item_id,current_number:i.current_number,value_per_unit:i.value_per_unit}))},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'BATCH'})}).catch(()=>{});
-    // #endregion
-
     // Fetch existing progress for this GL and welle
     const { data: existingProgress, error: fetchError } = await freshClient
       .from('wellen_gl_progress')
       .select('item_type, item_id, current_number')
       .eq('welle_id', welleId)
       .eq('gebietsleiter_id', gebietsleiter_id);
-
-    // #region agent log - STEP 2: Log existing progress fetched
-    fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:batch:STEP2-EXISTING',message:'Existing progress fetched',data:{welleId,gebietsleiter_id,fetchError:fetchError?.message||null,existingProgressCount:existingProgress?.length||0,existingProgress:(existingProgress||[]).map((p:any)=>({type:p.item_type,id:p.item_id,current:p.current_number}))},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'BATCH'})}).catch(()=>{});
-    // #endregion
 
     // Create a map of existing progress for quick lookup
     const existingMap = new Map<string, number>();
@@ -2175,30 +2105,13 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
       return entry;
     });
 
-    // #region agent log - STEP 3: Log calculated entries before upsert
-    fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:batch:STEP3-CALCULATED',message:'Calculated entries for upsert',data:{welleId,gebietsleiter_id,calculatedEntries:progressEntries.map((e:any)=>({type:e.item_type,id:e.item_id,existingBefore:existingMap.get(`${e.item_type}:${e.item_id}`)||0,increment:items.find((i:any)=>i.item_type===e.item_type&&i.item_id===e.item_id)?.current_number||0,newTotal:e.current_number}))},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'BATCH'})}).catch(()=>{});
-    // #endregion
-
     const { error } = await freshClient
       .from('wellen_gl_progress')
       .upsert(progressEntries, {
         onConflict: 'welle_id,gebietsleiter_id,item_type,item_id'
       });
 
-    // #region agent log - STEP 4: Log upsert result
-    fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:batch:STEP4-UPSERT',message:'Upsert completed',data:{welleId,gebietsleiter_id,upsertError:error?.message||null,entriesCount:progressEntries.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'BATCH'})}).catch(()=>{});
-    // #endregion
-
     if (error) throw error;
-
-    // #region agent log - STEP 5: Verify what was actually written
-    const { data: verifyProgress } = await freshClient
-      .from('wellen_gl_progress')
-      .select('item_type, item_id, current_number')
-      .eq('welle_id', welleId)
-      .eq('gebietsleiter_id', gebietsleiter_id);
-    fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:batch:STEP5-VERIFY',message:'Verified progress after upsert',data:{welleId,gebietsleiter_id,verifiedProgress:(verifyProgress||[]).map((p:any)=>({type:p.item_type,id:p.item_id,current:p.current_number}))},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'BATCH'})}).catch(()=>{});
-    // #endregion
 
     // Log each submission separately for history/audit (each action is a new row)
     if (market_id) {
@@ -2409,38 +2322,9 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     let paletteProducts = paletteProductsResult.data || [];
     let schutteProducts = schutteProductsResult.data || [];
 
-    // If no products found by ID (orphaned submissions due to welle edit), fetch ALL products for this welle
-    if (paletteProducts.length === 0 && paletteProductIds.length > 0) {
-      const { data: wellePalettes } = await freshClient.from('wellen_paletten').select('id').eq('welle_id', welleId);
-      if (wellePalettes && wellePalettes.length > 0) {
-        const paletteIdsForWelle = wellePalettes.map((p: any) => p.id);
-        const { data: allProds } = await freshClient.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('palette_id', paletteIdsForWelle);
-        paletteProducts = allProds || [];
-      }
-    }
-    
-    if (schutteProducts.length === 0 && schutteProductIds.length > 0) {
-      const { data: welleSchuetten } = await freshClient.from('wellen_schuetten').select('id').eq('welle_id', welleId);
-      if (welleSchuetten && welleSchuetten.length > 0) {
-        const schutteIdsForWelle = welleSchuetten.map((s: any) => s.id);
-        const { data: allProds } = await freshClient.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('schuette_id', schutteIdsForWelle);
-        schutteProducts = allProds || [];
-      }
-    }
-
-    // Fetch parent palette/schuette names - get all for this welle if products were orphaned
-    let paletteIds = [...new Set((paletteProducts || []).map((p: any) => p.palette_id))].filter(Boolean);
-    let schutteIds = [...new Set((schutteProducts || []).map((p: any) => p.schuette_id))].filter(Boolean);
-    
-    // If still no parent IDs, fetch directly from welle
-    if (paletteIds.length === 0 && paletteProductIds.length > 0) {
-      const { data: wellePalettes } = await freshClient.from('wellen_paletten').select('id').eq('welle_id', welleId);
-      paletteIds = (wellePalettes || []).map((p: any) => p.id);
-    }
-    if (schutteIds.length === 0 && schutteProductIds.length > 0) {
-      const { data: welleSchuetten } = await freshClient.from('wellen_schuetten').select('id').eq('welle_id', welleId);
-      schutteIds = (welleSchuetten || []).map((s: any) => s.id);
-    }
+    // Fetch parent palette/schuette names - direct ID match only, no fallback
+    const paletteIds = [...new Set((paletteProducts || []).map((p: any) => p.palette_id))].filter(Boolean);
+    const schutteIds = [...new Set((schutteProducts || []).map((p: any) => p.schuette_id))].filter(Boolean);
     
     const [palettesResult, schuttenResult] = await Promise.all([
       paletteIds.length > 0 ? freshClient.from('wellen_paletten').select('id, name').in('id', paletteIds) : { data: [] },
@@ -2455,21 +2339,7 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     const paletteEntries = submissions.filter(p => p.item_type === 'palette');
     const schutteEntries = submissions.filter(p => p.item_type === 'schuette');
 
-    // #region agent log
-    // Calculate RAW sum directly from submissions (before any grouping/matching)
-    const rawPaletteSum = paletteEntries.reduce((sum, e) => sum + (e.quantity * (e.value_per_unit || 0)), 0);
-    const rawSchutteSum = schutteEntries.reduce((sum, e) => sum + (e.quantity * (e.value_per_unit || 0)), 0);
-    const rawDisplaySum = displayKartonwareEntries.reduce((sum, e) => {
-      const item = e.item_type === 'display' ? displays.find((d: any) => d.id === e.item_id) : kartonware.find((k: any) => k.id === e.item_id);
-      return sum + (e.quantity * (item?.item_value || e.value_per_unit || 0));
-    }, 0);
-    fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:all-progress:rawSums',message:'RAW sums before grouping',data:{welleId,rawPaletteSum,rawSchutteSum,rawDisplaySum,rawTotal:rawPaletteSum+rawSchutteSum+rawDisplaySum,paletteCount:paletteEntries.length,schutteCount:schutteEntries.length,displayCount:displayKartonwareEntries.length,samplePalette:paletteEntries[0]?{qty:paletteEntries[0].quantity,vpu:paletteEntries[0].value_per_unit}:null,sampleSchutte:schutteEntries[0]?{qty:schutteEntries[0].quantity,vpu:schutteEntries[0].value_per_unit}:null},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'E'})}).catch(()=>{});
-    // #endregion
-
     // Process display/kartonware entries - each submission is separate
-    // #region agent log
-    const orphanedDisplayKartonware: any[] = [];
-    // #endregion
     const standardResponses = displayKartonwareEntries.map(entry => {
       const gl = glDetails.find((g: any) => g.id === entry.gebietsleiter_id);
       const glUser = gls.find((u: any) => u.id === entry.gebietsleiter_id);
@@ -2477,12 +2347,6 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       const item = entry.item_type === 'display'
         ? displays.find((d: any) => d.id === entry.item_id)
         : kartonware.find((k: any) => k.id === entry.item_id);
-
-      // #region agent log
-      if (!item && entry.item_type !== 'palette' && entry.item_type !== 'schuette') {
-        orphanedDisplayKartonware.push({ id: entry.id, type: entry.item_type, itemId: entry.item_id, qty: entry.quantity, valuePerUnit: entry.value_per_unit });
-      }
-      // #endregion
 
       return {
         id: entry.id,
@@ -2498,29 +2362,12 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
         photoUrl: entry.photo_url
       };
     });
-    // #region agent log
-    if (orphanedDisplayKartonware.length > 0) {
-      fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:all-progress:orphaned',message:'Orphaned display/kartonware',data:{welleId,orphaned:orphanedDisplayKartonware},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
-    }
-    // #endregion
 
     // Group palette entries by parent palette (per GL, market, AND timestamp for same submission batch)
     const paletteGroups = new Map<string, any[]>();
-    // #region agent log
-    const orphanedPaletteEntries: any[] = [];
-    // #endregion
     for (const entry of paletteEntries) {
-      // Try direct ID match first, then fallback to value match
-      let product = paletteProducts.find((p: any) => p.id === entry.item_id);
-      if (!product && entry.value_per_unit) {
-        // Try to match by value_per_unit (best effort for orphaned submissions)
-        product = paletteProducts.find((p: any) => p.value_per_ve === entry.value_per_unit);
-      }
-      // #region agent log
-      if (!product) {
-        orphanedPaletteEntries.push({ id: entry.id, itemId: entry.item_id, qty: entry.quantity, valuePerUnit: entry.value_per_unit });
-      }
-      // #endregion
+      // Direct ID match only - no fallback
+      const product = paletteProducts.find((p: any) => p.id === entry.item_id);
       const parentId = product?.palette_id || (palettes.length === 1 ? palettes[0].id : 'unknown');
       // Group by GL + market + palette + timestamp (rounded to same minute for batch grouping)
       const timestampKey = new Date(entry.created_at).toISOString().slice(0, 16);
@@ -2530,11 +2377,6 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       }
       paletteGroups.get(key)!.push({ ...entry, product });
     }
-    // #region agent log
-    if (orphanedPaletteEntries.length > 0) {
-      fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:all-progress:orphanedPalette',message:'Orphaned palette products',data:{welleId,orphaned:orphanedPaletteEntries,availableProducts:paletteProducts.map((p:any)=>({id:p.id,name:p.name,value:p.value_per_ve}))},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
-    }
-    // #endregion
 
     const paletteResponses: any[] = [];
     for (const [, entries] of paletteGroups) {
@@ -2545,19 +2387,13 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       const parentPalette = palettes.find((p: any) => p.id === firstEntry.product?.palette_id);
 
       const products = entries.map((e: any) => {
-        // #region agent log
         const valueUsed = e.value_per_unit || e.product?.value_per_ve || 0;
-        const entryValue = e.quantity * valueUsed;
-        if (!e.product) {
-          fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:paletteProductCalc',message:'Palette product value calc',data:{entryId:e.id,itemId:e.item_id,qty:e.quantity,valuePerUnit:e.value_per_unit,productValuePerVe:e.product?.value_per_ve,valueUsed,entryValue,hasProduct:!!e.product},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D'})}).catch(()=>{});
-        }
-        // #endregion
         return {
           id: e.item_id,
           name: e.product?.name || 'Produkt',
           quantity: e.quantity,
           valuePerUnit: valueUsed,
-          value: entryValue
+          value: e.quantity * valueUsed
         };
       });
 
@@ -2583,12 +2419,8 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     // Group schuette entries by parent schuette (per GL, market, AND timestamp)
     const schutteGroups = new Map<string, any[]>();
     for (const entry of schutteEntries) {
-      // Try direct ID match first, then fallback to value match
-      let product = schutteProducts.find((p: any) => p.id === entry.item_id);
-      if (!product && entry.value_per_unit) {
-        // Try to match by value_per_unit (best effort for orphaned submissions)
-        product = schutteProducts.find((p: any) => p.value_per_ve === entry.value_per_unit);
-      }
+      // Direct ID match only - no fallback
+      const product = schutteProducts.find((p: any) => p.id === entry.item_id);
       const parentId = product?.schuette_id || (schutten.length === 1 ? schutten[0].id : 'unknown');
       const timestampKey = new Date(entry.created_at).toISOString().slice(0, 16);
       const key = `${entry.gebietsleiter_id}|${entry.market_id}|${parentId}|${timestampKey}`;
@@ -2607,19 +2439,13 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       const parentSchutte = schutten.find((s: any) => s.id === firstEntry.product?.schuette_id);
 
       const products = entries.map((e: any) => {
-        // #region agent log
         const valueUsed = e.value_per_unit || e.product?.value_per_ve || 0;
-        const entryValue = e.quantity * valueUsed;
-        if (!e.product) {
-          fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:schutteProductCalc',message:'Schutte product value calc',data:{entryId:e.id,itemId:e.item_id,qty:e.quantity,valuePerUnit:e.value_per_unit,productValuePerVe:e.product?.value_per_ve,valueUsed,entryValue,hasProduct:!!e.product},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D'})}).catch(()=>{});
-        }
-        // #endregion
         return {
           id: e.item_id,
           name: e.product?.name || 'Produkt',
           quantity: e.quantity,
           valuePerUnit: valueUsed,
-          value: entryValue
+          value: e.quantity * valueUsed
         };
       });
 
@@ -2645,14 +2471,6 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     // Combine and sort by timestamp
     const response = [...standardResponses, ...paletteResponses, ...schutteResponses]
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-
-    // #region agent log
-    const totalValue = response.reduce((sum, r) => sum + (r.value || 0), 0);
-    const displayKartonTotal = standardResponses.reduce((sum, r) => sum + (r.value || 0), 0);
-    const paletteTotal = paletteResponses.reduce((sum, r) => sum + (r.value || 0), 0);
-    const schutteTotal = schutteResponses.reduce((sum, r) => sum + (r.value || 0), 0);
-    fetch('http://127.0.0.1:7242/ingest/35f7e71b-d3fc-4c62-8097-9c7adee771ff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'wellen.ts:all-progress',message:'Modal value calculation',data:{welleId,totalValue,displayKartonTotal,paletteTotal,schutteTotal,entriesCount:response.length,submissionsCount:submissions.length,rawPaletteCount:paletteEntries.length,rawSchutteCount:schutteEntries.length,standardCount:standardResponses.length,paletteGroupCount:paletteResponses.length,schutteGroupCount:schutteResponses.length,breakdown:response.map(r=>({type:r.itemType,name:r.itemName,qty:r.quantity,value:r.value}))},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
 
     res.json(response);
   } catch (error: any) {
@@ -3100,41 +2918,12 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
 
     const displays = displaysResult.data || [];
     const kartonware = kartonwareResult.data || [];
-    let paletteProducts = paletteProductsResult.data || [];
-    let schutteProducts = schutteProductsResult.data || [];
+    const paletteProducts = paletteProductsResult.data || [];
+    const schutteProducts = schutteProductsResult.data || [];
 
-    // If no products found by ID (orphaned submissions due to welle edit), fetch ALL products for this welle
-    if (paletteProducts.length === 0 && paletteProductIds.length > 0) {
-      const { data: wellePalettes } = await freshClient.from('wellen_paletten').select('id').eq('welle_id', welleId);
-      if (wellePalettes && wellePalettes.length > 0) {
-        const paletteIdsForWelle = wellePalettes.map((p: any) => p.id);
-        const { data: allProds } = await freshClient.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('palette_id', paletteIdsForWelle);
-        paletteProducts = allProds || [];
-      }
-    }
-    
-    if (schutteProducts.length === 0 && schutteProductIds.length > 0) {
-      const { data: welleSchuetten } = await freshClient.from('wellen_schuetten').select('id').eq('welle_id', welleId);
-      if (welleSchuetten && welleSchuetten.length > 0) {
-        const schutteIdsForWelle = welleSchuetten.map((s: any) => s.id);
-        const { data: allProds } = await freshClient.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('schuette_id', schutteIdsForWelle);
-        schutteProducts = allProds || [];
-      }
-    }
-
-    // Get parent palette/schuette names - fetch all for this welle if products were orphaned
-    let paletteIds = [...new Set(paletteProducts.map((p: any) => p.palette_id))].filter(Boolean);
-    let schutteIds = [...new Set(schutteProducts.map((p: any) => p.schuette_id))].filter(Boolean);
-    
-    // If still no parent IDs, fetch directly from welle
-    if (paletteIds.length === 0 && paletteProductIds.length > 0) {
-      const { data: wellePalettes } = await freshClient.from('wellen_paletten').select('id').eq('welle_id', welleId);
-      paletteIds = (wellePalettes || []).map((p: any) => p.id);
-    }
-    if (schutteIds.length === 0 && schutteProductIds.length > 0) {
-      const { data: welleSchuetten } = await freshClient.from('wellen_schuetten').select('id').eq('welle_id', welleId);
-      schutteIds = (welleSchuetten || []).map((s: any) => s.id);
-    }
+    // Get parent palette/schuette names - direct ID match only, no fallback
+    const paletteIds = [...new Set(paletteProducts.map((p: any) => p.palette_id))].filter(Boolean);
+    const schutteIds = [...new Set(schutteProducts.map((p: any) => p.schuette_id))].filter(Boolean);
     
     const [palettesResult, schuttenResult] = await Promise.all([
       paletteIds.length > 0 ? freshClient.from('wellen_paletten').select('id, name').in('id', paletteIds) : { data: [] },
@@ -3203,15 +2992,11 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
             items.push({ type: s.item_type, name: itemName, quantity: s.quantity, value: itemValue });
           }
           
-          // Group palette products by parent palette
+          // Group palette products by parent palette - direct ID match only
           const paletteGroups = new Map<string, any[]>();
           for (const s of paletteSubs) {
-            // Try direct ID match first, then fallback to value match
-            let p = paletteProducts.find((x: any) => x.id === s.item_id);
-            if (!p && s.value_per_unit) {
-              p = paletteProducts.find((x: any) => x.value_per_ve === s.value_per_unit);
-            }
-            const parentId = p?.palette_id || (palettes.length === 1 ? palettes[0].id : 'unknown');
+            const p = paletteProducts.find((x: any) => x.id === s.item_id);
+            const parentId = p?.palette_id || 'unknown';
             if (!paletteGroups.has(parentId)) paletteGroups.set(parentId, []);
             paletteGroups.get(parentId)!.push({ ...s, product: p });
           }
@@ -3232,15 +3017,11 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
             });
           }
           
-          // Group schuette products by parent schuette
+          // Group schuette products by parent schuette - direct ID match only
           const schutteGroups = new Map<string, any[]>();
           for (const s of schuetteSubs) {
-            // Try direct ID match first, then fallback to value match
-            let p = schutteProducts.find((x: any) => x.id === s.item_id);
-            if (!p && s.value_per_unit) {
-              p = schutteProducts.find((x: any) => x.value_per_ve === s.value_per_unit);
-            }
-            const parentId = p?.schuette_id || (schutten.length === 1 ? schutten[0].id : 'unknown');
+            const p = schutteProducts.find((x: any) => x.id === s.item_id);
+            const parentId = p?.schuette_id || 'unknown';
             if (!schutteGroups.has(parentId)) schutteGroups.set(parentId, []);
             schutteGroups.get(parentId)!.push({ ...s, product: p });
           }

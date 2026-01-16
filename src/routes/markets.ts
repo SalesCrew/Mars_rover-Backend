@@ -193,6 +193,116 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/markets/find-duplicates
+ * Find markets that might be duplicates (same normalized content but different IDs)
+ * MUST be defined BEFORE /:id routes to avoid being caught by parameter matching
+ */
+router.get('/find-duplicates', async (req: Request, res: Response) => {
+  try {
+    console.log('🔍 Scanning for duplicate markets...');
+    
+    const freshClient = createFreshClient();
+
+    // Helper function to normalize strings for comparison
+    const normalize = (str: string | null | undefined): string => {
+      if (!str) return '';
+      return str
+        .toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // Remove diacritics
+        .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss') // German chars
+        .replace(/[-–—]/g, ' ')  // Replace dashes with spaces
+        .replace(/[^a-z0-9\s]/g, '') // Remove special chars
+        .replace(/\s+/g, ' ')     // Collapse multiple spaces
+        .trim();
+    };
+
+    // Fetch ALL markets
+    let allMarkets: any[] = [];
+    let from = 0;
+    const pageSize = 1000;
+    let hasMore = true;
+
+    while (hasMore) {
+      const { data, error } = await freshClient
+        .from('markets')
+        .select('id, name, address, city, postal_code, chain, gebietsleiter_name, gebietsleiter_id')
+        .order('name', { ascending: true })
+        .range(from, from + pageSize - 1);
+
+      if (error) throw error;
+
+      if (data && data.length > 0) {
+        allMarkets = [...allMarkets, ...data];
+        from += pageSize;
+        hasMore = data.length === pageSize;
+      } else {
+        hasMore = false;
+      }
+    }
+
+    console.log(`📋 Total markets in DB: ${allMarkets.length}`);
+
+    // Create a map to group by normalized key
+    const duplicateGroups = new Map<string, any[]>();
+
+    for (const market of allMarkets) {
+      // Create a normalized key from name + address + city + chain
+      const normalizedName = normalize(market.name);
+      const normalizedAddress = normalize(market.address);
+      const normalizedCity = normalize(market.city);
+      const normalizedChain = normalize(market.chain);
+      
+      // Key: combination of all normalized fields
+      const key = `${normalizedName}|${normalizedAddress}|${normalizedCity}|${normalizedChain}`;
+      
+      if (!duplicateGroups.has(key)) {
+        duplicateGroups.set(key, []);
+      }
+      duplicateGroups.get(key)!.push({
+        id: market.id,
+        name: market.name,
+        address: market.address,
+        city: market.city,
+        postal_code: market.postal_code,
+        chain: market.chain,
+        gebietsleiter_name: market.gebietsleiter_name,
+        gebietsleiter_id: market.gebietsleiter_id,
+        normalizedKey: key
+      });
+    }
+
+    // Filter to only groups with more than 1 market (actual duplicates)
+    const duplicates: any[] = [];
+    for (const [key, markets] of duplicateGroups) {
+      if (markets.length > 1) {
+        duplicates.push({
+          normalizedKey: key,
+          count: markets.length,
+          markets: markets
+        });
+      }
+    }
+
+    // Sort by count (most duplicates first)
+    duplicates.sort((a, b) => b.count - a.count);
+
+    console.log(`🔍 Found ${duplicates.length} duplicate groups (${duplicates.reduce((sum, d) => sum + d.count, 0)} total duplicate entries)`);
+
+    res.json({
+      totalMarketsInDb: allMarkets.length,
+      uniqueMarkets: duplicateGroups.size,
+      duplicateGroups: duplicates.length,
+      duplicateEntries: duplicates.reduce((sum, d) => sum + d.count, 0),
+      extraEntries: duplicates.reduce((sum, d) => sum + d.count - 1, 0),
+      duplicates: duplicates
+    });
+  } catch (error: any) {
+    console.error('Error finding duplicates:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+/**
  * GET /api/markets/:id
  * Get a single market by ID
  */
