@@ -491,6 +491,93 @@ router.delete('/:id', async (req: Request, res: Response) => {
 });
 
 // ============================================================================
+// SUBMIT VORVERKAUF (GL - no wave required)
+// ============================================================================
+router.post('/submit', async (req: Request, res: Response) => {
+  try {
+    const { gebietsleiter_id, market_id, products, notes } = req.body;
+
+    console.log('📦 Submitting vorverkauf (direct, no wave)...');
+
+    if (!gebietsleiter_id || !market_id || !products || products.length === 0) {
+      return res.status(400).json({ 
+        error: 'gebietsleiter_id, market_id, and products are required' 
+      });
+    }
+    
+    const freshClient = createFreshClient();
+
+    // Group products by reason to create multiple entries if needed
+    // Or we could just use the most common reason - let's use the first one for the entry level
+    const primaryReason = products[0]?.reason || 'OOS';
+
+    // Create the main entry
+    const { data: entry, error: entryError } = await freshClient
+      .from('vorverkauf_entries')
+      .insert({
+        gebietsleiter_id,
+        market_id,
+        reason: primaryReason,
+        notes: notes || null,
+        status: 'completed'
+      })
+      .select()
+      .single();
+
+    if (entryError) {
+      console.error('Error creating entry:', entryError);
+      throw entryError;
+    }
+
+    // Create items with their individual reasons
+    const itemsToInsert = products.map((p: { productId: string; quantity: number; reason: string }) => ({
+      vorverkauf_entry_id: entry.id,
+      product_id: p.productId,
+      quantity: p.quantity || 1,
+      item_type: 'take_out',
+      reason: p.reason
+    }));
+
+    const { error: itemsError } = await freshClient
+      .from('vorverkauf_items')
+      .insert(itemsToInsert);
+
+    if (itemsError) {
+      console.error('Error creating items:', itemsError);
+      throw itemsError;
+    }
+
+    // Update market visit count
+    const today = new Date().toISOString().split('T')[0];
+    const { data: market } = await freshClient
+      .from('markets')
+      .select('last_visit_date, current_visits')
+      .eq('id', market_id)
+      .single();
+
+    if (market && market.last_visit_date !== today) {
+      await freshClient
+        .from('markets')
+        .update({
+          current_visits: (market.current_visits || 0) + 1,
+          last_visit_date: today
+        })
+        .eq('id', market_id);
+      console.log(`📍 Recorded visit for market ${market_id}`);
+    }
+
+    console.log(`✅ Created vorverkauf entry with ${products.length} products`);
+    res.status(201).json({
+      id: entry.id,
+      itemsCount: products.length
+    });
+  } catch (error: any) {
+    console.error('❌ Error submitting vorverkauf:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ============================================================================
 // GET VORVERKAUF STATISTICS
 // ============================================================================
 router.get('/stats/summary', async (req: Request, res: Response) => {
