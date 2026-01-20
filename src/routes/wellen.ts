@@ -2875,11 +2875,68 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
       return res.json({ visited: [], notVisited: [], visitedCount: 0, totalCount: 0 });
     }
 
-    // Get all assigned markets
+    // Get all assigned markets (including last_visit_date for checking visited without success)
     const { data: markets, error: marketsError } = await freshClient
       .from('markets')
-      .select('id, name, chain, address, city, gebietsleiter_name')
+      .select('id, name, chain, address, city, gebietsleiter_name, last_visit_date')
       .in('id', assignedMarketIds);
+
+    // Get KW days for this wave to determine the selling period
+    const { data: kwDaysData } = await freshClient
+      .from('wellen_kw_days')
+      .select('kw, days')
+      .eq('welle_id', welleId)
+      .order('kw_order', { ascending: true });
+
+    // Helper to get KW number and day abbreviation from a date
+    const getDateKWInfo = (date: Date): { kw: number; day: string } => {
+      // Get ISO week number
+      const tempDate = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+      const dayNum = tempDate.getUTCDay() || 7;
+      tempDate.setUTCDate(tempDate.getUTCDate() + 4 - dayNum);
+      const yearStart = new Date(Date.UTC(tempDate.getUTCFullYear(), 0, 1));
+      const kw = Math.ceil((((tempDate.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+      
+      // Get day abbreviation
+      const dayIndex = date.getDay(); // 0 = Sunday
+      const days = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+      
+      return { kw, day: days[dayIndex] };
+    };
+
+    // Helper to check if a date falls within the KW selling period
+    const isDateInKWSellPeriod = (dateStr: string | null): boolean => {
+      if (!dateStr) return false;
+      const date = new Date(dateStr);
+      
+      // If no KW days defined, fall back to wave start/end dates
+      if (!kwDaysData || kwDaysData.length === 0) {
+        const startDate = new Date(welle.start_date);
+        const endDate = new Date(welle.end_date);
+        endDate.setHours(23, 59, 59, 999); // Include the entire end day
+        return date >= startDate && date <= endDate;
+      }
+
+      const { kw: visitKW, day: visitDay } = getDateKWInfo(date);
+
+      for (const kwDay of kwDaysData) {
+        // Parse KW (e.g., "KW 5" -> 5, "KW5" -> 5, "5" -> 5)
+        const kwMatch = kwDay.kw.match(/(\d+)/);
+        if (!kwMatch) continue;
+        const kwNum = parseInt(kwMatch[1], 10);
+        
+        // Check if the visit week matches this KW
+        if (visitKW === kwNum) {
+          // Check if the day matches any of the selling days (case-insensitive)
+          const allowedDays = (kwDay.days || []).map((d: string) => d.toLowerCase());
+          if (allowedDays.includes(visitDay.toLowerCase())) {
+            return true;
+          }
+        }
+      }
+
+      return false;
+    };
 
     if (marketsError) {
       return res.status(500).json({ error: marketsError.message });
@@ -2944,6 +3001,7 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
 
     // Build visited markets with their activity details
     const visited: any[] = [];
+    const visitedNoSuccess: any[] = [];
     const notVisited: any[] = [];
 
     for (const market of (markets || [])) {
@@ -3062,26 +3120,43 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
           activities
         });
       } else {
-        notVisited.push({
-          id: market.id,
-          name: market.name,
-          chain: market.chain,
-          address: market.address,
-          city: market.city,
-          gebietsleiter: market.gebietsleiter_name
-        });
+        // Check if market was visited during the wave's selling period but has no submission
+        if (isDateInKWSellPeriod(market.last_visit_date)) {
+          visitedNoSuccess.push({
+            id: market.id,
+            name: market.name,
+            chain: market.chain,
+            address: market.address,
+            city: market.city,
+            gebietsleiter: market.gebietsleiter_name,
+            lastVisitDate: market.last_visit_date
+          });
+        } else {
+          notVisited.push({
+            id: market.id,
+            name: market.name,
+            chain: market.chain,
+            address: market.address,
+            city: market.city,
+            gebietsleiter: market.gebietsleiter_name
+          });
+        }
       }
     }
 
     // Sort visited by most recent visit first
     visited.sort((a, b) => new Date(b.visitedAt).getTime() - new Date(a.visitedAt).getTime());
+    // Sort visited without success by most recent visit first
+    visitedNoSuccess.sort((a, b) => new Date(b.lastVisitDate).getTime() - new Date(a.lastVisitDate).getTime());
     // Sort not visited alphabetically
     notVisited.sort((a, b) => a.name.localeCompare(b.name));
 
     res.json({
       visited,
+      visitedNoSuccess,
       notVisited,
       visitedCount: visited.length,
+      visitedNoSuccessCount: visitedNoSuccess.length,
       totalCount: markets?.length || 0
     });
   } catch (error: any) {
