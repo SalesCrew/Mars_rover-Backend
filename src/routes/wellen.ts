@@ -3230,6 +3230,133 @@ router.get('/export/submissions', async (req: Request, res: Response) => {
 });
 
 // ============================================================================
+// UPDATE INDIVIDUAL SUBMISSION QUANTITY
+// ============================================================================
+router.put('/submissions/:submissionId', async (req: Request, res: Response) => {
+  try {
+    const { submissionId } = req.params;
+    const { quantity } = req.body;
+
+    if (typeof quantity !== 'number' || quantity < 0) {
+      return res.status(400).json({ error: 'Invalid quantity' });
+    }
+
+    const freshClient = createFreshClient();
+
+    // Get the original submission to find related progress entry
+    const { data: submission, error: fetchError } = await freshClient
+      .from('wellen_submissions')
+      .select('*')
+      .eq('id', submissionId)
+      .single();
+
+    if (fetchError || !submission) {
+      return res.status(404).json({ error: 'Submission not found' });
+    }
+
+    const oldQuantity = submission.quantity;
+    const quantityDiff = quantity - oldQuantity;
+
+    // Update the submission
+    const { error: updateError } = await freshClient
+      .from('wellen_submissions')
+      .update({ quantity })
+      .eq('id', submissionId);
+
+    if (updateError) {
+      return res.status(500).json({ error: updateError.message });
+    }
+
+    // Update the aggregated progress entry if it exists
+    if (quantityDiff !== 0) {
+      const { data: progressEntry } = await freshClient
+        .from('wellen_gl_progress')
+        .select('id, current_number')
+        .eq('welle_id', submission.welle_id)
+        .eq('gebietsleiter_id', submission.gebietsleiter_id)
+        .eq('item_type', submission.item_type)
+        .eq('item_id', submission.item_id)
+        .single();
+
+      if (progressEntry) {
+        await freshClient
+          .from('wellen_gl_progress')
+          .update({ current_number: Math.max(0, progressEntry.current_number + quantityDiff) })
+          .eq('id', progressEntry.id);
+      }
+    }
+
+    res.json({ message: 'Submission updated', submissionId, newQuantity: quantity });
+  } catch (error) {
+    console.error('Error updating submission:', error);
+    res.status(500).json({ error: 'Failed to update submission' });
+  }
+});
+
+// ============================================================================
+// DELETE INDIVIDUAL SUBMISSION
+// ============================================================================
+router.delete('/submissions/:submissionId', async (req: Request, res: Response) => {
+  try {
+    const { submissionId } = req.params;
+
+    const freshClient = createFreshClient();
+
+    // Get the original submission first
+    const { data: submission, error: fetchError } = await freshClient
+      .from('wellen_submissions')
+      .select('*')
+      .eq('id', submissionId)
+      .single();
+
+    if (fetchError || !submission) {
+      return res.status(404).json({ error: 'Submission not found' });
+    }
+
+    // Delete the submission
+    const { error: deleteError } = await freshClient
+      .from('wellen_submissions')
+      .delete()
+      .eq('id', submissionId);
+
+    if (deleteError) {
+      return res.status(500).json({ error: deleteError.message });
+    }
+
+    // Update the aggregated progress entry
+    const { data: progressEntry } = await freshClient
+      .from('wellen_gl_progress')
+      .select('id, current_number')
+      .eq('welle_id', submission.welle_id)
+      .eq('gebietsleiter_id', submission.gebietsleiter_id)
+      .eq('item_type', submission.item_type)
+      .eq('item_id', submission.item_id)
+      .single();
+
+    if (progressEntry) {
+      const newNumber = Math.max(0, progressEntry.current_number - submission.quantity);
+      if (newNumber === 0) {
+        // Delete the progress entry if count goes to 0
+        await freshClient
+          .from('wellen_gl_progress')
+          .delete()
+          .eq('id', progressEntry.id);
+      } else {
+        await freshClient
+          .from('wellen_gl_progress')
+          .update({ current_number: newNumber })
+          .eq('id', progressEntry.id);
+      }
+    }
+
+    res.json({ message: 'Submission deleted', submissionId });
+  } catch (error) {
+    console.error('Error deleting submission:', error);
+    res.status(500).json({ error: 'Failed to delete submission' });
+  }
+});
+
+// ============================================================================
 // TEMPORARY: EXPORT WELLEN_GL_PROGRESS TO EXCEL
 // ============================================================================
 router.get('/export/progress', async (req: Request, res: Response) => {
