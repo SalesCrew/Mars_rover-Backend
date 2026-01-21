@@ -358,78 +358,99 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
     const currentYear = new Date().getFullYear();
     const yearStart = new Date(currentYear, 0, 1).toISOString();
 
-    // 1. Get GL's total vorbesteller value YTD (from wellen_gl_progress)
-    const { data: glProgress, error: progressError } = await freshClient
-      .from('wellen_gl_progress')
-      .select('current_number, item_type, item_id')
-      .eq('gebietsleiter_id', id)
-      .gte('created_at', yearStart);
+    // 1. Get value-based wellen IDs only
+    const { data: valueBasedWellen } = await freshClient
+      .from('wellen')
+      .select('id')
+      .eq('goal_type', 'value');
+    const valueWelleIds = valueBasedWellen?.map(w => w.id) || [];
 
-    if (progressError) console.error('Progress error:', progressError);
-
-    // Get display and kartonware prices to calculate value
-    const displayIds = glProgress?.filter(p => p.item_type === 'display').map(p => p.item_id) || [];
-    const kartonwareIds = glProgress?.filter(p => p.item_type === 'kartonware').map(p => p.item_id) || [];
-
+    // 2. Get GL's total vorbesteller value YTD (only from value-based waves)
     let glYearTotal = 0;
+    
+    if (valueWelleIds.length > 0) {
+      const { data: glProgress } = await freshClient
+        .from('wellen_gl_progress')
+        .select('current_number, item_type, item_id, value_per_unit, welle_id')
+        .eq('gebietsleiter_id', id)
+        .in('welle_id', valueWelleIds)
+        .gte('created_at', yearStart);
 
-    if (displayIds.length > 0) {
-      const { data: displays } = await freshClient
-        .from('wellen_displays')
-        .select('id, item_value')
-        .in('id', displayIds);
-      
-      if (displays) {
-        glProgress?.filter(p => p.item_type === 'display').forEach(p => {
-          const display = displays.find(d => d.id === p.item_id);
-          if (display) glYearTotal += (display.item_value || 0) * (p.current_number || 0);
+      if (glProgress && glProgress.length > 0) {
+        // Get item values for each type
+        const displayIds = [...new Set(glProgress.filter(p => p.item_type === 'display').map(p => p.item_id))];
+        const kartonwareIds = [...new Set(glProgress.filter(p => p.item_type === 'kartonware').map(p => p.item_id))];
+        const einzelproduktIds = [...new Set(glProgress.filter(p => p.item_type === 'einzelprodukt').map(p => p.item_id))];
+
+        const [displaysResult, kartonwareResult, einzelprodukteResult] = await Promise.all([
+          displayIds.length > 0 ? freshClient.from('wellen_displays').select('id, item_value').in('id', displayIds) : { data: [] },
+          kartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, item_value').in('id', kartonwareIds) : { data: [] },
+          einzelproduktIds.length > 0 ? freshClient.from('wellen_einzelprodukte').select('id, item_value').in('id', einzelproduktIds) : { data: [] }
+        ]);
+
+        const displays = displaysResult.data || [];
+        const kartonware = kartonwareResult.data || [];
+        const einzelprodukte = einzelprodukteResult.data || [];
+
+        glProgress.forEach(p => {
+          if (p.item_type === 'display') {
+            const item = displays.find(d => d.id === p.item_id);
+            if (item) glYearTotal += (item.item_value || 0) * (p.current_number || 0);
+          } else if (p.item_type === 'kartonware') {
+            const item = kartonware.find(k => k.id === p.item_id);
+            if (item) glYearTotal += (item.item_value || 0) * (p.current_number || 0);
+          } else if (p.item_type === 'einzelprodukt') {
+            const item = einzelprodukte.find(e => e.id === p.item_id);
+            if (item) glYearTotal += (item.item_value || 0) * (p.current_number || 0);
+          } else if (p.item_type === 'palette' || p.item_type === 'schuette') {
+            // For palette/schuette, use stored value_per_unit
+            glYearTotal += (p.value_per_unit || 0) * (p.current_number || 0);
+          }
         });
       }
     }
 
-    if (kartonwareIds.length > 0) {
-      const { data: kartonware } = await freshClient
-        .from('wellen_kartonware')
-        .select('id, item_value')
-        .in('id', kartonwareIds);
-      
-      if (kartonware) {
-        glProgress?.filter(p => p.item_type === 'kartonware').forEach(p => {
-          const item = kartonware.find(k => k.id === p.item_id);
-          if (item) glYearTotal += (item.item_value || 0) * (p.current_number || 0);
-        });
-      }
-    }
-
-    // 2. Get agency average (all GLs' total)
+    // 3. Get agency average (all GLs' total from value-based waves only)
     const { data: allGLs } = await freshClient.from('gebietsleiter').select('id');
     const glCount = allGLs?.length || 1;
 
-    const { data: allProgress } = await freshClient
-      .from('wellen_gl_progress')
-      .select('current_number, item_type, item_id, gebietsleiter_id')
-      .gte('created_at', yearStart);
-
     let agencyTotal = 0;
-    const allDisplayIds = [...new Set(allProgress?.filter(p => p.item_type === 'display').map(p => p.item_id) || [])];
-    const allKartonwareIds = [...new Set(allProgress?.filter(p => p.item_type === 'kartonware').map(p => p.item_id) || [])];
+    
+    if (valueWelleIds.length > 0) {
+      const { data: allProgress } = await freshClient
+        .from('wellen_gl_progress')
+        .select('current_number, item_type, item_id, value_per_unit')
+        .in('welle_id', valueWelleIds)
+        .gte('created_at', yearStart);
 
-    if (allDisplayIds.length > 0) {
-      const { data: displays } = await freshClient.from('wellen_displays').select('id, item_value').in('id', allDisplayIds);
-      if (displays && allProgress) {
-        allProgress.filter(p => p.item_type === 'display').forEach(p => {
-          const display = displays.find(d => d.id === p.item_id);
-          if (display) agencyTotal += (display.item_value || 0) * (p.current_number || 0);
-        });
-      }
-    }
+      if (allProgress && allProgress.length > 0) {
+        const allDisplayIds = [...new Set(allProgress.filter(p => p.item_type === 'display').map(p => p.item_id))];
+        const allKartonwareIds = [...new Set(allProgress.filter(p => p.item_type === 'kartonware').map(p => p.item_id))];
+        const allEinzelproduktIds = [...new Set(allProgress.filter(p => p.item_type === 'einzelprodukt').map(p => p.item_id))];
 
-    if (allKartonwareIds.length > 0) {
-      const { data: kartonware } = await freshClient.from('wellen_kartonware').select('id, item_value').in('id', allKartonwareIds);
-      if (kartonware && allProgress) {
-        allProgress.filter(p => p.item_type === 'kartonware').forEach(p => {
-          const item = kartonware.find(k => k.id === p.item_id);
-          if (item) agencyTotal += (item.item_value || 0) * (p.current_number || 0);
+        const [displaysResult, kartonwareResult, einzelprodukteResult] = await Promise.all([
+          allDisplayIds.length > 0 ? freshClient.from('wellen_displays').select('id, item_value').in('id', allDisplayIds) : { data: [] },
+          allKartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, item_value').in('id', allKartonwareIds) : { data: [] },
+          allEinzelproduktIds.length > 0 ? freshClient.from('wellen_einzelprodukte').select('id, item_value').in('id', allEinzelproduktIds) : { data: [] }
+        ]);
+
+        const displays = displaysResult.data || [];
+        const kartonware = kartonwareResult.data || [];
+        const einzelprodukte = einzelprodukteResult.data || [];
+
+        allProgress.forEach(p => {
+          if (p.item_type === 'display') {
+            const item = displays.find(d => d.id === p.item_id);
+            if (item) agencyTotal += (item.item_value || 0) * (p.current_number || 0);
+          } else if (p.item_type === 'kartonware') {
+            const item = kartonware.find(k => k.id === p.item_id);
+            if (item) agencyTotal += (item.item_value || 0) * (p.current_number || 0);
+          } else if (p.item_type === 'einzelprodukt') {
+            const item = einzelprodukte.find(e => e.id === p.item_id);
+            if (item) agencyTotal += (item.item_value || 0) * (p.current_number || 0);
+          } else if (p.item_type === 'palette' || p.item_type === 'schuette') {
+            agencyTotal += (p.value_per_unit || 0) * (p.current_number || 0);
+          }
         });
       }
     }
@@ -443,19 +464,19 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
       .select('id', { count: 'exact', head: true })
       .eq('gebietsleiter_id', id);
 
-    // 4. Get Vorbestellung count (unique submissions - group by market_id + date)
-    // Each batch submission to a market on a day counts as 1 Vorbestellung
-    const { data: vorbestellerProgress } = await freshClient
-      .from('wellen_gl_progress')
-      .select('market_id, created_at')
-      .eq('gebietsleiter_id', id)
-      .not('market_id', 'is', null);
+    // 4. Get Vorbestellung count (unique submissions based on distinct timestamps)
+    // Each unique timestamp represents one vorbestellung action (multiple items submitted together have same timestamp)
+    const { data: vorbestellerSubmissions } = await freshClient
+      .from('wellen_submissions')
+      .select('created_at')
+      .eq('gebietsleiter_id', id);
 
-    // Count unique market+date combinations for Vorbestellungen
+    // Count unique timestamps - each unique timestamp = 1 vorbestellung
     const uniqueVorbestellungen = new Set<string>();
-    vorbestellerProgress?.forEach(p => {
-      const dateStr = new Date(p.created_at).toISOString().split('T')[0];
-      uniqueVorbestellungen.add(`${p.market_id}_${dateStr}`);
+    vorbestellerSubmissions?.forEach(s => {
+      // Use full timestamp (rounded to minute) to group items submitted together
+      const timestamp = new Date(s.created_at).toISOString().slice(0, 16);
+      uniqueVorbestellungen.add(timestamp);
     });
     const vorbestellungCount = uniqueVorbestellungen.size;
 
@@ -466,65 +487,13 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
       .eq('gebietsleiter_id', id)
       .eq('is_active', true);
 
-    // 6. Get unique market visits (any action counts, but same market same day = 1)
-    // Sources: market visits (last_visit_date), vorverkauf_submissions, wellen_gl_progress, vorverkauf_entries
-    
-    // Get markets with last_visit_date for this GL
-    const { data: visitedMarketsData } = await freshClient
+    // 6. Get count of markets with current_visits > 0 (markets that have been visited at least once)
+    const { count: marketsVisited } = await freshClient
       .from('markets')
-      .select('id, last_visit_date')
+      .select('id', { count: 'exact', head: true })
       .eq('gebietsleiter_id', id)
-      .not('last_visit_date', 'is', null);
-
-    // Get vorbesteller progress (market + date)
-    const { data: vorbestellerVisits } = await freshClient
-      .from('wellen_gl_progress')
-      .select('market_id, created_at')
-      .eq('gebietsleiter_id', id)
-      .not('market_id', 'is', null);
-
-    // Get vorverkauf submissions (market + date)
-    const { data: vorverkaufVisits } = await freshClient
-      .from('vorverkauf_submissions')
-      .select('market_id, created_at')
-      .eq('gebietsleiter_id', id);
-
-    // Get produktersatz entries (market + date)
-    const { data: produktersatzVisits } = await freshClient
-      .from('vorverkauf_entries')
-      .select('market_id, created_at')
-      .eq('gebietsleiter_id', id);
-
-    // Count unique market+date combinations across all sources
-    const uniqueMarketVisits = new Set<string>();
-    
-    // Add visits from last_visit_date
-    visitedMarketsData?.forEach(m => {
-      if (m.last_visit_date) {
-        const dateStr = new Date(m.last_visit_date).toISOString().split('T')[0];
-        uniqueMarketVisits.add(`${m.id}_${dateStr}`);
-      }
-    });
-    
-    // Add vorbesteller visits
-    vorbestellerVisits?.forEach(v => {
-      const dateStr = new Date(v.created_at).toISOString().split('T')[0];
-      uniqueMarketVisits.add(`${v.market_id}_${dateStr}`);
-    });
-    
-    // Add vorverkauf visits
-    vorverkaufVisits?.forEach(v => {
-      const dateStr = new Date(v.created_at).toISOString().split('T')[0];
-      uniqueMarketVisits.add(`${v.market_id}_${dateStr}`);
-    });
-    
-    // Add produktersatz visits
-    produktersatzVisits?.forEach(v => {
-      const dateStr = new Date(v.created_at).toISOString().split('T')[0];
-      uniqueMarketVisits.add(`${v.market_id}_${dateStr}`);
-    });
-
-    const marketsVisited = uniqueMarketVisits.size;
+      .eq('is_active', true)
+      .gt('current_visits', 0);
 
     console.log(`✅ Dashboard stats for GL ${id}: yearTotal=${glYearTotal}, vorverkauf=${vorverkaufCount}, vorbestellung=${vorbestellungCount}, markets=${marketsVisited}/${totalAssignedMarkets}`);
 
