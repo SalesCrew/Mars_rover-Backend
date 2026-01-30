@@ -78,7 +78,7 @@ router.post('/custom', async (req: Request, res: Response) => {
       const headerRow: string[] = [];
       const excelColumns: Partial<ExcelJS.Column>[] = [];
 
-      datasetColumns.forEach(colId => {
+      datasetColumns.forEach((colId: string) => {
         const colDef = getColumnDef(datasetId, colId);
         if (!colDef) return;
 
@@ -121,7 +121,7 @@ router.post('/custom', async (req: Request, res: Response) => {
             itemName: row.item_name 
           });
         }
-        const rowData = datasetColumns.map(colId => {
+        const rowData = datasetColumns.map((colId: string) => {
           const value = row[colId];
           const colDef = getColumnDef(datasetId, colId);
 
@@ -155,7 +155,7 @@ router.post('/custom', async (req: Request, res: Response) => {
         groupRowCount++;
 
         // Apply cell formatting based on column types
-        datasetColumns.forEach((colId, index) => {
+        datasetColumns.forEach((colId: string, index: number) => {
           const colDef = getColumnDef(datasetId, colId);
           const cell = addedRow.getCell(index + 1);
 

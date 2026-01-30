@@ -20,22 +20,22 @@ export interface TransformOptions {
 interface SubmissionWithMeta extends ExportRow {
   _isParent?: boolean;
   _isChild?: boolean;
-  _groupId?: string;
+  _groupId?: string | null;
   _isMultiline?: boolean;
   _productDetails?: Array<{
-    created_at: string;
-    welle_name: string;
-    gl_name: string;
-    market_name: string;
-    market_chain: string;
-    market_address: string;
-    market_postal_code: string;
-    market_city: string;
-    containerName: string;
-    containerType: string;
+    created_at: any;
+    welle_name: any;
+    gl_name: any;
+    market_name: any;
+    market_chain: any;
+    market_address: any;
+    market_postal_code: any;
+    market_city: any;
+    containerName: string | null;
+    containerType: any;
     productName: string;
-    quantity: number;
-    valuePerUnit: number;
+    quantity: any;
+    valuePerUnit: any;
     totalValue: number;
   }>;
 }
@@ -125,11 +125,11 @@ export async function transformWellenSubmissions(
     schutteIds.length > 0 ? client.from('wellen_schuetten').select('id, name').in('id', schutteIds) : { data: [] }
   ]);
 
-  const itemNameMap = new Map([
-    ...(displaysData.data || []).map(d => [d.id, { name: d.name, container: null, itemValue: d.item_value }]),
-    ...(kartonwareData.data || []).map(k => [k.id, { name: k.name, container: null, itemValue: k.item_value }]),
-    ...(einzelprodukteData.data || []).map(e => [e.id, { name: e.name, container: null, itemValue: e.item_value }])
-  ]);
+  const itemNameMap = new Map<string, { name: string; container: string | null; itemValue: number | null }>([
+    ...(displaysData.data || []).map(d => [d.id, { name: d.name, container: null, itemValue: d.item_value || null }]),
+    ...(kartonwareData.data || []).map(k => [k.id, { name: k.name, container: null, itemValue: k.item_value || null }]),
+    ...(einzelprodukteData.data || []).map(e => [e.id, { name: e.name, container: null, itemValue: e.item_value || null }])
+  ] as [string, { name: string; container: string | null; itemValue: number | null }][]);
 
   const paletteMap = new Map((palettesData.data || []).map(p => [p.id, p.name]));
   const schutteMap = new Map((schuettenData.data || []).map(s => [s.id, s.name]));
