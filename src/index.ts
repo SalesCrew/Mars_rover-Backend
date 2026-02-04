@@ -11,6 +11,7 @@ import vorverkaufWellenRouter from './routes/vorverkaufWellen';
 import activitiesRouter from './routes/activities';
 import bugReportsRouter from './routes/bugReports';
 import exportRouter from './routes/export';
+import fragebogenRouter from './routes/fragebogen';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
@@ -67,6 +68,8 @@ console.log('Registering bug-reports routes...');
 app.use('/api/bug-reports', bugReportsRouter);
 console.log('Registering export routes...');
 app.use('/api/export', exportRouter);
+console.log('Registering fragebogen routes...');
+app.use('/api/fragebogen', fragebogenRouter);
 
 // Start server
 const server = app.listen(PORT, '0.0.0.0', () => {

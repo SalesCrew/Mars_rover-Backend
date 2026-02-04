@@ -195,7 +195,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 // ============================================================================
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { gebietsleiter_id, market_id, reason, notes, items, take_out_items, replace_items, status } = req.body;
+    const { gebietsleiter_id, market_id, reason, notes, items, take_out_items, replace_items, status, skipVisitUpdate } = req.body;
 
     console.log('📦 Creating vorverkauf entry...');
     console.log('Request body:', JSON.stringify(req.body, null, 2));
@@ -262,23 +262,27 @@ router.post('/', async (req: Request, res: Response) => {
       throw itemsError;
     }
 
-    // Update market visit count (multiple actions same day = 1 visit)
-    const today = new Date().toISOString().split('T')[0];
-    const { data: market } = await freshClient
-      .from('markets')
-      .select('last_visit_date, current_visits')
-      .eq('id', market_id)
-      .single();
-
-    if (market && market.last_visit_date !== today) {
-      await freshClient
+    // Update market visit count (multiple actions same day = 1 visit) - skip if user chose not to
+    if (!skipVisitUpdate) {
+      const today = new Date().toISOString().split('T')[0];
+      const { data: market } = await freshClient
         .from('markets')
-        .update({
-          current_visits: (market.current_visits || 0) + 1,
-          last_visit_date: today
-        })
-        .eq('id', market_id);
-      console.log(`📍 Recorded visit for market ${market_id}`);
+        .select('last_visit_date, current_visits')
+        .eq('id', market_id)
+        .single();
+
+      if (market && market.last_visit_date !== today) {
+        await freshClient
+          .from('markets')
+          .update({
+            current_visits: (market.current_visits || 0) + 1,
+            last_visit_date: today
+          })
+          .eq('id', market_id);
+        console.log(`📍 Recorded visit for market ${market_id}`);
+      }
+    } else {
+      console.log(`⏭️ Skipping visit update for market ${market_id} (user chose not to record new visit)`);
     }
 
     console.log(`✅ Created vorverkauf entry with ${allItems.length} items (status: ${entryStatus})`);

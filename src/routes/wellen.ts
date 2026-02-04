@@ -1274,13 +1274,19 @@ router.get('/', async (req: Request, res: Response) => {
 
         const uniqueGLs = new Set((progressData || []).map(p => p.gebietsleiter_id)).size;
 
-        // Derive types based on what items exist
-        const types: ('display' | 'kartonware' | 'palette' | 'schuette' | 'einzelprodukt')[] = [];
-        if (displays && displays.length > 0) types.push('display');
-        if (kartonware && kartonware.length > 0) types.push('kartonware');
-        if (palettenWithProducts && palettenWithProducts.length > 0) types.push('palette');
-        if (schuettenWithProducts && schuettenWithProducts.length > 0) types.push('schuette');
-        if (einzelprodukte && einzelprodukte.length > 0) types.push('einzelprodukt');
+        // Use stored types if available, otherwise derive from what items exist (backward compatibility)
+        let types: ('display' | 'kartonware' | 'palette' | 'schuette' | 'einzelprodukt')[] = [];
+        if (welle.types && Array.isArray(welle.types) && welle.types.length > 0) {
+          // Use stored types from database
+          types = welle.types;
+        } else {
+          // Fallback: derive types based on what items exist
+          if (displays && displays.length > 0) types.push('display');
+          if (kartonware && kartonware.length > 0) types.push('kartonware');
+          if (palettenWithProducts && palettenWithProducts.length > 0) types.push('palette');
+          if (schuettenWithProducts && schuettenWithProducts.length > 0) types.push('schuette');
+          if (einzelprodukte && einzelprodukte.length > 0) types.push('einzelprodukt');
+        }
 
         // Determine status - for Vorbesteller waves with kw_days, use KW-based status (same logic as dashboard)
         let finalStatus = welle.status;
@@ -1519,6 +1525,7 @@ router.post('/', async (req: Request, res: Response) => {
       image,
       startDate,
       endDate,
+      types,
       goalType,
       goalPercentage,
       goalValue,
@@ -1563,6 +1570,7 @@ router.post('/', async (req: Request, res: Response) => {
         image_url: image,
         start_date: startDate,
         end_date: endDate,
+        types: types || [],
         status,
         goal_type: goalType,
         goal_percentage: goalType === 'percentage' ? goalPercentage : null,
@@ -1782,6 +1790,7 @@ router.put('/:id', async (req: Request, res: Response) => {
       image,
       startDate,
       endDate,
+      types,
       goalType,
       goalPercentage,
       goalValue,
@@ -1802,6 +1811,7 @@ router.put('/:id', async (req: Request, res: Response) => {
         image_url: image,
         start_date: startDate,
         end_date: endDate,
+        types: types || [],
         goal_type: goalType,
         goal_percentage: goalType === 'percentage' ? goalPercentage : null,
         goal_value: goalType === 'value' ? goalValue : null
