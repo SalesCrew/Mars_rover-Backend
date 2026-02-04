@@ -760,14 +760,16 @@ router.get('/:id/profile-stats', async (req: Request, res: Response) => {
       .eq('gebietsleiter_id', id)
       .eq('is_active', true);
 
-    // 2. Get unique markets visited this month (from wellen_submissions, vorverkauf_submissions, vorverkauf_entries)
-    const [wellenSubs, vorverkaufSubs, produkttauschEntries] = await Promise.all([
+    // 2. Get unique markets visited this month (primarily from fb_zeiterfassung_submissions, also wellen, vorverkauf)
+    const [zeiterfassungSubs, wellenSubs, vorverkaufSubs, produkttauschEntries] = await Promise.all([
+      freshClient.from('fb_zeiterfassung_submissions').select('market_id, created_at').eq('gebietsleiter_id', id).gte('created_at', currentMonthStart).lte('created_at', currentMonthEnd),
       freshClient.from('wellen_submissions').select('market_id, created_at').eq('gebietsleiter_id', id).gte('created_at', currentMonthStart).lte('created_at', currentMonthEnd),
       freshClient.from('vorverkauf_submissions').select('market_id, created_at').eq('gebietsleiter_id', id).gte('created_at', currentMonthStart).lte('created_at', currentMonthEnd),
       freshClient.from('vorverkauf_entries').select('market_id, created_at').eq('gebietsleiter_id', id).gte('created_at', currentMonthStart).lte('created_at', currentMonthEnd)
     ]);
 
     const currentMonthMarkets = new Set([
+      ...(zeiterfassungSubs.data || []).map(s => s.market_id),
       ...(wellenSubs.data || []).map(s => s.market_id),
       ...(vorverkaufSubs.data || []).map(s => s.market_id),
       ...(produkttauschEntries.data || []).map(e => e.market_id)
@@ -775,13 +777,15 @@ router.get('/:id/profile-stats', async (req: Request, res: Response) => {
     const monthlyVisits = currentMonthMarkets.size;
 
     // 3. Get previous month visits for comparison
-    const [wellenSubsPrev, vorverkaufSubsPrev, produkttauschEntriesPrev] = await Promise.all([
+    const [zeiterfassungSubsPrev, wellenSubsPrev, vorverkaufSubsPrev, produkttauschEntriesPrev] = await Promise.all([
+      freshClient.from('fb_zeiterfassung_submissions').select('market_id, created_at').eq('gebietsleiter_id', id).gte('created_at', prevMonthStart).lte('created_at', prevMonthEnd),
       freshClient.from('wellen_submissions').select('market_id, created_at').eq('gebietsleiter_id', id).gte('created_at', prevMonthStart).lte('created_at', prevMonthEnd),
       freshClient.from('vorverkauf_submissions').select('market_id, created_at').eq('gebietsleiter_id', id).gte('created_at', prevMonthStart).lte('created_at', prevMonthEnd),
       freshClient.from('vorverkauf_entries').select('market_id, created_at').eq('gebietsleiter_id', id).gte('created_at', prevMonthStart).lte('created_at', prevMonthEnd)
     ]);
 
     const prevMonthMarkets = new Set([
+      ...(zeiterfassungSubsPrev.data || []).map(s => s.market_id),
       ...(wellenSubsPrev.data || []).map(s => s.market_id),
       ...(vorverkaufSubsPrev.data || []).map(s => s.market_id),
       ...(produkttauschEntriesPrev.data || []).map(e => e.market_id)
@@ -841,42 +845,24 @@ router.get('/:id/profile-stats', async (req: Request, res: Response) => {
     const prevSellInRate = totalWellenMarkets > 0 ? Math.round((prevMonthVorbestellerMarkets / totalWellenMarkets) * 100) : 0;
     const sellInChangePercent = prevSellInRate > 0 ? Math.round(sellInSuccessRate - prevSellInRate) : 0;
 
-    // 6. Get most visited market - combine all submission types
-    const allMarketVisits: Record<string, number> = {};
+    // 6. Get most visited market - use current_visits from markets table (same as admin side)
+    const { data: glMarketsData } = await freshClient
+      .from('markets')
+      .select('id, name, chain, current_visits, last_visit_date')
+      .eq('gebietsleiter_id', id)
+      .eq('is_active', true)
+      .order('current_visits', { ascending: false })
+      .limit(1);
     
-    const addMarketVisit = (marketId: string) => {
-      if (!marketId) return;
-      allMarketVisits[marketId] = (allMarketVisits[marketId] || 0) + 1;
-    };
-    
-    (wellenSubs.data || []).forEach(s => addMarketVisit(s.market_id));
-    (wellenSubsPrev.data || []).forEach(s => addMarketVisit(s.market_id));
-    (vorverkaufSubs.data || []).forEach(s => addMarketVisit(s.market_id));
-    (vorverkaufSubsPrev.data || []).forEach(s => addMarketVisit(s.market_id));
-    (produkttauschEntries.data || []).forEach(e => addMarketVisit(e.market_id));
-    (produkttauschEntriesPrev.data || []).forEach(e => addMarketVisit(e.market_id));
-    
-    // Find market with most visits
     let mostVisitedMarket = { name: 'Keine Daten', chain: '', visitCount: 0 };
     
-    if (Object.keys(allMarketVisits).length > 0) {
-      const sortedMarkets = Object.entries(allMarketVisits).sort((a, b) => b[1] - a[1]);
-      const topMarketId = sortedMarkets[0][0];
-      const topMarketVisits = sortedMarkets[0][1];
-      
-      const { data: topMarket } = await freshClient
-        .from('markets')
-        .select('name, chain')
-        .eq('id', topMarketId)
-        .single();
-      
-      if (topMarket) {
-        mostVisitedMarket = {
-          name: topMarket.name || 'Unbekannt',
-          chain: topMarket.chain || '',
-          visitCount: topMarketVisits
-        };
-      }
+    if (glMarketsData && glMarketsData.length > 0 && glMarketsData[0].current_visits > 0) {
+      const topMarket = glMarketsData[0];
+      mostVisitedMarket = {
+        name: topMarket.name || 'Unbekannt',
+        chain: topMarket.chain || '',
+        visitCount: topMarket.current_visits || 0
+      };
     }
 
     // 7. Get this month's Vorverkäufe, Vorbesteller, and Produkttausch counts
@@ -884,43 +870,23 @@ router.get('/:id/profile-stats', async (req: Request, res: Response) => {
     const vorbestellerCount = (wellenSubs.data || []).length;
     const produkttauschCount = (produkttauschEntries.data || []).length;
 
-    // 8. Get top 3 visited markets
-    const sortedMarketVisits = Object.entries(allMarketVisits)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3);
+    // 8. Get top 3 visited markets - use current_visits from markets table (same as admin side)
+    const { data: top3MarketsData } = await freshClient
+      .from('markets')
+      .select('id, name, chain, address, city, postal_code, current_visits, last_visit_date')
+      .eq('gebietsleiter_id', id)
+      .eq('is_active', true)
+      .order('current_visits', { ascending: false })
+      .limit(3);
     
-    const topMarkets = await Promise.all(
-      sortedMarketVisits.map(async ([marketId, visitCount]) => {
-        const { data: market } = await freshClient
-          .from('markets')
-          .select('id, name, chain, address, city, postal_code')
-          .eq('id', marketId)
-          .single();
-        
-        // Get last visit date for this market from all sources
-        const allVisits = [
-          ...(wellenSubs.data || []).filter(s => s.market_id === marketId),
-          ...(wellenSubsPrev.data || []).filter(s => s.market_id === marketId),
-          ...(vorverkaufSubs.data || []).filter(s => s.market_id === marketId),
-          ...(vorverkaufSubsPrev.data || []).filter(s => s.market_id === marketId),
-          ...(produkttauschEntries.data || []).filter(e => e.market_id === marketId),
-          ...(produkttauschEntriesPrev.data || []).filter(e => e.market_id === marketId)
-        ];
-        
-        const lastVisit = allVisits.length > 0 
-          ? allVisits.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0].created_at
-          : null;
-        
-        return {
-          id: market?.id || marketId,
-          name: market?.name || 'Unbekannt',
-          chain: market?.chain || '',
-          address: market?.address || '',
-          visitCount,
-          lastVisit: lastVisit || ''
-        };
-      })
-    );
+    const topMarkets = (top3MarketsData || []).map(market => ({
+      id: market.id,
+      name: market.name || 'Unbekannt',
+      chain: market.chain || '',
+      address: market.address || '',
+      visitCount: market.current_visits || 0,
+      lastVisit: market.last_visit_date || ''
+    }));
 
     res.json({
       monthlyVisits,
