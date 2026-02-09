@@ -2157,6 +2157,8 @@ router.post('/day-tracking/start', async (req: Request, res: Response) => {
     const freshClient = createFreshClient();
     const { gebietsleiter_id, skip_fahrzeit, start_time } = req.body;
     
+    console.log('🟡 day-tracking/start called:', { gebietsleiter_id, skip_fahrzeit, start_time });
+    
     if (!gebietsleiter_id) {
       return res.status(400).json({ error: 'gebietsleiter_id is required' });
     }
@@ -2164,40 +2166,51 @@ router.post('/day-tracking/start', async (req: Request, res: Response) => {
     const today = new Date().toISOString().split('T')[0];
     const dayStartTime = start_time || getCurrentTimeString();
     
+    console.log('🟡 Checking existing record for date:', today);
+    
     // Check if a record already exists for today
-    const { data: existing } = await freshClient
+    const { data: existing, error: existingError } = await freshClient
       .from('fb_day_tracking')
       .select('*')
       .eq('gebietsleiter_id', gebietsleiter_id)
       .eq('tracking_date', today)
       .single();
     
+    console.log('🟡 Existing record:', existing, 'Error:', existingError);
+    
     if (existing && existing.status === 'active') {
       return res.status(400).json({ error: 'Day tracking already started for today' });
     }
     
     // Create or update day tracking record
+    const upsertData = {
+      gebietsleiter_id,
+      tracking_date: today,
+      day_start_time: dayStartTime,
+      skipped_first_fahrzeit: skip_fahrzeit || false,
+      status: 'active',
+      markets_visited: 0
+    };
+    
+    console.log('🟡 Upserting day tracking:', upsertData);
+    
     const { data, error } = await freshClient
       .from('fb_day_tracking')
-      .upsert({
-        gebietsleiter_id,
-        tracking_date: today,
-        day_start_time: dayStartTime,
-        skipped_first_fahrzeit: skip_fahrzeit || false,
-        status: 'active',
-        markets_visited: 0
-      }, {
+      .upsert(upsertData, {
         onConflict: 'gebietsleiter_id,tracking_date'
       })
       .select()
       .single();
     
-    if (error) throw error;
+    if (error) {
+      console.error('❌ Upsert error:', error);
+      throw error;
+    }
     
     console.log(`✅ Day tracking started for GL ${gebietsleiter_id} at ${dayStartTime}`);
     res.json(data);
   } catch (error: any) {
-    console.error('Error starting day tracking:', error);
+    console.error('❌ Error starting day tracking:', error);
     res.status(500).json({ error: error.message || 'Failed to start day tracking' });
   }
 });
