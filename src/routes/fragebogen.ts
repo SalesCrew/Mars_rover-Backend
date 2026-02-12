@@ -1777,6 +1777,30 @@ router.post('/zeiterfassung', async (req: Request, res: Response) => {
 });
 
 /**
+ * DELETE /api/fragebogen/zeiterfassung/:id
+ * Delete a zeiterfassung submission
+ */
+router.delete('/zeiterfassung/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const freshClient = createFreshClient();
+    
+    const { error } = await freshClient
+      .from('fb_zeiterfassung_submissions')
+      .delete()
+      .eq('id', id);
+    
+    if (error) throw error;
+    
+    console.log(`✅ Deleted zeiterfassung submission: ${id}`);
+    res.json({ message: 'Deleted successfully', id });
+  } catch (error: any) {
+    console.error('Error deleting zeiterfassung:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete zeiterfassung' });
+  }
+});
+
+/**
  * GET /api/fragebogen/zeiterfassung/gl/:glId
  * Get zeiterfassung submissions for a GL
  */
@@ -2024,7 +2048,7 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
       const diffHours = Math.floor(diffMinutes / 60);
       const diffMins = diffMinutes % 60;
       
-      return {
+      const dbEntry: any = {
         gebietsleiter_id,
         entry_date: today,
         reason: entry.reason,
@@ -2035,6 +2059,13 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
         kommentar: entry.kommentar || null,
         is_work_time_deduction: entry.reason === 'unterbrechung'
       };
+      
+      // Store market_id for sonderaufgabe entries
+      if (entry.market_id) {
+        dbEntry.market_id = entry.market_id;
+      }
+      
+      return dbEntry;
     });
     
     const { data, error } = await freshClient
@@ -2043,6 +2074,57 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
       .select();
     
     if (error) throw error;
+    
+    // For sonderaufgabe entries with market_id, also create a zeiterfassung submission (market visit)
+    for (const entry of entries) {
+      if (entry.reason === 'sonderaufgabe' && entry.market_id) {
+        // Calculate besuchszeit_diff
+        const [vonH, vonM] = entry.von.split(':').map(Number);
+        const [bisH, bisM] = entry.bis.split(':').map(Number);
+        let diffMinutes = (bisH * 60 + bisM) - (vonH * 60 + vonM);
+        if (diffMinutes < 0) diffMinutes += 24 * 60;
+        const diffHours = Math.floor(diffMinutes / 60);
+        const diffMins = diffMinutes % 60;
+        
+        // Insert zeiterfassung submission so it counts as a market visit
+        const { error: zeitError } = await freshClient
+          .from('fb_zeiterfassung_submissions')
+          .insert({
+            gebietsleiter_id,
+            market_id: entry.market_id,
+            besuchszeit_von: entry.von,
+            besuchszeit_bis: entry.bis,
+            besuchszeit_diff: `${diffHours}:${diffMins.toString().padStart(2, '0')}:00`,
+            kommentar: entry.kommentar ? `Sonderaufgabe: ${entry.kommentar}` : 'Sonderaufgabe',
+            market_start_time: entry.von,
+            market_end_time: entry.bis
+          });
+        
+        if (zeitError) {
+          console.warn('⚠️ Could not create zeiterfassung submission for sonderaufgabe:', zeitError.message);
+        } else {
+          console.log(`📍 Created zeiterfassung submission for sonderaufgabe at market ${entry.market_id}`);
+        }
+        
+        // Increment market visit count
+        const { data: market } = await freshClient
+          .from('markets')
+          .select('last_visit_date, current_visits')
+          .eq('id', entry.market_id)
+          .single();
+        
+        if (market && market.last_visit_date !== today) {
+          await freshClient
+            .from('markets')
+            .update({
+              current_visits: (market.current_visits || 0) + 1,
+              last_visit_date: today
+            })
+            .eq('id', entry.market_id);
+          console.log(`📍 Incremented visit count for market ${entry.market_id}`);
+        }
+      }
+    }
     
     console.log(`✅ Created ${data.length} zusatz zeiterfassung entries for GL ${gebietsleiter_id}`);
     res.json(data);
@@ -2064,7 +2146,7 @@ router.get('/zusatz-zeiterfassung/:glId', async (req: Request, res: Response) =>
     
     let query = freshClient
       .from('fb_zusatz_zeiterfassung')
-      .select('*')
+      .select('*, market:markets(id, name, chain)')
       .eq('gebietsleiter_id', glId)
       .order('created_at', { ascending: false });
     
@@ -2096,7 +2178,7 @@ router.get('/zusatz-zeiterfassung-all', async (req: Request, res: Response) => {
     
     let query = freshClient
       .from('fb_zusatz_zeiterfassung')
-      .select('*')
+      .select('*, market:markets(id, name, chain)')
       .order('created_at', { ascending: false });
     
     if (start_date) {
