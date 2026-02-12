@@ -2508,14 +2508,14 @@ router.get('/day-tracking/:glId/:date/summary', async (req: Request, res: Respon
 router.post('/day-tracking/market-start', async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
-    const { gebietsleiter_id, market_id } = req.body;
+    const { gebietsleiter_id, market_id, start_time } = req.body;
     
     if (!gebietsleiter_id || !market_id) {
       return res.status(400).json({ error: 'gebietsleiter_id and market_id are required' });
     }
     
     const today = new Date().toISOString().split('T')[0];
-    const marketStartTime = getCurrentTimeString();
+    const marketStartTime = start_time || getCurrentTimeString();
     
     // Get day tracking to check if day is started
     const { data: dayTracking } = await freshClient
