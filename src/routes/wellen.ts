@@ -1062,27 +1062,37 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           kartonwareCount += progress;
         }
 
-        // Calculate current value for value-based goals
+        // Calculate current value for value-based goals using wellen_submissions (source of truth)
         let currentValue = 0;
         if (welle.goal_type === 'value') {
-          for (const progress of progressData) {
-            if (progress.item_type === 'display') {
-              const display = displays.find(d => d.id === progress.item_id);
+          let submissionsQuery = freshClient
+            .from('wellen_submissions')
+            .select('quantity, item_type, item_id, value_per_unit')
+            .eq('welle_id', welle.id);
+          
+          if (glFilter.length > 0) {
+            submissionsQuery = submissionsQuery.in('gebietsleiter_id', glFilter);
+          }
+          
+          const { data: submissionsData } = await submissionsQuery;
+          
+          for (const sub of (submissionsData || [])) {
+            if (sub.item_type === 'display') {
+              const display = displays.find(d => d.id === sub.item_id);
               if (display) {
-                currentValue += progress.current_number * (display.item_value || 0);
+                currentValue += sub.quantity * (display.item_value || 0);
               }
-            } else if (progress.item_type === 'kartonware') {
-              const kw = kartonware.find(k => k.id === progress.item_id);
+            } else if (sub.item_type === 'kartonware') {
+              const kw = kartonware.find(k => k.id === sub.item_id);
               if (kw) {
-                currentValue += progress.current_number * (kw.item_value || 0);
+                currentValue += sub.quantity * (kw.item_value || 0);
               }
-            } else if (progress.item_type === 'palette' || progress.item_type === 'schuette') {
-              // For palette/schuette, use stored value_per_unit
-              currentValue += progress.current_number * (progress.value_per_unit || 0);
-            } else if (progress.item_type === 'einzelprodukt') {
-              const ep = einzelprodukte.find(e => e.id === progress.item_id);
+            } else if (sub.item_type === 'palette' || sub.item_type === 'schuette') {
+              currentValue += sub.quantity * (sub.value_per_unit || 0);
+            } else if (sub.item_type === 'einzelprodukt') {
+              const ep = einzelprodukte.find(e => e.id === sub.item_id);
               if (ep) {
-                currentValue += progress.current_number * (ep.item_value || 0);
+                currentValue += sub.quantity * (ep.item_value || 0);
               }
             }
           }
@@ -2211,7 +2221,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
 router.post('/:id/progress/batch', async (req: Request, res: Response) => {
   try {
     const { id: welleId } = req.params;
-    const { gebietsleiter_id, market_id, items, skipVisitUpdate } = req.body;
+    const { gebietsleiter_id, market_id, items, skipVisitUpdate, timestamp } = req.body;
 
     console.log(`📊 Batch updating GL progress for welle ${welleId}...${skipVisitUpdate ? ' (skipping visit update)' : ''}`);
     
@@ -2268,15 +2278,22 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
 
     // Log each submission separately for history/audit (each action is a new row)
     if (market_id) {
-      const submissionLogs = items.map((item: any) => ({
-        welle_id: welleId,
-        gebietsleiter_id,
-        market_id,
-        item_type: item.item_type,
-        item_id: item.item_id,
-        quantity: item.current_number,
-        value_per_unit: item.value_per_unit || null
-      }));
+      const submissionLogs = items.map((item: any) => {
+        const entry: any = {
+          welle_id: welleId,
+          gebietsleiter_id,
+          market_id,
+          item_type: item.item_type,
+          item_id: item.item_id,
+          quantity: item.current_number,
+          value_per_unit: item.value_per_unit || null
+        };
+        // Use provided timestamp for created_at (for history page edits)
+        if (timestamp) {
+          entry.created_at = timestamp;
+        }
+        return entry;
+      });
 
       const { error: logError } = await freshClient
         .from('wellen_submissions')
@@ -2423,6 +2440,175 @@ router.get('/:id/progress/:glId', async (req: Request, res: Response) => {
     res.json(data || []);
   } catch (error: any) {
     console.error('❌ Error fetching progress:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ============================================================================
+// GET GL-SPECIFIC SUBMISSIONS FOR A WELLE - For GL Vorbesteller History
+// ============================================================================
+router.get('/:welleId/gl-submissions/:glId', async (req: Request, res: Response) => {
+  try {
+    const { welleId, glId } = req.params;
+    const freshClient = createFreshClient();
+
+    // Fetch all submissions for this GL + wave
+    const { data: submissions, error: submissionsError } = await freshClient
+      .from('wellen_submissions')
+      .select('*')
+      .eq('welle_id', welleId)
+      .eq('gebietsleiter_id', glId)
+      .order('created_at', { ascending: false });
+
+    if (submissionsError) throw submissionsError;
+    if (!submissions || submissions.length === 0) return res.json([]);
+
+    // Collect unique IDs
+    const marketIds = [...new Set(submissions.map(s => s.market_id).filter(Boolean))];
+    const displayIds = submissions.filter(s => s.item_type === 'display').map(s => s.item_id).filter(Boolean);
+    const kartonwareIds = submissions.filter(s => s.item_type === 'kartonware').map(s => s.item_id).filter(Boolean);
+    const einzelproduktIds = submissions.filter(s => s.item_type === 'einzelprodukt').map(s => s.item_id).filter(Boolean);
+    const paletteProductIds = submissions.filter(s => s.item_type === 'palette').map(s => s.item_id).filter(Boolean);
+    const schutteProductIds = submissions.filter(s => s.item_type === 'schuette').map(s => s.item_id).filter(Boolean);
+
+    // Fetch related data in parallel
+    const [marketsResult, displaysResult, kartonwareResult, einzelproduktResult, paletteProductsResult, schutteProductsResult] = await Promise.all([
+      marketIds.length > 0 ? freshClient.from('markets').select('id, name, chain').in('id', marketIds) : { data: [] },
+      displayIds.length > 0 ? freshClient.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
+      kartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] },
+      einzelproduktIds.length > 0 ? freshClient.from('wellen_einzelprodukte').select('id, name, item_value').in('id', einzelproduktIds) : { data: [] },
+      paletteProductIds.length > 0 ? freshClient.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('id', paletteProductIds) : { data: [] },
+      schutteProductIds.length > 0 ? freshClient.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('id', schutteProductIds) : { data: [] }
+    ]);
+
+    const markets = marketsResult.data || [];
+    const displays = displaysResult.data || [];
+    const kartonware = kartonwareResult.data || [];
+    const einzelprodukte = einzelproduktResult.data || [];
+    const paletteProducts = paletteProductsResult.data || [];
+    const schutteProducts = schutteProductsResult.data || [];
+
+    // Fetch parent palette/schuette names
+    const paletteIds = [...new Set(paletteProducts.map((p: any) => p.palette_id))].filter(Boolean);
+    const schutteIds = [...new Set(schutteProducts.map((p: any) => p.schuette_id))].filter(Boolean);
+
+    const [palettesResult, schuttenResult] = await Promise.all([
+      paletteIds.length > 0 ? freshClient.from('wellen_paletten').select('id, name').in('id', paletteIds) : { data: [] },
+      schutteIds.length > 0 ? freshClient.from('wellen_schuetten').select('id, name').in('id', schutteIds) : { data: [] }
+    ]);
+
+    const palettes = palettesResult.data || [];
+    const schutten = schuttenResult.data || [];
+
+    // Process standard entries (display/kartonware/einzelprodukt)
+    const standardEntries = submissions.filter(s => ['display', 'kartonware', 'einzelprodukt'].includes(s.item_type));
+    const standardResponses = standardEntries.map(entry => {
+      const market = markets.find((m: any) => m.id === entry.market_id);
+      let item: any;
+      if (entry.item_type === 'display') item = displays.find((d: any) => d.id === entry.item_id);
+      else if (entry.item_type === 'kartonware') item = kartonware.find((k: any) => k.id === entry.item_id);
+      else item = einzelprodukte.find((e: any) => e.id === entry.item_id);
+
+      return {
+        id: entry.id,
+        marketId: entry.market_id,
+        marketName: market?.name || 'Unknown',
+        marketChain: market?.chain || '',
+        itemType: entry.item_type,
+        itemName: item?.name || 'Unknown',
+        quantity: entry.quantity,
+        valuePerUnit: item?.item_value || entry.value_per_unit || 0,
+        value: entry.quantity * (item?.item_value || entry.value_per_unit || 0),
+        timestamp: entry.created_at
+      };
+    });
+
+    // Group palette entries
+    const paletteEntries = submissions.filter(s => s.item_type === 'palette');
+    const paletteGroups = new Map<string, any[]>();
+    for (const entry of paletteEntries) {
+      const product = paletteProducts.find((p: any) => p.id === entry.item_id);
+      const parentId = product?.palette_id || 'unknown';
+      const timestampKey = new Date(entry.created_at).toISOString().slice(0, 16);
+      const key = `${entry.market_id}|${parentId}|${timestampKey}`;
+      if (!paletteGroups.has(key)) paletteGroups.set(key, []);
+      paletteGroups.get(key)!.push({ ...entry, product });
+    }
+
+    const paletteResponses: any[] = [];
+    for (const [, entries] of paletteGroups) {
+      const firstEntry = entries[0];
+      const market = markets.find((m: any) => m.id === firstEntry.market_id);
+      const parentPalette = palettes.find((p: any) => p.id === firstEntry.product?.palette_id);
+      const products = entries.map((e: any) => ({
+        id: e.id,
+        name: e.product?.name || 'Produkt',
+        quantity: e.quantity,
+        valuePerUnit: e.value_per_unit || e.product?.value_per_ve || 0,
+        value: e.quantity * (e.value_per_unit || e.product?.value_per_ve || 0)
+      }));
+      paletteResponses.push({
+        id: entries.map((e: any) => e.id).join(','),
+        marketId: firstEntry.market_id,
+        marketName: market?.name || 'Unknown',
+        marketChain: market?.chain || '',
+        itemType: 'palette',
+        itemName: parentPalette?.name || 'Palette',
+        parentId: firstEntry.product?.palette_id,
+        quantity: 1,
+        valuePerUnit: 0,
+        value: products.reduce((sum: number, p: any) => sum + p.value, 0),
+        timestamp: firstEntry.created_at,
+        products
+      });
+    }
+
+    // Group schuette entries
+    const schutteEntries = submissions.filter(s => s.item_type === 'schuette');
+    const schutteGroups = new Map<string, any[]>();
+    for (const entry of schutteEntries) {
+      const product = schutteProducts.find((p: any) => p.id === entry.item_id);
+      const parentId = product?.schuette_id || 'unknown';
+      const timestampKey = new Date(entry.created_at).toISOString().slice(0, 16);
+      const key = `${entry.market_id}|${parentId}|${timestampKey}`;
+      if (!schutteGroups.has(key)) schutteGroups.set(key, []);
+      schutteGroups.get(key)!.push({ ...entry, product });
+    }
+
+    const schutteResponses: any[] = [];
+    for (const [, entries] of schutteGroups) {
+      const firstEntry = entries[0];
+      const market = markets.find((m: any) => m.id === firstEntry.market_id);
+      const parentSchutte = schutten.find((s: any) => s.id === firstEntry.product?.schuette_id);
+      const products = entries.map((e: any) => ({
+        id: e.id,
+        name: e.product?.name || 'Produkt',
+        quantity: e.quantity,
+        valuePerUnit: e.value_per_unit || e.product?.value_per_ve || 0,
+        value: e.quantity * (e.value_per_unit || e.product?.value_per_ve || 0)
+      }));
+      schutteResponses.push({
+        id: entries.map((e: any) => e.id).join(','),
+        marketId: firstEntry.market_id,
+        marketName: market?.name || 'Unknown',
+        marketChain: market?.chain || '',
+        itemType: 'schuette',
+        itemName: parentSchutte?.name || 'Schütte',
+        parentId: firstEntry.product?.schuette_id,
+        quantity: 1,
+        valuePerUnit: 0,
+        value: products.reduce((sum: number, p: any) => sum + p.value, 0),
+        timestamp: firstEntry.created_at,
+        products
+      });
+    }
+
+    const response = [...standardResponses, ...paletteResponses, ...schutteResponses]
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    res.json(response);
+  } catch (error: any) {
+    console.error('Error fetching GL submissions:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
