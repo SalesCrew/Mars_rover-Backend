@@ -1201,6 +1201,12 @@ router.get('/', async (req: Request, res: Response) => {
           .eq('welle_id', welle.id)
           .order('einzelprodukt_order', { ascending: true });
 
+        // Fetch foto tags
+        const { data: fotoTagsData } = await freshClient
+          .from('wellen_photo_tags')
+          .select('*')
+          .eq('welle_id', welle.id);
+
         // Fetch palettes with their products
         const { data: paletten, error: palError } = await freshClient
           .from('wellen_paletten')
@@ -1389,7 +1395,11 @@ router.get('/', async (req: Request, res: Response) => {
           })),
           assignedMarketIds: (welleMarkets || []).map(wm => wm.market_id),
           participatingGLs: uniqueGLs,
-          totalGLs: glsWithMarketsInWave // Number of GLs that have markets in this wave
+          totalGLs: glsWithMarketsInWave,
+          fotoEnabled: welle.foto_enabled || false,
+          fotoHeader: welle.foto_header || null,
+          fotoDescription: welle.foto_description || null,
+          fotoTags: (fotoTagsData || []).map(t => ({ id: t.id, name: t.tag_name, type: t.tag_type }))
         };
       })
     );
@@ -1398,6 +1408,141 @@ router.get('/', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('❌ Error fetching wellen:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ============================================================================
+// PHOTOS: Upload, list, delete welle photos
+// (Must be before /:id to avoid matching "photos" as an ID)
+// ============================================================================
+
+router.post('/photos/upload', async (req: Request, res: Response) => {
+  try {
+    const { welle_id, gebietsleiter_id, market_id, photos, submission_batch_id } = req.body;
+    
+    if (!welle_id || !gebietsleiter_id || !market_id || !photos || !Array.isArray(photos) || photos.length === 0) {
+      return res.status(400).json({ error: 'Missing required fields: welle_id, gebietsleiter_id, market_id, photos' });
+    }
+
+    console.log(`📷 Uploading ${photos.length} photos for welle ${welle_id}...`);
+    const uploadedPhotos: any[] = [];
+
+    for (const photo of photos) {
+      let base64Data = photo.image;
+      let contentType = 'image/jpeg';
+      if (photo.image.startsWith('data:')) {
+        const matches = photo.image.match(/^data:([^;]+);base64,(.+)$/);
+        if (matches) { contentType = matches[1]; base64Data = matches[2]; }
+      }
+      const buffer = Buffer.from(base64Data, 'base64');
+      const timestamp = Date.now();
+      const randomStr = Math.random().toString(36).substring(2, 8);
+      const extension = contentType.split('/')[1] || 'jpg';
+      const filePath = `photos/${welle_id}/${timestamp}-${randomStr}.${extension}`;
+
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('wellen-images').upload(filePath, buffer, { contentType, upsert: true });
+
+      if (uploadError) { console.error('❌ Photo upload error:', uploadError); continue; }
+
+      const { data: urlData } = supabase.storage.from('wellen-images').getPublicUrl(uploadData.path);
+
+      const { data: photoRecord, error: dbError } = await createFreshClient()
+        .from('wellen_photos')
+        .insert({ welle_id, gebietsleiter_id, market_id, photo_url: urlData.publicUrl, tags: photo.tags || [], submission_batch_id: submission_batch_id || null })
+        .select().single();
+
+      if (dbError) { console.warn('⚠️ Could not save photo record:', dbError.message); }
+      else { uploadedPhotos.push(photoRecord); }
+    }
+
+    console.log(`✅ Uploaded ${uploadedPhotos.length}/${photos.length} photos`);
+    res.json({ uploaded: uploadedPhotos.length, photos: uploadedPhotos });
+  } catch (error: any) {
+    console.error('❌ Error uploading photos:', error);
+    res.status(500).json({ error: error.message || 'Failed to upload photos' });
+  }
+});
+
+router.get('/photos', async (req: Request, res: Response) => {
+  try {
+    
+    const { welle_id, gl_id, market_id, tag, tags, start_date, end_date, limit: limitParam, offset: offsetParam } = req.query;
+    const freshClient = createFreshClient();
+
+    // Query photos with only the wellen join (has FK), skip gl/market joins (no FK)
+    let query = freshClient
+      .from('wellen_photos')
+      .select('*, welle:wellen(id, name)')
+      .order('created_at', { ascending: false });
+
+    if (welle_id) query = query.eq('welle_id', welle_id);
+    if (gl_id) query = query.eq('gebietsleiter_id', gl_id);
+    if (market_id) query = query.eq('market_id', market_id);
+    if (tags) {
+      // Multi-tag filter: photo must contain ALL selected tags
+      const tagList = (tags as string).split(',').map(t => t.trim()).filter(Boolean);
+      if (tagList.length > 0) query = query.contains('tags', tagList);
+    } else if (tag) {
+      query = query.contains('tags', [tag as string]);
+    }
+    if (start_date) query = query.gte('created_at', `${start_date}T00:00:00`);
+    if (end_date) query = query.lte('created_at', `${end_date}T23:59:59`);
+    
+    const lim = parseInt(limitParam as string) || 50;
+    const off = parseInt(offsetParam as string) || 0;
+    query = query.range(off, off + lim - 1);
+
+    const { data, error, count } = await query;
+    if (error) throw error;
+
+    // Collect unique GL IDs and market IDs to enrich data
+    const glIds = [...new Set((data || []).map(p => p.gebietsleiter_id))];
+    const marketIds = [...new Set((data || []).map(p => p.market_id))];
+
+    // Fetch GL names
+    const glMap = new Map<string, string>();
+    if (glIds.length > 0) {
+      const { data: glData } = await freshClient.from('gebietsleiter').select('id, name').in('id', glIds);
+      (glData || []).forEach(g => glMap.set(g.id, g.name));
+    }
+
+    // Fetch market info
+    const marketMap = new Map<string, { name: string; chain: string }>();
+    if (marketIds.length > 0) {
+      const { data: marketData } = await freshClient.from('markets').select('id, name, chain').in('id', marketIds);
+      (marketData || []).forEach(m => marketMap.set(m.id, { name: m.name, chain: m.chain }));
+    }
+
+    const photos = (data || []).map(p => ({
+      id: p.id, welleId: p.welle_id, welleName: (p.welle as any)?.name || '',
+      glId: p.gebietsleiter_id, glName: glMap.get(p.gebietsleiter_id) || '',
+      marketId: p.market_id, marketName: marketMap.get(p.market_id)?.name || '', marketChain: marketMap.get(p.market_id)?.chain || '',
+      photoUrl: p.photo_url, tags: p.tags || [], createdAt: p.created_at
+    }));
+
+    res.json({ photos, total: count || photos.length });
+  } catch (error: any) {
+    console.error('❌ Error fetching photos:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch photos' });
+  }
+});
+
+router.delete('/photos/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const freshClient = createFreshClient();
+    const { data: photo } = await freshClient.from('wellen_photos').select('photo_url').eq('id', id).single();
+    if (photo?.photo_url) {
+      const urlParts = photo.photo_url.split('/wellen-images/');
+      if (urlParts[1]) { await supabase.storage.from('wellen-images').remove([urlParts[1]]); }
+    }
+    const { error } = await freshClient.from('wellen_photos').delete().eq('id', id);
+    if (error) throw error;
+    res.json({ message: 'Photo deleted', id });
+  } catch (error: any) {
+    console.error('❌ Error deleting photo:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete photo' });
   }
 });
 
@@ -1513,7 +1658,11 @@ router.get('/:id', async (req: Request, res: Response) => {
       })),
       assignedMarketIds: (welleMarkets || []).map(wm => wm.market_id),
       participatingGLs: uniqueGLs,
-      totalGLs: 45
+      totalGLs: 45,
+      fotoEnabled: welle.foto_enabled || false,
+      fotoHeader: welle.foto_header || null,
+      fotoDescription: welle.foto_description || null,
+      fotoTags: [] // Tags loaded via GET all endpoint
     };
 
     console.log(`✅ Fetched welle ${id}`);
@@ -1545,7 +1694,11 @@ router.post('/', async (req: Request, res: Response) => {
       schutteItems,
       einzelproduktItems,
       kwDays,
-      assignedMarketIds
+      assignedMarketIds,
+      fotoEnabled,
+      fotoHeader,
+      fotoDescription,
+      fotoTags
     } = req.body;
 
     console.log('📦 Received data:', {
@@ -1584,13 +1737,28 @@ router.post('/', async (req: Request, res: Response) => {
         status,
         goal_type: goalType,
         goal_percentage: goalType === 'percentage' ? goalPercentage : null,
-        goal_value: goalType === 'value' ? goalValue : null
+        goal_value: goalType === 'value' ? goalValue : null,
+        foto_enabled: fotoEnabled || false,
+        foto_header: fotoHeader || null,
+        foto_description: fotoDescription || null
       })
       .select()
       .single();
 
     if (welleError) throw welleError;
     console.log(`✅ Created welle ${welle.id}`);
+
+    // Insert foto tags
+    if (fotoTags && fotoTags.length > 0) {
+      const tagsToInsert = fotoTags.map((tag: any) => ({
+        welle_id: welle.id,
+        tag_name: tag.name,
+        tag_type: tag.type
+      }));
+      const { error: tagError } = await supabase.from('wellen_photo_tags').insert(tagsToInsert);
+      if (tagError) console.warn('⚠️ Could not insert foto tags:', tagError.message);
+      else console.log(`📷 Inserted ${tagsToInsert.length} foto tags`);
+    }
 
     // Insert displays
     if (displays && displays.length > 0) {
@@ -1810,7 +1978,11 @@ router.put('/:id', async (req: Request, res: Response) => {
       schutteItems,
       einzelproduktItems,
       kwDays,
-      assignedMarketIds
+      assignedMarketIds,
+      fotoEnabled,
+      fotoHeader,
+      fotoDescription,
+      fotoTags
     } = req.body;
 
     // Update main welle record
@@ -1824,11 +1996,25 @@ router.put('/:id', async (req: Request, res: Response) => {
         types: types || [],
         goal_type: goalType,
         goal_percentage: goalType === 'percentage' ? goalPercentage : null,
-        goal_value: goalType === 'value' ? goalValue : null
+        goal_value: goalType === 'value' ? goalValue : null,
+        foto_enabled: fotoEnabled || false,
+        foto_header: fotoHeader || null,
+        foto_description: fotoDescription || null
       })
       .eq('id', id);
 
     if (welleError) throw welleError;
+
+    // Update foto tags (delete old, insert new)
+    await freshClient.from('wellen_photo_tags').delete().eq('welle_id', id);
+    if (fotoTags && fotoTags.length > 0) {
+      const tagsToInsert = fotoTags.map((tag: any) => ({
+        welle_id: id,
+        tag_name: tag.name,
+        tag_type: tag.type
+      }));
+      await freshClient.from('wellen_photo_tags').insert(tagsToInsert);
+    }
 
     // Update displays - preserve IDs to keep progress links
     const { data: existingDisplays } = await freshClient
