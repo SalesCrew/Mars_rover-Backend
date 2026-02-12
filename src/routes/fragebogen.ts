@@ -2202,6 +2202,43 @@ router.post('/day-tracking/start', async (req: Request, res: Response) => {
   }
 });
 
+// UPDATE DAY TRACKING TIMES - Edit day_start_time or day_end_time
+router.patch('/day-tracking/update-times', async (req: Request, res: Response) => {
+  try {
+    const freshClient = createFreshClient();
+    const { gebietsleiter_id, date, day_start_time, day_end_time } = req.body;
+    
+    if (!gebietsleiter_id || !date) {
+      return res.status(400).json({ error: 'gebietsleiter_id and date are required' });
+    }
+    
+    // Build update object with only provided fields
+    const updateData: Record<string, any> = {};
+    if (day_start_time !== undefined) updateData.day_start_time = day_start_time;
+    if (day_end_time !== undefined) updateData.day_end_time = day_end_time;
+    
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    
+    const { data, error } = await freshClient
+      .from('fb_day_tracking')
+      .update(updateData)
+      .eq('gebietsleiter_id', gebietsleiter_id)
+      .eq('tracking_date', date)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    
+    console.log(`✅ Day tracking times updated for GL ${gebietsleiter_id} on ${date}:`, updateData);
+    res.json(data);
+  } catch (error: any) {
+    console.error('Error updating day tracking times:', error);
+    res.status(500).json({ error: error.message || 'Failed to update day tracking times' });
+  }
+});
+
 // END DAY - Complete day tracking and calculate totals
 router.post('/day-tracking/end', async (req: Request, res: Response) => {
   try {
