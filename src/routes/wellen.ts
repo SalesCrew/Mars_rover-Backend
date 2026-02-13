@@ -1399,7 +1399,8 @@ router.get('/', async (req: Request, res: Response) => {
           fotoEnabled: welle.foto_enabled || false,
           fotoHeader: welle.foto_header || null,
           fotoDescription: welle.foto_description || null,
-          fotoTags: (fotoTagsData || []).map(t => ({ id: t.id, name: t.tag_name, type: t.tag_type }))
+          fotoTags: (fotoTagsData || []).map(t => ({ id: t.id, name: t.tag_name, type: t.tag_type })),
+          fotoOnly: welle.foto_only || false
         };
       })
     );
@@ -1664,7 +1665,8 @@ router.get('/:id', async (req: Request, res: Response) => {
       fotoEnabled: welle.foto_enabled || false,
       fotoHeader: welle.foto_header || null,
       fotoDescription: welle.foto_description || null,
-      fotoTags: [] // Tags loaded via GET all endpoint
+      fotoTags: [], // Tags loaded via GET all endpoint
+      fotoOnly: welle.foto_only || false
     };
 
     console.log(`✅ Fetched welle ${id}`);
@@ -1700,7 +1702,8 @@ router.post('/', async (req: Request, res: Response) => {
       fotoEnabled,
       fotoHeader,
       fotoDescription,
-      fotoTags
+      fotoTags,
+      fotoOnly
     } = req.body;
 
     console.log('📦 Received data:', {
@@ -1710,7 +1713,8 @@ router.post('/', async (req: Request, res: Response) => {
       schutteItems: schutteItems?.length || 0,
       einzelproduktItems: einzelproduktItems?.length || 0,
       paletteItemsData: JSON.stringify(paletteItems),
-      schutteItemsData: JSON.stringify(schutteItems)
+      schutteItemsData: JSON.stringify(schutteItems),
+      fotoOnly: fotoOnly || false
     });
 
     // Validate required fields
@@ -1743,6 +1747,7 @@ router.post('/', async (req: Request, res: Response) => {
     if (fotoEnabled !== undefined) insertPayload.foto_enabled = fotoEnabled || false;
     if (fotoHeader !== undefined) insertPayload.foto_header = fotoHeader || null;
     if (fotoDescription !== undefined) insertPayload.foto_description = fotoDescription || null;
+    if (fotoOnly !== undefined) insertPayload.foto_only = fotoOnly || false;
 
     const freshClient = createFreshClient();
     const { data: welle, error: welleError } = await freshClient
@@ -1988,7 +1993,8 @@ router.put('/:id', async (req: Request, res: Response) => {
       fotoEnabled,
       fotoHeader,
       fotoDescription,
-      fotoTags
+      fotoTags,
+      fotoOnly
     } = req.body;
 
     // Update main welle record
@@ -2005,7 +2011,8 @@ router.put('/:id', async (req: Request, res: Response) => {
         goal_value: goalType === 'value' ? goalValue : null,
         foto_enabled: fotoEnabled || false,
         foto_header: fotoHeader || null,
-        foto_description: fotoDescription || null
+        foto_description: fotoDescription || null,
+        foto_only: fotoOnly || false
       })
       .eq('id', id);
 
