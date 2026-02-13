@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { supabase, createFreshClient } from '../config/supabase';
+import { createFreshClient } from '../config/supabase';
 import * as XLSX from 'xlsx';
 
 const router = Router();
@@ -1440,14 +1440,15 @@ router.post('/photos/upload', async (req: Request, res: Response) => {
       const extension = contentType.split('/')[1] || 'jpg';
       const filePath = `photos/${welle_id}/${timestamp}-${randomStr}.${extension}`;
 
-      const { data: uploadData, error: uploadError } = await supabase.storage
+      const photoClient = createFreshClient();
+      const { data: uploadData, error: uploadError } = await photoClient.storage
         .from('wellen-images').upload(filePath, buffer, { contentType, upsert: true });
 
       if (uploadError) { console.error('❌ Photo upload error:', uploadError); continue; }
 
-      const { data: urlData } = supabase.storage.from('wellen-images').getPublicUrl(uploadData.path);
+      const { data: urlData } = photoClient.storage.from('wellen-images').getPublicUrl(uploadData.path);
 
-      const { data: photoRecord, error: dbError } = await createFreshClient()
+      const { data: photoRecord, error: dbError } = await photoClient
         .from('wellen_photos')
         .insert({ welle_id, gebietsleiter_id, market_id, photo_url: urlData.publicUrl, tags: photo.tags || [], submission_batch_id: submission_batch_id || null })
         .select().single();
@@ -1535,7 +1536,7 @@ router.delete('/photos/:id', async (req: Request, res: Response) => {
     const { data: photo } = await freshClient.from('wellen_photos').select('photo_url').eq('id', id).single();
     if (photo?.photo_url) {
       const urlParts = photo.photo_url.split('/wellen-images/');
-      if (urlParts[1]) { await supabase.storage.from('wellen-images').remove([urlParts[1]]); }
+      if (urlParts[1]) { await freshClient.storage.from('wellen-images').remove([urlParts[1]]); }
     }
     const { error } = await freshClient.from('wellen_photos').delete().eq('id', id);
     if (error) throw error;
@@ -1554,7 +1555,8 @@ router.get('/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
     console.log(`📄 Fetching welle ${id}...`);
 
-    const { data: welle, error: welleError } = await supabase
+    const freshClient = createFreshClient();
+    const { data: welle, error: welleError } = await freshClient
       .from('wellen')
       .select('*')
       .eq('id', id)
@@ -1566,36 +1568,36 @@ router.get('/:id', async (req: Request, res: Response) => {
     }
 
     // Fetch related data (same as GET ALL logic)
-    const { data: displays } = await supabase
+    const { data: displays } = await freshClient
       .from('wellen_displays')
       .select('*')
       .eq('welle_id', id)
       .order('display_order', { ascending: true });
 
-    const { data: kartonware } = await supabase
+    const { data: kartonware } = await freshClient
       .from('wellen_kartonware')
       .select('*')
       .eq('welle_id', id)
       .order('kartonware_order', { ascending: true });
 
-    const { data: einzelprodukte } = await supabase
+    const { data: einzelprodukte } = await freshClient
       .from('wellen_einzelprodukte')
       .select('*')
       .eq('welle_id', id)
       .order('einzelprodukt_order', { ascending: true });
 
-    const { data: kwDays } = await supabase
+    const { data: kwDays } = await freshClient
       .from('wellen_kw_days')
       .select('*')
       .eq('welle_id', id)
       .order('kw_order', { ascending: true });
 
-    const { data: welleMarkets } = await supabase
+    const { data: welleMarkets } = await freshClient
       .from('wellen_markets')
       .select('market_id')
       .eq('welle_id', id);
 
-    const { data: progressData } = await supabase
+    const { data: progressData } = await freshClient
       .from('wellen_gl_progress')
       .select('current_number, item_type, item_id, gebietsleiter_id, value_per_unit')
       .eq('welle_id', id);
@@ -1742,7 +1744,6 @@ router.post('/', async (req: Request, res: Response) => {
     if (fotoHeader !== undefined) insertPayload.foto_header = fotoHeader || null;
     if (fotoDescription !== undefined) insertPayload.foto_description = fotoDescription || null;
 
-    console.log('📝 Insert payload:', JSON.stringify(insertPayload));
     const freshClient = createFreshClient();
     const { data: welle, error: welleError } = await freshClient
       .from('wellen')
@@ -1750,16 +1751,7 @@ router.post('/', async (req: Request, res: Response) => {
       .select()
       .single();
 
-    if (welleError) {
-      console.error('❌ Welle insert error:', JSON.stringify(welleError));
-      return res.status(500).json({ 
-        error: welleError.message, 
-        code: welleError.code, 
-        details: welleError.details, 
-        hint: welleError.hint,
-        debugPayload: insertPayload 
-      });
-    }
+    if (welleError) throw welleError;
     console.log(`✅ Created welle ${welle.id}`);
 
     // Insert foto tags
@@ -1769,7 +1761,7 @@ router.post('/', async (req: Request, res: Response) => {
         tag_name: tag.name,
         tag_type: tag.type
       }));
-      const { error: tagError } = await supabase.from('wellen_photo_tags').insert(tagsToInsert);
+      const { error: tagError } = await freshClient.from('wellen_photo_tags').insert(tagsToInsert);
       if (tagError) console.warn('⚠️ Could not insert foto tags:', tagError.message);
       else console.log(`📷 Inserted ${tagsToInsert.length} foto tags`);
     }
@@ -1785,7 +1777,7 @@ router.post('/', async (req: Request, res: Response) => {
         display_order: index
       }));
 
-      const { error: displaysError } = await supabase
+      const { error: displaysError } = await freshClient
         .from('wellen_displays')
         .insert(displaysToInsert);
 
@@ -1804,7 +1796,7 @@ router.post('/', async (req: Request, res: Response) => {
         kartonware_order: index
       }));
 
-      const { error: kartonwareError } = await supabase
+      const { error: kartonwareError } = await freshClient
         .from('wellen_kartonware')
         .insert(kartonwareToInsert);
 
@@ -1823,7 +1815,7 @@ router.post('/', async (req: Request, res: Response) => {
         einzelprodukt_order: index
       }));
 
-      const { error: einzelproduktError } = await supabase
+      const { error: einzelproduktError } = await freshClient
         .from('wellen_einzelprodukte')
         .insert(einzelprodukteToInsert);
 
@@ -1936,7 +1928,7 @@ router.post('/', async (req: Request, res: Response) => {
         kw_order: index
       }));
 
-      const { error: kwDaysError } = await supabase
+      const { error: kwDaysError } = await freshClient
         .from('wellen_kw_days')
         .insert(kwDaysToInsert);
 
@@ -1951,7 +1943,7 @@ router.post('/', async (req: Request, res: Response) => {
         market_id: marketId
       }));
 
-      const { error: marketsError } = await supabase
+      const { error: marketsError } = await freshClient
         .from('wellen_markets')
         .insert(marketsToInsert);
 
@@ -1963,13 +1955,7 @@ router.post('/', async (req: Request, res: Response) => {
     res.status(201).json({ id: welle.id, message: 'Welle created successfully' });
   } catch (error: any) {
     console.error('❌ Error creating welle:', error);
-    res.status(500).json({ 
-      error: error.message || 'Internal server error',
-      code: error.code || null,
-      details: error.details || null,
-      hint: error.hint || null,
-      stack: error.stack?.substring(0, 500) || null
-    });
+    res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
 
@@ -2406,7 +2392,8 @@ router.delete('/:id', async (req: Request, res: Response) => {
     console.log(`🗑️ Deleting welle ${id}...`);
 
     // Delete welle (cascade will handle related tables)
-    const { error } = await supabase
+    const freshClient = createFreshClient();
+    const { error } = await freshClient
       .from('wellen')
       .delete()
       .eq('id', id);
@@ -3340,7 +3327,8 @@ router.post('/upload-image', async (req: Request, res: Response) => {
     const filePath = folder ? `${folder}/${finalFilename}` : finalFilename;
 
     // Upload to Supabase Storage
-    const { data, error } = await supabase.storage
+    const storageClient = createFreshClient();
+    const { data, error } = await storageClient.storage
       .from('wellen-images')
       .upload(filePath, buffer, {
         contentType,
@@ -3353,7 +3341,7 @@ router.post('/upload-image', async (req: Request, res: Response) => {
     }
 
     // Get public URL
-    const { data: urlData } = supabase.storage
+    const { data: urlData } = storageClient.storage
       .from('wellen-images')
       .getPublicUrl(data.path);
 
@@ -3383,7 +3371,8 @@ router.delete('/delete-image', async (req: Request, res: Response) => {
 
     console.log('🗑️ Deleting image from wellen-images bucket:', path);
 
-    const { error } = await supabase.storage
+    const delClient = createFreshClient();
+    const { error } = await delClient.storage
       .from('wellen-images')
       .remove([path]);
 
@@ -4345,7 +4334,7 @@ router.post('/upload-delivery-photo', async (req: Request, res: Response) => {
     const buffer = Buffer.from(base64Data, 'base64');
 
     // Upload to Supabase Storage - dedicated bucket for delivery photos
-    const { data: uploadData, error: uploadError } = await supabase.storage
+    const { data: uploadData, error: uploadError } = await freshClient.storage
       .from('vorbesteller-lieferung')
       .upload(fileName, buffer, {
         contentType: mimeType,
@@ -4359,7 +4348,7 @@ router.post('/upload-delivery-photo', async (req: Request, res: Response) => {
     }
 
     // Get public URL
-    const { data: urlData } = supabase.storage
+    const { data: urlData } = freshClient.storage
       .from('vorbesteller-lieferung')
       .getPublicUrl(fileName);
 
@@ -4434,7 +4423,7 @@ router.post('/upload-delivery-photos-per-item', async (req: Request, res: Respon
       const buffer = Buffer.from(base64Data, 'base64');
 
       // Upload to Supabase Storage - dedicated bucket for delivery photos
-      const { data: uploadData, error: uploadError } = await supabase.storage
+      const { data: uploadData, error: uploadError } = await freshClient.storage
         .from('vorbesteller-lieferung')
         .upload(fileName, buffer, {
           contentType: mimeType,
@@ -4448,7 +4437,7 @@ router.post('/upload-delivery-photos-per-item', async (req: Request, res: Respon
       }
 
       // Get public URL
-      const { data: urlData } = supabase.storage
+      const { data: urlData } = freshClient.storage
         .from('vorbesteller-lieferung')
         .getPublicUrl(fileName);
 
