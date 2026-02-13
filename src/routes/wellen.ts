@@ -1725,27 +1725,41 @@ router.post('/', async (req: Request, res: Response) => {
       status = 'past';
     }
 
-    // Insert main welle record
-    const { data: welle, error: welleError } = await supabase
+    // Insert main welle record - use createFreshClient to ensure clean connection
+    const insertPayload: any = {
+      name,
+      image_url: image,
+      start_date: startDate,
+      end_date: endDate,
+      types: types || [],
+      status,
+      goal_type: goalType,
+      goal_percentage: goalType === 'percentage' ? goalPercentage : null,
+      goal_value: goalType === 'value' ? goalValue : null,
+    };
+    // Only include foto fields if they exist (column might not exist on older DBs)
+    if (fotoEnabled !== undefined) insertPayload.foto_enabled = fotoEnabled || false;
+    if (fotoHeader !== undefined) insertPayload.foto_header = fotoHeader || null;
+    if (fotoDescription !== undefined) insertPayload.foto_description = fotoDescription || null;
+
+    console.log('📝 Insert payload:', JSON.stringify(insertPayload));
+    const freshClient = createFreshClient();
+    const { data: welle, error: welleError } = await freshClient
       .from('wellen')
-      .insert({
-        name,
-        image_url: image,
-        start_date: startDate,
-        end_date: endDate,
-        types: types || [],
-        status,
-        goal_type: goalType,
-        goal_percentage: goalType === 'percentage' ? goalPercentage : null,
-        goal_value: goalType === 'value' ? goalValue : null,
-        foto_enabled: fotoEnabled || false,
-        foto_header: fotoHeader || null,
-        foto_description: fotoDescription || null
-      })
+      .insert(insertPayload)
       .select()
       .single();
 
-    if (welleError) throw welleError;
+    if (welleError) {
+      console.error('❌ Welle insert error:', JSON.stringify(welleError));
+      return res.status(500).json({ 
+        error: welleError.message, 
+        code: welleError.code, 
+        details: welleError.details, 
+        hint: welleError.hint,
+        debugPayload: insertPayload 
+      });
+    }
     console.log(`✅ Created welle ${welle.id}`);
 
     // Insert foto tags
@@ -1949,7 +1963,13 @@ router.post('/', async (req: Request, res: Response) => {
     res.status(201).json({ id: welle.id, message: 'Welle created successfully' });
   } catch (error: any) {
     console.error('❌ Error creating welle:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    res.status(500).json({ 
+      error: error.message || 'Internal server error',
+      code: error.code || null,
+      details: error.details || null,
+      hint: error.hint || null,
+      stack: error.stack?.substring(0, 500) || null
+    });
   }
 });
 
