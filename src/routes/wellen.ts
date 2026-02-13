@@ -1451,7 +1451,7 @@ router.post('/photos/upload', async (req: Request, res: Response) => {
 
       const { data: photoRecord, error: dbError } = await photoClient
         .from('wellen_photos')
-        .insert({ welle_id, gebietsleiter_id, market_id, photo_url: urlData.publicUrl, tags: photo.tags || [], submission_batch_id: submission_batch_id || null })
+        .insert({ welle_id, gebietsleiter_id, market_id, photo_url: urlData.publicUrl, tags: photo.tags || [], comment: photo.comment || null, submission_batch_id: submission_batch_id || null })
         .select().single();
 
       if (dbError) { console.warn('⚠️ Could not save photo record:', dbError.message); }
@@ -1520,7 +1520,7 @@ router.get('/photos', async (req: Request, res: Response) => {
       id: p.id, welleId: p.welle_id, welleName: (p.welle as any)?.name || '',
       glId: p.gebietsleiter_id, glName: glMap.get(p.gebietsleiter_id) || '',
       marketId: p.market_id, marketName: marketMap.get(p.market_id)?.name || '', marketChain: marketMap.get(p.market_id)?.chain || '',
-      photoUrl: p.photo_url, tags: p.tags || [], createdAt: p.created_at
+      photoUrl: p.photo_url, tags: p.tags || [], comment: p.comment || null, createdAt: p.created_at
     }));
 
     res.json({ photos, total: count || photos.length });
