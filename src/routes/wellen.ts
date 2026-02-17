@@ -1143,7 +1143,9 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           kartonwareCount,
           kartonwareTarget: proportionalKartonwareTarget,
           assignedMarkets: glFilter.length > 0 ? glWaveMarketCount : totalWaveMarkets,
-          participatingGLs
+          participatingGLs,
+          fotoOnly: welle.foto_only || false,
+          fotoEnabled: welle.foto_enabled || false
         };
       })
     );
