@@ -1128,6 +1128,20 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           ? Math.round(welle.goal_value * glGoalRatio * 100) / 100
           : welle.goal_value;
 
+        // For foto-only waves, count uploaded photos
+        let photoCount = 0;
+        if (welle.foto_only) {
+          let photoQuery = freshClient
+            .from('wellen_photos')
+            .select('id', { count: 'exact', head: true })
+            .eq('welle_id', welle.id);
+          if (glFilter.length > 0) {
+            photoQuery = photoQuery.in('gebietsleiter_id', glFilter);
+          }
+          const { count: pCount } = await photoQuery;
+          photoCount = pCount || 0;
+        }
+
         return {
           id: welle.id,
           name: welle.name,
@@ -1145,7 +1159,8 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           assignedMarkets: glFilter.length > 0 ? glWaveMarketCount : totalWaveMarkets,
           participatingGLs,
           fotoOnly: welle.foto_only || false,
-          fotoEnabled: welle.foto_enabled || false
+          fotoEnabled: welle.foto_enabled || false,
+          photoCount
         };
       })
     );
@@ -2828,6 +2843,47 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     const { id: welleId } = req.params;
     
     const freshClient = createFreshClient();
+
+    // Check if this is a foto-only wave
+    const { data: welleRow } = await freshClient.from('wellen').select('foto_only').eq('id', welleId).single();
+    if (welleRow?.foto_only) {
+      // Return photos instead of submissions for foto-only waves
+      const { data: photos, error: photoErr } = await freshClient
+        .from('wellen_photos')
+        .select('*')
+        .eq('welle_id', welleId)
+        .order('created_at', { ascending: false });
+      if (photoErr) throw photoErr;
+
+      const glIds = [...new Set((photos || []).map(p => p.gebietsleiter_id).filter(Boolean))];
+      const marketIds = [...new Set((photos || []).map(p => p.market_id).filter(Boolean))];
+
+      const [glRes, marketRes] = await Promise.all([
+        glIds.length > 0 ? freshClient.from('gebietsleiter').select('id, name').in('id', glIds) : { data: [] },
+        marketIds.length > 0 ? freshClient.from('markets').select('id, name, chain, address, postal_code, city').in('id', marketIds) : { data: [] }
+      ]);
+      const glMap = new Map((glRes.data || []).map((g: any) => [g.id, g.name]));
+      const marketMap = new Map((marketRes.data || []).map((m: any) => [m.id, m]));
+
+      const enrichedPhotos = (photos || []).map(p => {
+        const market = marketMap.get(p.market_id) as any;
+        return {
+          id: p.id,
+          photoUrl: p.photo_url,
+          tags: p.tags || [],
+          comment: p.comment || null,
+          glId: p.gebietsleiter_id,
+          glName: glMap.get(p.gebietsleiter_id) || 'Unbekannt',
+          marketId: p.market_id,
+          marketName: market?.name || 'Unbekannt',
+          marketChain: market?.chain || '',
+          marketAddress: [market?.address, [market?.postal_code, market?.city].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+          createdAt: p.created_at
+        };
+      });
+
+      return res.json({ type: 'foto', photos: enrichedPhotos });
+    }
     
     // Use wellen_submissions for detailed view (individual submissions with market_id)
     const { data: submissions, error: submissionsError } = await freshClient
