@@ -1512,18 +1512,22 @@ router.get('/photos', async (req: Request, res: Response) => {
     }
 
     // Fetch market info
-    const marketMap = new Map<string, { name: string; chain: string }>();
+    const marketMap = new Map<string, { name: string; chain: string; address: string; city: string; postalCode: string }>();
     if (marketIds.length > 0) {
-      const { data: marketData } = await freshClient.from('markets').select('id, name, chain').in('id', marketIds);
-      (marketData || []).forEach(m => marketMap.set(m.id, { name: m.name, chain: m.chain }));
+      const { data: marketData } = await freshClient.from('markets').select('id, name, chain, address, city, postal_code').in('id', marketIds);
+      (marketData || []).forEach(m => marketMap.set(m.id, { name: m.name, chain: m.chain, address: m.address || '', city: m.city || '', postalCode: m.postal_code || '' }));
     }
 
-    const photos = (data || []).map(p => ({
-      id: p.id, welleId: p.welle_id, welleName: (p.welle as any)?.name || '',
-      glId: p.gebietsleiter_id, glName: glMap.get(p.gebietsleiter_id) || '',
-      marketId: p.market_id, marketName: marketMap.get(p.market_id)?.name || '', marketChain: marketMap.get(p.market_id)?.chain || '',
-      photoUrl: p.photo_url, tags: p.tags || [], comment: p.comment || null, createdAt: p.created_at
-    }));
+    const photos = (data || []).map(p => {
+      const market = marketMap.get(p.market_id);
+      return {
+        id: p.id, welleId: p.welle_id, welleName: (p.welle as any)?.name || '',
+        glId: p.gebietsleiter_id, glName: glMap.get(p.gebietsleiter_id) || '',
+        marketId: p.market_id, marketName: market?.name || '', marketChain: market?.chain || '',
+        marketAddress: [market?.address, [market?.postalCode, market?.city].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+        photoUrl: p.photo_url, tags: p.tags || [], comment: p.comment || null, createdAt: p.created_at
+      };
+    });
 
     res.json({ photos, total: count || photos.length });
   } catch (error: any) {
