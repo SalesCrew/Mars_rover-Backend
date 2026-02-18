@@ -89,6 +89,13 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
     // Use fresh client to avoid caching issues with wellen queries
     const freshClient = createFreshClient();
     
+    // Fetch test GL IDs to exclude from statistics
+    const { data: testGLsChain } = await freshClient
+      .from('gebietsleiter')
+      .select('id')
+      .eq('is_test', true);
+    const testGLIdsChain = new Set((testGLsChain || []).map((g: any) => g.id));
+    
     // Get filters from query params
     const glIdsParam = req.query.glIds as string | undefined;
     const startDate = req.query.startDate as string | undefined;
@@ -97,6 +104,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
     
     const glFilter = glIdsParam ? glIdsParam.split(',').filter(Boolean) : [];
     const isNoneSelected = glFilter.includes('__none__');
+    const chainFilterIncludesOnlyTestGLs = glFilter.length > 0 && glFilter.every(id => testGLIdsChain.has(id));
    
     console.log('📊 Fetching chain averages...', {
       glFilter: glFilter.length > 0 ? (isNoneSelected ? 'NONE' : glFilter.join(', ')) : 'ALL',
@@ -133,12 +141,16 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         // Get all markets of this chain type
         const { data: markets, error: marketsError } = await freshClient
           .from('markets')
-          .select('id')
+          .select('id, gebietsleiter_id')
           .in('chain', chainTypes);
         
         if (marketsError) throw marketsError;
         
-        const marketIds = (markets || []).map(m => m.id);
+        // Exclude test GL markets from totals (unless filter only targets test GLs)
+        const realMarkets = chainFilterIncludesOnlyTestGLs
+          ? (markets || [])
+          : (markets || []).filter(m => !testGLIdsChain.has(m.gebietsleiter_id));
+        const marketIds = realMarkets.map(m => m.id);
         const totalMarkets = marketIds.length;
         
         if (totalMarkets === 0) {
@@ -312,12 +324,16 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         
         const { data: markets, error: marketsError } = await freshClient
           .from('markets')
-          .select('id')
+          .select('id, gebietsleiter_id')
           .in('chain', chainTypes);
         
         if (marketsError) throw marketsError;
         
-        const marketIds = (markets || []).map(m => m.id);
+        // Exclude test GL markets from totals
+        const realMarkets = chainFilterIncludesOnlyTestGLs
+          ? (markets || [])
+          : (markets || []).filter(m => !testGLIdsChain.has(m.gebietsleiter_id));
+        const marketIds = realMarkets.map(m => m.id);
         const totalMarkets = marketIds.length;
         
         if (totalMarkets === 0) {
@@ -453,7 +469,11 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         
         if (marketsError) throw marketsError;
         
-        const marketIds = (markets || []).map(m => m.id);
+        // Exclude test GL markets from totals
+        const realMarketsZoo = chainFilterIncludesOnlyTestGLs
+          ? (markets || [])
+          : (markets || []).filter(m => !testGLIdsChain.has(m.gebietsleiter_id));
+        const marketIds = realMarketsZoo.map(m => m.id);
         const totalMarkets = marketIds.length;
         
         if (totalMarkets === 0) {
@@ -512,7 +532,15 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         
         // Get unique market IDs that are in the waves (wave markets)
         const waveMarketIds = [...new Set((welleMarkets || []).map(wm => wm.market_id))];
-        const totalWaveMarkets = waveMarketIds.length;
+        
+        // Exclude test GL markets from proportional goal denominator
+        const realWaveMarketIdsZoo = chainFilterIncludesOnlyTestGLs
+          ? waveMarketIds
+          : waveMarketIds.filter(marketId => {
+              const market = markets?.find(m => m.id === marketId);
+              return market && !testGLIdsChain.has(market.gebietsleiter_id);
+            });
+        const totalWaveMarkets = realWaveMarketIdsZoo.length;
         
         // Calculate GL's markets that are in the wave
         let glWaveMarketCount = totalWaveMarkets; // Default to all if no GL filter
@@ -673,7 +701,11 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         
         if (marketsError) throw marketsError;
         
-        const marketIds = (markets || []).map(m => m.id);
+        // Exclude test GL markets from totals
+        const realMarketsHage = chainFilterIncludesOnlyTestGLs
+          ? (markets || [])
+          : (markets || []).filter(m => !testGLIdsChain.has(m.gebietsleiter_id));
+        const marketIds = realMarketsHage.map(m => m.id);
         const totalMarkets = marketIds.length;
         
         if (totalMarkets === 0) {
@@ -732,7 +764,15 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         
         // Get unique market IDs that are in the waves (wave markets)
         const waveMarketIds = [...new Set((welleMarkets || []).map(wm => wm.market_id))];
-        const totalWaveMarkets = waveMarketIds.length;
+        
+        // Exclude test GL markets from proportional goal denominator
+        const realWaveMarketIdsHage = chainFilterIncludesOnlyTestGLs
+          ? waveMarketIds
+          : waveMarketIds.filter(marketId => {
+              const market = markets?.find(m => m.id === marketId);
+              return market && !testGLIdsChain.has(market.gebietsleiter_id);
+            });
+        const totalWaveMarkets = realWaveMarketIdsHage.length;
         
         // Calculate GL's markets that are in the wave
         let glWaveMarketCount = totalWaveMarkets; // Default to all if no GL filter
@@ -903,6 +943,16 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
     // Use fresh client to avoid caching issues
     const freshClient = createFreshClient();
 
+    // Fetch test GL IDs to exclude from statistics
+    const { data: testGLsData } = await freshClient
+      .from('gebietsleiter')
+      .select('id')
+      .eq('is_test', true);
+    const testGLIds = new Set((testGLsData || []).map((g: any) => g.id));
+
+    // Check if the active filter includes ONLY test GLs (show their data) or real GLs
+    const filterIncludesOnlyTestGLs = glFilter.length > 0 && glFilter.every(id => testGLIds.has(id));
+
     // Fetch active, upcoming, and recently finished waves
     const { data: wellen, error: wellenError } = await freshClient
       .from('wellen')
@@ -956,21 +1006,35 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           .eq('welle_id', welle.id);
         
         const waveMarketIds = (welleMarkets || []).map(wm => wm.market_id);
-        const totalWaveMarkets = waveMarketIds.length;
         
-        // Get GL's markets in the wave for proportional goal calculation
-        let glWaveMarketCount = totalWaveMarkets; // Default to all if no GL filter
-        if (glFilter.length > 0 && waveMarketIds.length > 0) {
+        // Fetch market details to identify which belong to test GLs
+        let marketsWithGL: any[] = [];
+        if (waveMarketIds.length > 0) {
           const { data: marketsData } = await freshClient
             .from('markets')
             .select('id, gebietsleiter_id')
             .in('id', waveMarketIds);
-          
-          const glWaveMarkets = (marketsData || []).filter(m => 
+          marketsWithGL = marketsData || [];
+        }
+        
+        // For proportional goal calculations, exclude test GL markets from denominator
+        // (unless the filter explicitly targets only test GLs)
+        const realWaveMarkets = filterIncludesOnlyTestGLs
+          ? marketsWithGL
+          : marketsWithGL.filter(m => !testGLIds.has(m.gebietsleiter_id));
+        const totalWaveMarkets = realWaveMarkets.length;
+        
+        // Get GL's markets in the wave for proportional goal calculation
+        let glWaveMarketCount = totalWaveMarkets; // Default to all if no GL filter
+        if (glFilter.length > 0) {
+          const glWaveMarkets = marketsWithGL.filter(m => 
             glFilter.includes(m.gebietsleiter_id)
           );
           glWaveMarketCount = glWaveMarkets.length;
         }
+        
+        // For assigned markets count, use the full (unfiltered) count
+        const allWaveMarketsCount = waveMarketIds.length;
         
         // Calculate GL's proportional ratio
         const glGoalRatio = totalWaveMarkets > 0 ? glWaveMarketCount / totalWaveMarkets : 0;
@@ -1098,8 +1162,12 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           }
         }
 
-        // Count unique participating GLs
-        const participatingGLs = new Set((progressData || []).map(p => p.gebietsleiter_id)).size;
+        // Count unique participating GLs (exclude test GLs from count)
+        const participatingGLs = new Set(
+          (progressData || [])
+            .filter(p => !testGLIds.has(p.gebietsleiter_id))
+            .map(p => p.gebietsleiter_id)
+        ).size;
 
         // Determine status - for Vorbesteller waves with kw_days, use KW-based status
         let status = welle.status === 'past' ? 'finished' : welle.status;
@@ -1156,7 +1224,7 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           displayTarget: proportionalDisplayTarget,
           kartonwareCount,
           kartonwareTarget: proportionalKartonwareTarget,
-          assignedMarkets: glFilter.length > 0 ? glWaveMarketCount : totalWaveMarkets,
+          assignedMarkets: glFilter.length > 0 ? glWaveMarketCount : allWaveMarketsCount,
           participatingGLs,
           fotoOnly: welle.foto_only || false,
           fotoEnabled: welle.foto_enabled || false,
@@ -3274,11 +3342,32 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
       hagebau: { displays: 0, kartonware: 0 }
     };
     
+    // Fetch test GL IDs to exclude their markets from proportional goal denominator
+    const { data: testGLsPerf } = await freshClient
+      .from('gebietsleiter')
+      .select('id')
+      .eq('is_test', true);
+    const testGLIdsPerf = new Set((testGLsPerf || []).map((g: any) => g.id));
+    
+    // Get all market-to-GL mappings for wave markets (to filter out test GL markets)
+    const allWelleMarketIds = [...new Set(welleMarkets.map(wm => wm.market_id))];
+    let marketGLMap: Record<string, string> = {};
+    if (allWelleMarketIds.length > 0) {
+      const { data: marketGLData } = await freshClient
+        .from('markets')
+        .select('id, gebietsleiter_id')
+        .in('id', allWelleMarketIds);
+      for (const m of (marketGLData || [])) {
+        marketGLMap[m.id] = m.gebietsleiter_id;
+      }
+    }
+    
     // Process each welle to calculate proportional goals
     for (const welleId of welleIds) {
-      // Get total markets in this welle
+      // Get total markets in this welle (excluding test GL markets from denominator)
       const welleMarketsForThis = welleMarkets.filter(wm => wm.welle_id === welleId);
-      const totalMarketsInWelle = welleMarketsForThis.length;
+      const realWelleMarketsForThis = welleMarketsForThis.filter(wm => !testGLIdsPerf.has(marketGLMap[wm.market_id]));
+      const totalMarketsInWelle = realWelleMarketsForThis.length;
       if (totalMarketsInWelle === 0) continue;
       
       // Count how many of the GL's markets are in this welle

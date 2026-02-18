@@ -16,7 +16,7 @@ router.get('/', async (req: Request, res: Response) => {
     
     const { data, error } = await freshClient
       .from('gebietsleiter')
-      .select('id, name, address, postal_code, city, phone, email, profile_picture_url, is_active, created_at, updated_at')
+      .select('id, name, address, postal_code, city, phone, email, profile_picture_url, is_active, is_test, created_at, updated_at')
       .neq('is_active', false) // Filter out inactive/deleted GLs
       .order('created_at', { ascending: false });
 
@@ -46,7 +46,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 
     const { data, error } = await freshClient
       .from('gebietsleiter')
-      .select('id, name, address, postal_code, city, phone, email, profile_picture_url, created_at, updated_at')
+      .select('id, name, address, postal_code, city, phone, email, profile_picture_url, is_test, created_at, updated_at')
       .eq('id', id)
       .single();
 
@@ -75,7 +75,7 @@ router.post('/', async (req: Request, res: Response) => {
   try {
     console.log('➕ Creating new gebietsleiter with Supabase Auth...');
     
-    const { name, address, postalCode, city, phone, email, password, profilePictureUrl } = req.body;
+    const { name, address, postalCode, city, phone, email, password, profilePictureUrl, isTest } = req.body;
 
     // Validate required fields
     if (!name || !address || !postalCode || !city || !phone || !email || !password) {
@@ -145,9 +145,10 @@ router.post('/', async (req: Request, res: Response) => {
         phone,
         email,
         password_hash: 'SUPABASE_AUTH', // Marker that password is in Supabase Auth
-        profile_picture_url: profilePictureUrl || null
+        profile_picture_url: profilePictureUrl || null,
+        is_test: isTest === true
       })
-      .select('id, name, address, postal_code, city, phone, email, profile_picture_url, created_at, updated_at')
+      .select('id, name, address, postal_code, city, phone, email, profile_picture_url, is_test, created_at, updated_at')
       .single();
 
     if (error) {
@@ -184,7 +185,7 @@ router.put('/:id', async (req: Request, res: Response) => {
     
     const freshClient = createFreshClient();
 
-    const { name, address, postalCode, city, phone, email, password, profilePictureUrl } = req.body;
+    const { name, address, postalCode, city, phone, email, password, profilePictureUrl, isTest } = req.body;
 
     const updateData: any = {};
     
@@ -195,6 +196,7 @@ router.put('/:id', async (req: Request, res: Response) => {
     if (phone) updateData.phone = phone;
     if (email) updateData.email = email;
     if (profilePictureUrl !== undefined) updateData.profile_picture_url = profilePictureUrl;
+    if (isTest !== undefined) updateData.is_test = isTest === true;
     
     // Hash password if provided
     if (password) {
@@ -206,7 +208,7 @@ router.put('/:id', async (req: Request, res: Response) => {
       .from('gebietsleiter')
       .update(updateData)
       .eq('id', id)
-      .select('id, name, address, postal_code, city, phone, email, profile_picture_url, created_at, updated_at')
+      .select('id, name, address, postal_code, city, phone, email, profile_picture_url, is_test, created_at, updated_at')
       .single();
 
     if (error) {
@@ -410,23 +412,27 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
       }
     }
 
-    // 3. Get agency average (all GLs' total from value-based waves only)
-    const { data: allGLs } = await freshClient.from('gebietsleiter').select('id');
+    // 3. Get agency average (all real GLs' total from value-based waves only - exclude test GLs)
+    const { data: allGLs } = await freshClient.from('gebietsleiter').select('id').neq('is_active', false).neq('is_test', true);
     const glCount = allGLs?.length || 1;
+    const realGLIds = new Set((allGLs || []).map((g: any) => g.id));
 
     let agencyTotal = 0;
     
     if (valueWelleIds.length > 0) {
       const { data: allProgress } = await freshClient
         .from('wellen_gl_progress')
-        .select('current_number, item_type, item_id, value_per_unit')
+        .select('current_number, item_type, item_id, value_per_unit, gebietsleiter_id')
         .in('welle_id', valueWelleIds)
         .gte('created_at', yearStart);
 
       if (allProgress && allProgress.length > 0) {
-        const allDisplayIds = [...new Set(allProgress.filter(p => p.item_type === 'display').map(p => p.item_id))];
-        const allKartonwareIds = [...new Set(allProgress.filter(p => p.item_type === 'kartonware').map(p => p.item_id))];
-        const allEinzelproduktIds = [...new Set(allProgress.filter(p => p.item_type === 'einzelprodukt').map(p => p.item_id))];
+        // Filter out test GL contributions from agency total
+        const realProgress = allProgress.filter(p => realGLIds.has(p.gebietsleiter_id));
+        
+        const allDisplayIds = [...new Set(realProgress.filter(p => p.item_type === 'display').map(p => p.item_id))];
+        const allKartonwareIds = [...new Set(realProgress.filter(p => p.item_type === 'kartonware').map(p => p.item_id))];
+        const allEinzelproduktIds = [...new Set(realProgress.filter(p => p.item_type === 'einzelprodukt').map(p => p.item_id))];
 
         const [displaysResult, kartonwareResult, einzelprodukteResult] = await Promise.all([
           allDisplayIds.length > 0 ? freshClient.from('wellen_displays').select('id, item_value').in('id', allDisplayIds) : { data: [] },
@@ -438,7 +444,7 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
         const kartonware = kartonwareResult.data || [];
         const einzelprodukte = einzelprodukteResult.data || [];
 
-        allProgress.forEach(p => {
+        realProgress.forEach(p => {
           if (p.item_type === 'display') {
             const item = displays.find(d => d.id === p.item_id);
             if (item) agencyTotal += (item.item_value || 0) * (p.current_number || 0);
