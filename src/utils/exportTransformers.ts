@@ -57,7 +57,7 @@ export async function transformWellenSubmissions(
     query = query.gte('created_at', filters.dateRange.start);
   }
   if (filters?.dateRange?.end) {
-    query = query.lte('created_at', filters.dateRange.end);
+    query = query.lte('created_at', filters.dateRange.end + 'T23:59:59');
   }
   if (filters?.glIds && filters.glIds.length > 0) {
     query = query.in('gebietsleiter_id', filters.glIds);
@@ -352,6 +352,12 @@ export async function transformMarkets(
     .select('*')
     .order('name', { ascending: true });
 
+  if (filters?.dateRange?.start) {
+    query = query.gte('created_at', filters.dateRange.start);
+  }
+  if (filters?.dateRange?.end) {
+    query = query.lte('created_at', filters.dateRange.end + 'T23:59:59');
+  }
   if (filters?.glIds && filters.glIds.length > 0) {
     query = query.in('gebietsleiter_id', filters.glIds);
   }
@@ -413,7 +419,7 @@ export async function transformVorverkaufEntries(
     query = query.gte('created_at', filters.dateRange.start);
   }
   if (filters?.dateRange?.end) {
-    query = query.lte('created_at', filters.dateRange.end);
+    query = query.lte('created_at', filters.dateRange.end + 'T23:59:59');
   }
   if (filters?.glIds && filters.glIds.length > 0) {
     query = query.in('gebietsleiter_id', filters.glIds);
@@ -507,7 +513,7 @@ export async function transformActionHistory(
     query = query.gte('timestamp', filters.dateRange.start);
   }
   if (filters?.dateRange?.end) {
-    query = query.lte('timestamp', filters.dateRange.end);
+    query = query.lte('timestamp', filters.dateRange.end + 'T23:59:59');
   }
 
   const { data: actions, error } = await query;
@@ -548,13 +554,22 @@ export async function transformGebietsleiter(
   client: SupabaseClient,
   options: TransformOptions
 ): Promise<ExportRow[]> {
-  const { columns } = options;
+  const { columns, filters } = options;
 
-  const { data: gls, error } = await client
+  let glQuery = client
     .from('gebietsleiter')
     .select('*')
     .eq('is_active', true)
     .order('name', { ascending: true });
+
+  if (filters?.dateRange?.start) {
+    glQuery = glQuery.gte('created_at', filters.dateRange.start);
+  }
+  if (filters?.dateRange?.end) {
+    glQuery = glQuery.lte('created_at', filters.dateRange.end + 'T23:59:59');
+  }
+
+  const { data: gls, error } = await glQuery;
 
   if (error) throw error;
   if (!gls || gls.length === 0) return [];
