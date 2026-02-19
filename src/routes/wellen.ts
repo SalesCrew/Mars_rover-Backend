@@ -1575,6 +1575,11 @@ router.get('/photos', async (req: Request, res: Response) => {
     }
     if (start_date) query = query.gte('created_at', `${start_date}T00:00:00`);
     if (end_date) query = query.lte('created_at', `${end_date}T23:59:59`);
+
+    // Hide photos older than 6 months from the UI (data stays in DB)
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+    query = query.gte('created_at', sixMonthsAgo.toISOString());
     
     const lim = parseInt(limitParam as string) || 50;
     const off = parseInt(offsetParam as string) || 0;
