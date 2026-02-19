@@ -517,17 +517,20 @@ router.post('/:id/visit', async (req: Request, res: Response) => {
 router.get('/:id/history', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    console.log(`📜 Fetching history for market ${id}...`);
+    const glId = req.query.gl_id as string | undefined;
+    console.log(`📜 Fetching history for market ${id}${glId ? ` (GL: ${glId})` : ''}...`);
     
     const freshClient = createFreshClient();
     const activities: any[] = [];
 
     // 1. Get Vorbesteller submissions from wellen_submissions table (individual actions)
-    const { data: submissionsData } = await freshClient
+    let wellenQuery = freshClient
       .from('wellen_submissions')
       .select('*, wellen(name), gebietsleiter(name)')
       .eq('market_id', id)
       .order('created_at', { ascending: false });
+    if (glId) wellenQuery = wellenQuery.eq('gebietsleiter_id', glId);
+    const { data: submissionsData } = await wellenQuery;
     
     if (submissionsData && submissionsData.length > 0) {
       // Get item names from correct tables
@@ -680,11 +683,13 @@ router.get('/:id/history', async (req: Request, res: Response) => {
     }
 
     // 2. Get Vorverkauf submissions
-    const { data: vorverkaufData } = await freshClient
+    let vvQuery = freshClient
       .from('vorverkauf_submissions')
       .select('*, gebietsleiter(name), vorverkauf_wellen(name)')
       .eq('market_id', id)
       .order('created_at', { ascending: false });
+    if (glId) vvQuery = vvQuery.eq('gebietsleiter_id', glId);
+    const { data: vorverkaufData } = await vvQuery;
     
     if (vorverkaufData) {
       // Get products for each submission
@@ -714,11 +719,13 @@ router.get('/:id/history', async (req: Request, res: Response) => {
     }
 
     // 3. Get Produkttausch entries (vorverkauf_entries)
-    const { data: produkttauschData } = await freshClient
+    let ptQuery = freshClient
       .from('vorverkauf_entries')
       .select('*, gebietsleiter(name)')
       .eq('market_id', id)
       .order('created_at', { ascending: false });
+    if (glId) ptQuery = ptQuery.eq('gebietsleiter_id', glId);
+    const { data: produkttauschData } = await ptQuery;
     
     if (produkttauschData) {
       for (const entry of produkttauschData) {
@@ -747,24 +754,29 @@ router.get('/:id/history', async (req: Request, res: Response) => {
       }
     }
 
-    // 4. Get market visit history from markets table
-    const { data: marketData } = await freshClient
-      .from('markets')
-      .select('last_visit_date, current_visits, gebietsleiter_name')
-      .eq('id', id)
-      .single();
-    
-    if (marketData && marketData.last_visit_date) {
-      activities.push({
-        id: `visit-${id}`,
-        type: 'marktbesuch',
-        date: marketData.last_visit_date,
-        glName: marketData.gebietsleiter_name || 'Unbekannt',
-        glId: null,
-        details: {
-          visitCount: marketData.current_visits || 1
-        }
-      });
+    // 4. Get zeiterfassung visit entries for this market
+    let zeQuery = freshClient
+      .from('fb_zeiterfassung_submissions')
+      .select('id, gebietsleiter_id, market_id, besuchszeit_von, besuchszeit_bis, created_at')
+      .eq('market_id', id)
+      .order('created_at', { ascending: false });
+    if (glId) zeQuery = zeQuery.eq('gebietsleiter_id', glId);
+    const { data: zeiterfassungData } = await zeQuery;
+
+    if (zeiterfassungData) {
+      for (const ze of zeiterfassungData) {
+        activities.push({
+          id: ze.id,
+          type: 'marktbesuch',
+          date: ze.created_at,
+          glName: '',
+          glId: ze.gebietsleiter_id,
+          details: {
+            besuchszeitVon: ze.besuchszeit_von,
+            besuchszeitBis: ze.besuchszeit_bis
+          }
+        });
+      }
     }
 
     // Sort all activities by date (newest first)
