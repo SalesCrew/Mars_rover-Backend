@@ -1947,10 +1947,10 @@ router.get('/zeiterfassung/gl/:glId/date/:date', async (req: Request, res: Respo
     // Get all market IDs from zeiterfassung entries
     const marketIds = [...new Set(zeitEntries.map(e => e.market_id))];
     
-    // Fetch wellen_submissions (Vorbesteller) for all markets on this date
+    // Fetch wellen_submissions (Vorbesteller) for all markets on this date, including wave goal_type
     const { data: wellenSubs, error: wellenError } = await freshClient
       .from('wellen_submissions')
-      .select('*')
+      .select('*, wellen:welle_id ( goal_type )')
       .eq('gebietsleiter_id', glId)
       .in('market_id', marketIds)
       .gte('created_at', `${date}T00:00:00`)
@@ -1982,9 +1982,12 @@ router.get('/zeiterfassung/gl/:glId/date/:date', async (req: Request, res: Respo
         e.market_id === marketId && e.reason === 'Produkttausch'
       );
       
-      // Calculate vorbesteller totals
+      // Separate value-based vs percentage-based submissions
+      const valueSubs = marketWellenSubs.filter((s: any) => s.wellen?.goal_type === 'value');
+      const nonValueSubs = marketWellenSubs.filter((s: any) => s.wellen?.goal_type !== 'value');
+      
       const vorbestellerCount = marketWellenSubs.length;
-      const vorbestellerValue = marketWellenSubs.reduce((sum, s) => {
+      const vorbestellerValue = valueSubs.reduce((sum: number, s: any) => {
         const qty = s.quantity || 0;
         const value = s.value_per_unit || 0;
         return sum + (qty * value);
@@ -1995,6 +1998,8 @@ router.get('/zeiterfassung/gl/:glId/date/:date', async (req: Request, res: Respo
         submissions: {
           vorbesteller: {
             count: vorbestellerCount,
+            valueCount: valueSubs.length,
+            nonValueCount: nonValueSubs.length,
             totalValue: vorbestellerValue,
             items: marketWellenSubs
           },
