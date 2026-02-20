@@ -5,7 +5,7 @@ const router = Router();
 
 interface Activity {
   id: string;
-  type: 'vorbestellung' | 'vorverkauf' | 'produkttausch_pending';
+  type: 'vorbestellung' | 'vorverkauf' | 'produkttausch_pending' | 'nara_incentive';
   glId: string;
   glName: string;
   marketId: string;
@@ -371,12 +371,58 @@ router.get('/', async (req: Request, res: Response) => {
       };
     });
     
+    // Fetch NARA incentive submissions
+    const { data: naraData, error: naraError } = await freshClient
+      .from('nara_incentive_submissions')
+      .select(`
+        id, gebietsleiter_id, market_id, created_at,
+        gebietsleiter ( name ),
+        markets ( name, chain, address, city ),
+        nara_incentive_items (
+          id, product_id, quantity,
+          products ( name, price )
+        )
+      `)
+      .order('created_at', { ascending: false })
+      .range(0, 100);
+    
+    if (naraError) console.error('NARA error:', naraError);
+    
+    const naraActivities: Activity[] = (naraData || []).map((n: any) => {
+      const items = (n.nara_incentive_items || []);
+      const totalValue = items.reduce((sum: number, i: any) => sum + ((i.products?.price || 0) * i.quantity), 0);
+      const totalQuantity = items.reduce((sum: number, i: any) => sum + i.quantity, 0);
+      
+      return {
+        id: n.id,
+        type: 'nara_incentive' as const,
+        glId: n.gebietsleiter_id,
+        glName: n.gebietsleiter?.name || 'Unknown',
+        marketId: n.market_id || '',
+        marketChain: n.markets?.chain || 'Unknown',
+        marketAddress: n.markets?.address || '',
+        marketCity: n.markets?.city || '',
+        action: `NaRa-Incentive: ${totalQuantity} Produkte`,
+        details: {
+          marketName: n.markets?.name || 'Unknown',
+          totalValue,
+          totalQuantity,
+          items: items.map((i: any) => ({
+            productName: i.products?.name || 'Unbekannt',
+            quantity: i.quantity,
+            price: i.products?.price || 0
+          }))
+        },
+        createdAt: n.created_at
+      };
+    });
+    
     // Combine and sort by date
-    const allActivities = [...progressActivities, ...vorverkaufActivities]
+    const allActivities = [...progressActivities, ...vorverkaufActivities, ...naraActivities]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .slice(offset, offset + limit);
     
-    console.log(`✅ Fetched ${allActivities.length} activities (${progressActivities.length} vorbestellungen, ${vorverkaufActivities.length} vorverkäufe)`);
+    console.log(`✅ Fetched ${allActivities.length} activities (${progressActivities.length} vorbestellungen, ${vorverkaufActivities.length} vorverkäufe, ${naraActivities.length} nara-incentive)`);
     res.json(allActivities);
   } catch (error: any) {
     console.error('❌ Error fetching activities:', error);
@@ -582,6 +628,13 @@ router.delete('/:type/:id', async (req: Request, res: Response) => {
       // Alias for vorverkauf_entries
       const { error } = await freshClient
         .from('vorverkauf_entries')
+        .delete()
+        .eq('id', id);
+      
+      if (error) throw error;
+    } else if (type === 'nara_incentive') {
+      const { error } = await freshClient
+        .from('nara_incentive_submissions')
         .delete()
         .eq('id', id);
       
