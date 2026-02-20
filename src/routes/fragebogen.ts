@@ -1777,6 +1777,91 @@ router.post('/zeiterfassung', async (req: Request, res: Response) => {
 });
 
 /**
+ * PATCH /api/fragebogen/zeiterfassung/:id
+ * Update an existing zeiterfassung submission (partial update)
+ */
+router.patch('/zeiterfassung/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const freshClient = createFreshClient();
+    const {
+      besuchszeit_von,
+      besuchszeit_bis,
+      fahrzeit_von,
+      fahrzeit_bis,
+      distanz_km,
+      kommentar,
+      food_prozent
+    } = req.body;
+
+    const updateData: Record<string, any> = {};
+
+    if (besuchszeit_von !== undefined) updateData.besuchszeit_von = besuchszeit_von || null;
+    if (besuchszeit_bis !== undefined) updateData.besuchszeit_bis = besuchszeit_bis || null;
+    if (fahrzeit_von !== undefined) updateData.fahrzeit_von = fahrzeit_von || null;
+    if (fahrzeit_bis !== undefined) updateData.fahrzeit_bis = fahrzeit_bis || null;
+    if (distanz_km !== undefined) updateData.distanz_km = distanz_km ? parseFloat(distanz_km) : null;
+    if (kommentar !== undefined) updateData.kommentar = kommentar || null;
+    if (food_prozent !== undefined) updateData.food_prozent = food_prozent !== null ? parseInt(food_prozent) : null;
+
+    // Recalculate diffs: need current row to merge with incoming partial data
+    const { data: existing } = await freshClient
+      .from('fb_zeiterfassung_submissions')
+      .select('besuchszeit_von, besuchszeit_bis, fahrzeit_von, fahrzeit_bis')
+      .eq('id', id)
+      .single();
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Submission not found' });
+    }
+
+    const finalBVon = besuchszeit_von !== undefined ? besuchszeit_von : existing.besuchszeit_von;
+    const finalBBis = besuchszeit_bis !== undefined ? besuchszeit_bis : existing.besuchszeit_bis;
+    const finalFVon = fahrzeit_von !== undefined ? fahrzeit_von : existing.fahrzeit_von;
+    const finalFBis = fahrzeit_bis !== undefined ? fahrzeit_bis : existing.fahrzeit_bis;
+
+    if (finalBVon && finalBBis) {
+      const von = String(finalBVon).split(':');
+      const bis = String(finalBBis).split(':');
+      const vonMin = parseInt(von[0]) * 60 + parseInt(von[1]);
+      const bisMin = parseInt(bis[0]) * 60 + parseInt(bis[1]);
+      let diff = bisMin - vonMin;
+      if (diff < 0) diff += 24 * 60;
+      updateData.besuchszeit_diff = `${Math.floor(diff / 60)}:${(diff % 60).toString().padStart(2, '0')}:00`;
+    }
+
+    if (finalFVon && finalFBis) {
+      const von = String(finalFVon).split(':');
+      const bis = String(finalFBis).split(':');
+      const vonMin = parseInt(von[0]) * 60 + parseInt(von[1]);
+      const bisMin = parseInt(bis[0]) * 60 + parseInt(bis[1]);
+      let diff = bisMin - vonMin;
+      if (diff < 0) diff += 24 * 60;
+      updateData.fahrzeit_diff = `${Math.floor(diff / 60)}:${(diff % 60).toString().padStart(2, '0')}:00`;
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    const { data, error } = await freshClient
+      .from('fb_zeiterfassung_submissions')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    console.log(`✅ Updated zeiterfassung: ${id}`);
+    res.json(data);
+  } catch (error: any) {
+    console.error('Error updating zeiterfassung:', error);
+    res.status(500).json({ error: error.message || 'Failed to update zeiterfassung' });
+  }
+});
+
+/**
  * DELETE /api/fragebogen/zeiterfassung/:id
  * Delete a zeiterfassung submission
  */
