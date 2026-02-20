@@ -68,6 +68,37 @@ router.get('/:id', async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/gebietsleiter/upload-profile-picture
+ * Upload a profile picture to Supabase Storage
+ */
+router.post('/upload-profile-picture', async (req: Request, res: Response) => {
+  try {
+    const { base64, contentType, fileName } = req.body;
+    if (!base64) return res.status(400).json({ error: 'Missing base64 image data' });
+
+    const buffer = Buffer.from(base64, 'base64');
+    const ext = (fileName?.split('.').pop() || contentType?.split('/')[1] || 'jpg').toLowerCase();
+    const storagePath = `profile-pictures/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+
+    const freshClient = createFreshClient();
+    const { error: uploadError } = await freshClient.storage
+      .from('wellen-images')
+      .upload(storagePath, buffer, { contentType: contentType || 'image/jpeg', upsert: true });
+
+    if (uploadError) {
+      console.error('Upload error:', uploadError);
+      return res.status(500).json({ error: 'Failed to upload image' });
+    }
+
+    const { data: urlData } = freshClient.storage.from('wellen-images').getPublicUrl(storagePath);
+    res.json({ url: urlData.publicUrl });
+  } catch (error: any) {
+    console.error('Error uploading profile picture:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+/**
  * POST /api/gebietsleiter
  * Create a new gebietsleiter with Supabase Auth account
  */

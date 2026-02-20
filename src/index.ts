@@ -12,6 +12,7 @@ import activitiesRouter from './routes/activities';
 import bugReportsRouter from './routes/bugReports';
 import exportRouter from './routes/export';
 import fragebogenRouter from './routes/fragebogen';
+import naraIncentiveRouter from './routes/naraIncentive';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
@@ -70,6 +71,8 @@ console.log('Registering export routes...');
 app.use('/api/export', exportRouter);
 console.log('Registering fragebogen routes...');
 app.use('/api/fragebogen', fragebogenRouter);
+console.log('Registering nara-incentive routes...');
+app.use('/api/nara-incentive', naraIncentiveRouter);
 
 // Start server
 const server = app.listen(PORT, '0.0.0.0', () => {
