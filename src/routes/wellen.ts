@@ -2908,6 +2908,43 @@ router.get('/:welleId/gl-submissions/:glId', async (req: Request, res: Response)
 });
 
 // ============================================================================
+// GET SUBMITTED MARKET IDS FOR A WELLE + GL
+// Returns distinct market_ids that have submissions (or photos for foto-only)
+// ============================================================================
+router.get('/:welleId/submitted-markets/:glId', async (req: Request, res: Response) => {
+  try {
+    const { welleId, glId } = req.params;
+    const freshClient = createFreshClient();
+
+    const { data: welleRow } = await freshClient.from('wellen').select('foto_only').eq('id', welleId).single();
+
+    let myMarketIds: string[] = [];
+    let allMarketIds: string[] = [];
+
+    if (welleRow?.foto_only) {
+      const [myPhotos, allPhotos] = await Promise.all([
+        freshClient.from('wellen_photos').select('market_id').eq('welle_id', welleId).eq('gebietsleiter_id', glId),
+        freshClient.from('wellen_photos').select('market_id').eq('welle_id', welleId)
+      ]);
+      myMarketIds = [...new Set((myPhotos.data || []).map(p => p.market_id).filter(Boolean))];
+      allMarketIds = [...new Set((allPhotos.data || []).map(p => p.market_id).filter(Boolean))];
+    } else {
+      const [mySubs, allSubs] = await Promise.all([
+        freshClient.from('wellen_submissions').select('market_id').eq('welle_id', welleId).eq('gebietsleiter_id', glId),
+        freshClient.from('wellen_submissions').select('market_id').eq('welle_id', welleId)
+      ]);
+      myMarketIds = [...new Set((mySubs.data || []).map(s => s.market_id).filter(Boolean))];
+      allMarketIds = [...new Set((allSubs.data || []).map(s => s.market_id).filter(Boolean))];
+    }
+
+    res.json({ marketIds: myMarketIds, allMarketIds });
+  } catch (error: any) {
+    console.error('Error fetching submitted markets:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================================
 // GET ALL PROGRESS FOR A WELLE (ALL GLs) - For detailed view
 // Uses wellen_submissions for individual market-specific entries
 // ============================================================================

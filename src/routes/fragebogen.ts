@@ -2151,7 +2151,7 @@ router.get('/zusatz-zeiterfassung/:glId', async (req: Request, res: Response) =>
     
     let query = freshClient
       .from('fb_zusatz_zeiterfassung')
-      .select('*, market:markets(id, name, chain)')
+      .select('*')
       .eq('gebietsleiter_id', glId)
       .order('created_at', { ascending: false });
     
@@ -2165,7 +2165,20 @@ router.get('/zusatz-zeiterfassung/:glId', async (req: Request, res: Response) =>
     
     if (error) throw error;
     
-    res.json(data || []);
+    const entries = data || [];
+    const marketIds = [...new Set(entries.filter(e => e.market_id).map(e => e.market_id))];
+    let marketsMap: Record<string, any> = {};
+    if (marketIds.length > 0) {
+      const { data: markets } = await freshClient.from('markets').select('id, name, chain').in('id', marketIds);
+      (markets || []).forEach((m: any) => { marketsMap[m.id] = m; });
+    }
+    
+    const enriched = entries.map(e => ({
+      ...e,
+      market: e.market_id ? marketsMap[e.market_id] || null : null
+    }));
+    
+    res.json(enriched);
   } catch (error: any) {
     console.error('Error getting zusatz zeiterfassung:', error);
     res.status(500).json({ error: error.message || 'Failed to get zusatz zeiterfassung' });
@@ -2183,7 +2196,7 @@ router.get('/zusatz-zeiterfassung-all', async (req: Request, res: Response) => {
     
     let query = freshClient
       .from('fb_zusatz_zeiterfassung')
-      .select('*, market:markets(id, name, chain)')
+      .select('*')
       .order('created_at', { ascending: false });
     
     if (start_date) {
@@ -2197,8 +2210,21 @@ router.get('/zusatz-zeiterfassung-all', async (req: Request, res: Response) => {
     
     if (error) throw error;
     
-    console.log(`✅ Fetched ${(data || []).length} zusatz zeiterfassung entries`);
-    res.json(data || []);
+    const entries = data || [];
+    const marketIds = [...new Set(entries.filter(e => e.market_id).map(e => e.market_id))];
+    let marketsMap: Record<string, any> = {};
+    if (marketIds.length > 0) {
+      const { data: markets } = await freshClient.from('markets').select('id, name, chain').in('id', marketIds);
+      (markets || []).forEach((m: any) => { marketsMap[m.id] = m; });
+    }
+    
+    const enriched = entries.map(e => ({
+      ...e,
+      market: e.market_id ? marketsMap[e.market_id] || null : null
+    }));
+    
+    console.log(`✅ Fetched ${enriched.length} zusatz zeiterfassung entries`);
+    res.json(enriched);
   } catch (error: any) {
     console.error('Error getting all zusatz zeiterfassung:', error);
     res.status(500).json({ error: error.message || 'Failed to get zusatz zeiterfassung' });
