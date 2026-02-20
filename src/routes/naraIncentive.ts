@@ -119,4 +119,27 @@ router.get('/', async (req: Request, res: Response) => {
   }
 });
 
+router.delete('/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const freshClient = createFreshClient();
+
+    const { error } = await freshClient
+      .from('nara_incentive_submissions')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      console.error('Error deleting NARA-Incentive submission:', error);
+      throw error;
+    }
+
+    console.log(`🗑️ NARA-Incentive submission deleted: ${id}`);
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Error deleting NARA-Incentive submission:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
 export default router;
