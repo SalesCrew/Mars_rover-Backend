@@ -14,6 +14,7 @@ const transformProductFromDB = (dbProduct: any) => ({
   palletSize: dbProduct.pallet_size || undefined,
   price: parseFloat(dbProduct.price),
   sku: dbProduct.sku || undefined,
+  artikelNr: dbProduct.artikel_nr || undefined,
   paletteProducts: dbProduct.palette_products || undefined,
 });
 
@@ -28,6 +29,7 @@ const transformProductToDB = (product: any) => ({
   pallet_size: product.palletSize || null,
   price: product.price,
   sku: product.sku || null,
+  artikel_nr: product.artikelNr || null,
   palette_products: product.paletteProducts || null,
 });
 
@@ -118,6 +120,7 @@ router.put('/:id', async (req, res) => {
     if (req.body.palletSize !== undefined) updates.pallet_size = req.body.palletSize || null;
     if (req.body.price !== undefined) updates.price = req.body.price;
     if (req.body.sku !== undefined) updates.sku = req.body.sku || null;
+    if (req.body.artikelNr !== undefined) updates.artikel_nr = req.body.artikelNr || null;
     if (req.body.paletteProducts !== undefined) updates.palette_products = req.body.paletteProducts || null;
 
     const { data, error } = await freshClient
