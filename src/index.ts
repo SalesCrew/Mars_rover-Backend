@@ -1,3 +1,7 @@
+import dotenv from 'dotenv';
+import path from 'path';
+dotenv.config({ path: path.resolve(process.cwd(), '.env') });
+
 import express from 'express';
 import cors from 'cors';
 import authRouter from './routes/auth';
@@ -13,6 +17,7 @@ import bugReportsRouter from './routes/bugReports';
 import exportRouter from './routes/export';
 import fragebogenRouter from './routes/fragebogen';
 import naraIncentiveRouter from './routes/naraIncentive';
+import mapsRouter from './routes/maps';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
@@ -73,6 +78,8 @@ console.log('Registering fragebogen routes...');
 app.use('/api/fragebogen', fragebogenRouter);
 console.log('Registering nara-incentive routes...');
 app.use('/api/nara-incentive', naraIncentiveRouter);
+console.log('Registering maps routes...');
+app.use('/api/maps', mapsRouter);
 
 // Start server
 const server = app.listen(PORT, '0.0.0.0', () => {
