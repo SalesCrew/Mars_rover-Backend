@@ -2316,6 +2316,88 @@ router.get('/zusatz-zeiterfassung-all', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * PATCH /api/fragebogen/zusatz-zeiterfassung/:id
+ * Update an existing zusatz zeiterfassung entry (partial update)
+ */
+router.patch('/zusatz-zeiterfassung/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const freshClient = createFreshClient();
+    const { zeit_von, zeit_bis } = req.body;
+
+    const updateData: Record<string, any> = {};
+    if (zeit_von !== undefined) updateData.zeit_von = zeit_von || null;
+    if (zeit_bis !== undefined) updateData.zeit_bis = zeit_bis || null;
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    const { data: existing } = await freshClient
+      .from('fb_zusatz_zeiterfassung')
+      .select('zeit_von, zeit_bis')
+      .eq('id', id)
+      .single();
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Entry not found' });
+    }
+
+    const finalVon = zeit_von !== undefined ? zeit_von : existing.zeit_von;
+    const finalBis = zeit_bis !== undefined ? zeit_bis : existing.zeit_bis;
+
+    if (finalVon && finalBis) {
+      const von = String(finalVon).split(':');
+      const bis = String(finalBis).split(':');
+      const vonMin = parseInt(von[0]) * 60 + parseInt(von[1]);
+      const bisMin = parseInt(bis[0]) * 60 + parseInt(bis[1]);
+      let diff = bisMin - vonMin;
+      if (diff < 0) diff += 24 * 60;
+      updateData.zeit_diff = `${Math.floor(diff / 60)}:${(diff % 60).toString().padStart(2, '0')}:00`;
+    }
+
+    const { data, error } = await freshClient
+      .from('fb_zusatz_zeiterfassung')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    console.log(`✅ Updated zusatz zeiterfassung: ${id}`);
+    res.json(data);
+  } catch (error: any) {
+    console.error('Error updating zusatz zeiterfassung:', error);
+    res.status(500).json({ error: error.message || 'Failed to update zusatz zeiterfassung' });
+  }
+});
+
+/**
+ * DELETE /api/fragebogen/zusatz-zeiterfassung/:id
+ * Delete a zusatz zeiterfassung entry
+ */
+router.delete('/zusatz-zeiterfassung/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const freshClient = createFreshClient();
+
+    const { error } = await freshClient
+      .from('fb_zusatz_zeiterfassung')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+
+    console.log(`✅ Deleted zusatz zeiterfassung: ${id}`);
+    res.json({ message: 'Deleted successfully', id });
+  } catch (error: any) {
+    console.error('Error deleting zusatz zeiterfassung:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete zusatz zeiterfassung' });
+  }
+});
+
 // ============================================================================
 // DAY TRACKING ENDPOINTS
 // ============================================================================
@@ -2348,6 +2430,23 @@ const getCurrentTimeString = (): string => {
   const now = new Date();
   return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
 };
+
+// GET ALL DAY TRACKING (for admin)
+router.get('/day-tracking-all', async (req: Request, res: Response) => {
+  try {
+    const freshClient = createFreshClient();
+    const { data, error } = await freshClient
+      .from('fb_day_tracking')
+      .select('gebietsleiter_id, tracking_date, day_start_time, day_end_time, skipped_first_fahrzeit')
+      .order('tracking_date', { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error: any) {
+    console.error('Error getting all day tracking:', error);
+    res.status(500).json({ error: error.message || 'Failed to get day tracking' });
+  }
+});
 
 // START DAY - Create or update day tracking record
 router.post('/day-tracking/start', async (req: Request, res: Response) => {
