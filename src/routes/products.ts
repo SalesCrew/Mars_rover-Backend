@@ -16,6 +16,7 @@ const transformProductFromDB = (dbProduct: any) => ({
   sku: dbProduct.sku || undefined,
   artikelNr: dbProduct.artikel_nr || undefined,
   paletteProducts: dbProduct.palette_products || undefined,
+  isActive: dbProduct.is_active !== false,
 });
 
 // Transform from API format to DB format
@@ -31,6 +32,7 @@ const transformProductToDB = (product: any) => ({
   sku: product.sku || null,
   artikel_nr: product.artikelNr || null,
   palette_products: product.paletteProducts || null,
+  is_active: product.isActive !== false,
 });
 
 // GET /api/products - Get all products
