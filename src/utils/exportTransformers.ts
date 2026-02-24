@@ -48,27 +48,42 @@ export async function transformWellenSubmissions(
   const { columns, filters, expandPaletteProducts = false } = options;
 
   // Fetch submissions with date filter
-  let query = client
-    .from('wellen_submissions')
-    .select('*')
-    .order('created_at', { ascending: false });
+  let allSubs: any[] = [];
+  let subFrom = 0;
+  const subPageSize = 1000;
+  let subHasMore = true;
+  while (subHasMore) {
+    let query = client
+      .from('wellen_submissions')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .range(subFrom, subFrom + subPageSize - 1);
 
-  if (filters?.dateRange?.start) {
-    query = query.gte('created_at', filters.dateRange.start);
-  }
-  if (filters?.dateRange?.end) {
-    query = query.lte('created_at', filters.dateRange.end + 'T23:59:59');
-  }
-  if (filters?.glIds && filters.glIds.length > 0) {
-    query = query.in('gebietsleiter_id', filters.glIds);
-  }
-  if (filters?.welleIds && filters.welleIds.length > 0) {
-    query = query.in('welle_id', filters.welleIds);
-  }
+    if (filters?.dateRange?.start) {
+      query = query.gte('created_at', filters.dateRange.start);
+    }
+    if (filters?.dateRange?.end) {
+      query = query.lte('created_at', filters.dateRange.end + 'T23:59:59');
+    }
+    if (filters?.glIds && filters.glIds.length > 0) {
+      query = query.in('gebietsleiter_id', filters.glIds);
+    }
+    if (filters?.welleIds && filters.welleIds.length > 0) {
+      query = query.in('welle_id', filters.welleIds);
+    }
 
-  const { data: submissions, error } = await query;
-  if (error) throw error;
-  if (!submissions || submissions.length === 0) return [];
+    const { data, error } = await query;
+    if (error) throw error;
+    if (data && data.length > 0) {
+      allSubs = [...allSubs, ...data];
+      subFrom += subPageSize;
+      subHasMore = data.length === subPageSize;
+    } else {
+      subHasMore = false;
+    }
+  }
+  const submissions = allSubs;
+  if (submissions.length === 0) return [];
 
   // Fetch related data
   const welleIds = [...new Set(submissions.map(s => s.welle_id))];
@@ -347,24 +362,39 @@ export async function transformMarkets(
 ): Promise<ExportRow[]> {
   const { columns, filters } = options;
 
-  let query = client
-    .from('markets')
-    .select('*')
-    .order('name', { ascending: true });
+  let allMkts: any[] = [];
+  let mktFrom = 0;
+  const mktPageSize = 1000;
+  let mktHasMore = true;
+  while (mktHasMore) {
+    let query = client
+      .from('markets')
+      .select('*')
+      .order('name', { ascending: true })
+      .range(mktFrom, mktFrom + mktPageSize - 1);
 
-  if (filters?.dateRange?.start) {
-    query = query.gte('created_at', filters.dateRange.start);
-  }
-  if (filters?.dateRange?.end) {
-    query = query.lte('created_at', filters.dateRange.end + 'T23:59:59');
-  }
-  if (filters?.glIds && filters.glIds.length > 0) {
-    query = query.in('gebietsleiter_id', filters.glIds);
-  }
+    if (filters?.dateRange?.start) {
+      query = query.gte('created_at', filters.dateRange.start);
+    }
+    if (filters?.dateRange?.end) {
+      query = query.lte('created_at', filters.dateRange.end + 'T23:59:59');
+    }
+    if (filters?.glIds && filters.glIds.length > 0) {
+      query = query.in('gebietsleiter_id', filters.glIds);
+    }
 
-  const { data: markets, error } = await query;
-  if (error) throw error;
-  if (!markets || markets.length === 0) return [];
+    const { data, error } = await query;
+    if (error) throw error;
+    if (data && data.length > 0) {
+      allMkts = [...allMkts, ...data];
+      mktFrom += mktPageSize;
+      mktHasMore = data.length === mktPageSize;
+    } else {
+      mktHasMore = false;
+    }
+  }
+  const markets = allMkts;
+  if (markets.length === 0) return [];
 
   const rows: ExportRow[] = markets.map(market => {
     const row: ExportRow = {
@@ -410,24 +440,39 @@ export async function transformVorverkaufEntries(
 ): Promise<ExportRow[]> {
   const { columns, filters } = options;
 
-  let query = client
-    .from('vorverkauf_entries')
-    .select('*')
-    .order('created_at', { ascending: false });
+  let allEntries: any[] = [];
+  let entFrom = 0;
+  const entPageSize = 1000;
+  let entHasMore = true;
+  while (entHasMore) {
+    let query = client
+      .from('vorverkauf_entries')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .range(entFrom, entFrom + entPageSize - 1);
 
-  if (filters?.dateRange?.start) {
-    query = query.gte('created_at', filters.dateRange.start);
-  }
-  if (filters?.dateRange?.end) {
-    query = query.lte('created_at', filters.dateRange.end + 'T23:59:59');
-  }
-  if (filters?.glIds && filters.glIds.length > 0) {
-    query = query.in('gebietsleiter_id', filters.glIds);
-  }
+    if (filters?.dateRange?.start) {
+      query = query.gte('created_at', filters.dateRange.start);
+    }
+    if (filters?.dateRange?.end) {
+      query = query.lte('created_at', filters.dateRange.end + 'T23:59:59');
+    }
+    if (filters?.glIds && filters.glIds.length > 0) {
+      query = query.in('gebietsleiter_id', filters.glIds);
+    }
 
-  const { data: entries, error } = await query;
-  if (error) throw error;
-  if (!entries || entries.length === 0) return [];
+    const { data, error } = await query;
+    if (error) throw error;
+    if (data && data.length > 0) {
+      allEntries = [...allEntries, ...data];
+      entFrom += entPageSize;
+      entHasMore = data.length === entPageSize;
+    } else {
+      entHasMore = false;
+    }
+  }
+  const entries = allEntries;
+  if (entries.length === 0) return [];
 
   // Fetch related data
   const glIds = [...new Set(entries.map(e => e.gebietsleiter_id))];
@@ -576,23 +621,50 @@ export async function transformGebietsleiter(
 
   const glIds = gls.map(gl => gl.id);
 
-  // Fetch market visits for each GL
-  const { data: markets } = await client
-    .from('markets')
-    .select('gebietsleiter_id, current_visits')
-    .in('gebietsleiter_id', glIds);
+  // Fetch market visits for each GL (paginated to avoid Supabase 1000-row cap)
+  let allMarkets: any[] = [];
+  let from = 0;
+  const pageSize = 1000;
+  let hasMore = true;
+  while (hasMore) {
+    const { data } = await client
+      .from('markets')
+      .select('gebietsleiter_id, current_visits')
+      .in('gebietsleiter_id', glIds)
+      .range(from, from + pageSize - 1);
+    if (data && data.length > 0) {
+      allMarkets = [...allMarkets, ...data];
+      from += pageSize;
+      hasMore = data.length === pageSize;
+    } else {
+      hasMore = false;
+    }
+  }
 
   const visitCounts = new Map<string, number>();
-  (markets || []).forEach(m => {
+  allMarkets.forEach(m => {
     const current = visitCounts.get(m.gebietsleiter_id) || 0;
     visitCounts.set(m.gebietsleiter_id, current + (m.current_visits || 0));
   });
 
-  // Fetch submissions for performance metrics
-  const { data: submissions } = await client
-    .from('wellen_submissions')
-    .select('gebietsleiter_id, item_type, quantity, value_per_unit')
-    .in('gebietsleiter_id', glIds);
+  // Fetch submissions for performance metrics (paginated)
+  let allSubmissions: any[] = [];
+  from = 0;
+  hasMore = true;
+  while (hasMore) {
+    const { data } = await client
+      .from('wellen_submissions')
+      .select('gebietsleiter_id, item_type, quantity, value_per_unit')
+      .in('gebietsleiter_id', glIds)
+      .range(from, from + pageSize - 1);
+    if (data && data.length > 0) {
+      allSubmissions = [...allSubmissions, ...data];
+      from += pageSize;
+      hasMore = data.length === pageSize;
+    } else {
+      hasMore = false;
+    }
+  }
 
   // Calculate metrics per GL
   const displayCounts = new Map<string, number>();
@@ -600,7 +672,7 @@ export async function transformGebietsleiter(
   const paletteValues = new Map<string, number>();
   const schutteValues = new Map<string, number>();
 
-  (submissions || []).forEach(sub => {
+  allSubmissions.forEach(sub => {
     switch (sub.item_type) {
       case 'display':
         const dCount = displayCounts.get(sub.gebietsleiter_id) || 0;
