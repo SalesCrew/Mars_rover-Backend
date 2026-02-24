@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { supabase, createFreshClient } from '../config/supabase';
 import bcrypt from 'bcrypt';
+import { aggregateSubmissions } from './wellen';
 
 const router = Router();
 
@@ -402,14 +403,15 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
     let glYearTotal = 0;
     
     if (valueWelleIds.length > 0) {
-      const { data: glProgress } = await freshClient
-        .from('wellen_gl_progress')
-        .select('current_number, item_type, item_id, value_per_unit, welle_id')
+      const { data: rawGlSubs } = await freshClient
+        .from('wellen_submissions')
+        .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
         .eq('gebietsleiter_id', id)
         .in('welle_id', valueWelleIds)
         .gte('created_at', yearStart);
 
-      if (glProgress && glProgress.length > 0) {
+      const glProgress = aggregateSubmissions(rawGlSubs || []);
+      if (glProgress.length > 0) {
         // Get item values for each type
         const displayIds = [...new Set(glProgress.filter(p => p.item_type === 'display').map(p => p.item_id))];
         const kartonwareIds = [...new Set(glProgress.filter(p => p.item_type === 'kartonware').map(p => p.item_id))];
@@ -451,13 +453,14 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
     let agencyTotal = 0;
     
     if (valueWelleIds.length > 0) {
-      const { data: allProgress } = await freshClient
-        .from('wellen_gl_progress')
-        .select('current_number, item_type, item_id, value_per_unit, gebietsleiter_id')
+      const { data: rawAllSubs } = await freshClient
+        .from('wellen_submissions')
+        .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
         .in('welle_id', valueWelleIds)
         .gte('created_at', yearStart);
 
-      if (allProgress && allProgress.length > 0) {
+      const allProgress = aggregateSubmissions(rawAllSubs || []);
+      if (allProgress.length > 0) {
         // Filter out test GL contributions from agency total
         const realProgress = allProgress.filter(p => realGLIds.has(p.gebietsleiter_id));
         
@@ -831,13 +834,13 @@ router.get('/:id/profile-stats', async (req: Request, res: Response) => {
     const monthChangePercent = prevMonthVisits > 0 ? Math.round(((monthlyVisits - prevMonthVisits) / prevMonthVisits) * 100) : 0;
 
     // 4. Get Vorbesteller success rate (markets with vorbesteller / total markets)
-    const { data: vorbestellerProgress } = await freshClient
-      .from('wellen_gl_progress')
-      .select('welle_id, item_type')
+    const { data: vorbestellerSubs } = await freshClient
+      .from('wellen_submissions')
+      .select('welle_id, item_type, quantity')
       .eq('gebietsleiter_id', id)
-      .gt('current_number', 0);
+      .gt('quantity', 0);
 
-    const wellenWithProgress = new Set((vorbestellerProgress || []).map(p => p.welle_id));
+    const wellenWithProgress = new Set((vorbestellerSubs || []).map(p => p.welle_id));
     
     // Get total markets in wellen for this GL
     let totalWellenMarkets = 0;

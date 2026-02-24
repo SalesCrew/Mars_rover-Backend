@@ -866,7 +866,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
 /**
  * POST /api/markets/sync-visits
  * Recalculate all market visits from historical DB data
- * Sources: vorverkauf_submissions, vorverkauf_entries, wellen_gl_progress
+ * Sources: vorverkauf_submissions, vorverkauf_entries, wellen_submissions
  * Same market + same day = 1 visit
  */
 router.post('/sync-visits', async (_req: Request, res: Response) => {

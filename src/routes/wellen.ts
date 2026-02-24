@@ -5,6 +5,41 @@ import * as XLSX from 'xlsx';
 const router = Router();
 
 // ============================================================================
+// SUBMISSION AGGREGATION HELPER
+// ============================================================================
+
+export function aggregateSubmissions(submissions: any[]): Array<{
+  welle_id: string;
+  gebietsleiter_id: string;
+  item_type: string;
+  item_id: string;
+  current_number: number;
+  value_per_unit: number | null;
+  market_id: string | null;
+}> {
+  const map = new Map<string, any>();
+  for (const sub of submissions) {
+    const key = `${sub.welle_id}:${sub.gebietsleiter_id}:${sub.item_type}:${sub.item_id}`;
+    if (!map.has(key)) {
+      map.set(key, {
+        welle_id: sub.welle_id,
+        gebietsleiter_id: sub.gebietsleiter_id,
+        item_type: sub.item_type,
+        item_id: sub.item_id,
+        current_number: 0,
+        value_per_unit: null,
+        market_id: null
+      });
+    }
+    const entry = map.get(key)!;
+    entry.current_number += sub.quantity || 0;
+    if (sub.value_per_unit != null) entry.value_per_unit = sub.value_per_unit;
+    if (sub.market_id) entry.market_id = sub.market_id;
+  }
+  return Array.from(map.values());
+}
+
+// ============================================================================
 // KW (Calendar Week) HELPER FUNCTIONS
 // ============================================================================
 
@@ -236,34 +271,25 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         let displayProgress: any[] = [];
         let kartonwareProgress: any[] = [];
         
-        if (!itemType || itemType === 'displays') {
+        {
           let query = freshClient
-            .from('wellen_gl_progress')
-            .select('current_number, item_id, gebietsleiter_id')
-            .eq('item_type', 'display')
-            .in('welle_id', welleIds);
+            .from('wellen_submissions')
+            .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
+            .in('welle_id', welleIds)
+            .in('item_type', ['display', 'kartonware']);
           
           if (glFilter.length > 0) {
             query = query.in('gebietsleiter_id', glFilter);
           }
           
           const { data } = await query;
-          displayProgress = data || [];
-        }
-        
-        if (!itemType || itemType === 'kartonware') {
-          let query = freshClient
-            .from('wellen_gl_progress')
-            .select('current_number, item_id, gebietsleiter_id')
-            .eq('item_type', 'kartonware')
-            .in('welle_id', welleIds);
-          
-          if (glFilter.length > 0) {
-            query = query.in('gebietsleiter_id', glFilter);
+          const aggregated = aggregateSubmissions(data || []);
+          if (!itemType || itemType === 'displays') {
+            displayProgress = aggregated.filter(p => p.item_type === 'display');
           }
-          
-          const { data } = await query;
-          kartonwareProgress = data || [];
+          if (!itemType || itemType === 'kartonware') {
+            kartonwareProgress = aggregated.filter(p => p.item_type === 'kartonware');
+          }
         }
         
         // Calculate totals
@@ -404,17 +430,13 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         let displayProgress: any[] = [];
         let kartonwareProgress: any[] = [];
         
-        if (!itemType || itemType === 'displays') {
-          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id').eq('item_type', 'display').in('welle_id', welleIds);
+        {
+          let query = freshClient.from('wellen_submissions').select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit').in('welle_id', welleIds).in('item_type', ['display', 'kartonware']);
           if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
           const { data } = await query;
-          displayProgress = data || [];
-        }
-        if (!itemType || itemType === 'kartonware') {
-          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id').eq('item_type', 'kartonware').in('welle_id', welleIds);
-          if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
-          const { data } = await query;
-          kartonwareProgress = data || [];
+          const aggregated = aggregateSubmissions(data || []);
+          if (!itemType || itemType === 'displays') displayProgress = aggregated.filter(p => p.item_type === 'display');
+          if (!itemType || itemType === 'kartonware') kartonwareProgress = aggregated.filter(p => p.item_type === 'kartonware');
         }
         
         const totalTarget = displays.reduce((sum, d) => sum + d.target_number, 0) + kartonware.reduce((sum, k) => sum + k.target_number, 0);
@@ -593,33 +615,15 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         let paletteProgressZoo: any[] = [];
         let schutteProgressZoo: any[] = [];
         
-        if (!itemType || itemType === 'displays') {
-          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id, value_per_unit').eq('item_type', 'display').in('welle_id', welleIds);
-          if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
-          const { data } = await query;
-          displayProgress = data || [];
-        }
-        if (!itemType || itemType === 'kartonware') {
-          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id, value_per_unit').eq('item_type', 'kartonware').in('welle_id', welleIds);
-          if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
-          const { data } = await query;
-          kartonwareProgress = data || [];
-        }
-        
-        // Get palette progress (always include for value-based chains)
         {
-          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id, value_per_unit, welle_id').eq('item_type', 'palette').in('welle_id', welleIds);
+          let query = freshClient.from('wellen_submissions').select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit').in('welle_id', welleIds).in('item_type', ['display', 'kartonware', 'palette', 'schuette']);
           if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
           const { data } = await query;
-          paletteProgressZoo = data || [];
-        }
-        
-        // Get schuette progress (always include for value-based chains)
-        {
-          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id, value_per_unit, welle_id').eq('item_type', 'schuette').in('welle_id', welleIds);
-          if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
-          const { data } = await query;
-          schutteProgressZoo = data || [];
+          const aggregated = aggregateSubmissions(data || []);
+          if (!itemType || itemType === 'displays') displayProgress = aggregated.filter(p => p.item_type === 'display');
+          if (!itemType || itemType === 'kartonware') kartonwareProgress = aggregated.filter(p => p.item_type === 'kartonware');
+          paletteProgressZoo = aggregated.filter(p => p.item_type === 'palette');
+          schutteProgressZoo = aggregated.filter(p => p.item_type === 'schuette');
         }
         
         // Calculate total value (target * item_value)
@@ -825,33 +829,15 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         let paletteProgress: any[] = [];
         let schutteProgress: any[] = [];
         
-        if (!itemType || itemType === 'displays') {
-          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id, value_per_unit').eq('item_type', 'display').in('welle_id', welleIds);
-          if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
-          const { data } = await query;
-          displayProgress = data || [];
-        }
-        if (!itemType || itemType === 'kartonware') {
-          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id, value_per_unit').eq('item_type', 'kartonware').in('welle_id', welleIds);
-          if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
-          const { data } = await query;
-          kartonwareProgress = data || [];
-        }
-        
-        // Get palette progress (always include for value-based chains)
         {
-          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id, value_per_unit, welle_id').eq('item_type', 'palette').in('welle_id', welleIds);
+          let query = freshClient.from('wellen_submissions').select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit').in('welle_id', welleIds).in('item_type', ['display', 'kartonware', 'palette', 'schuette']);
           if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
           const { data } = await query;
-          paletteProgress = data || [];
-        }
-        
-        // Get schuette progress (always include for value-based chains)
-        {
-          let query = freshClient.from('wellen_gl_progress').select('current_number, item_id, gebietsleiter_id, value_per_unit, welle_id').eq('item_type', 'schuette').in('welle_id', welleIds);
-          if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
-          const { data } = await query;
-          schutteProgress = data || [];
+          const aggregated = aggregateSubmissions(data || []);
+          if (!itemType || itemType === 'displays') displayProgress = aggregated.filter(p => p.item_type === 'display');
+          if (!itemType || itemType === 'kartonware') kartonwareProgress = aggregated.filter(p => p.item_type === 'kartonware');
+          paletteProgress = aggregated.filter(p => p.item_type === 'palette');
+          schutteProgress = aggregated.filter(p => p.item_type === 'schuette');
         }
         
         const totalValue = 
@@ -1039,70 +1025,27 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
         // Calculate GL's proportional ratio
         const glGoalRatio = totalWaveMarkets > 0 ? glWaveMarketCount / totalWaveMarkets : 0;
 
-        // Fetch progress (optionally filtered by GL and item type) - use fresh client
+        // Fetch progress from submissions (single source of truth)
+        let progressQuery = freshClient
+          .from('wellen_submissions')
+          .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
+          .eq('welle_id', welle.id);
+        
+        if (glFilter.length > 0) {
+          progressQuery = progressQuery.in('gebietsleiter_id', glFilter);
+        }
+        
+        const { data: rawProgress } = await progressQuery;
+        const allAggregated = aggregateSubmissions(rawProgress || []);
+        
         let progressData: any[] = [];
-        
         if (!itemType || itemType === 'displays') {
-          let query = freshClient
-            .from('wellen_gl_progress')
-            .select('current_number, item_type, item_id, gebietsleiter_id')
-            .eq('welle_id', welle.id)
-            .eq('item_type', 'display');
-          
-          if (glFilter.length > 0) {
-            query = query.in('gebietsleiter_id', glFilter);
-          }
-          
-          const { data } = await query;
-          progressData = [...progressData, ...(data || [])];
+          progressData = [...progressData, ...allAggregated.filter(p => p.item_type === 'display')];
         }
-        
         if (!itemType || itemType === 'kartonware') {
-          let query = freshClient
-            .from('wellen_gl_progress')
-            .select('current_number, item_type, item_id, gebietsleiter_id')
-            .eq('welle_id', welle.id)
-            .eq('item_type', 'kartonware');
-          
-          if (glFilter.length > 0) {
-            query = query.in('gebietsleiter_id', glFilter);
-          }
-          
-          const { data } = await query;
-          progressData = [...progressData, ...(data || [])];
+          progressData = [...progressData, ...allAggregated.filter(p => p.item_type === 'kartonware')];
         }
-
-        // Fetch palette and schuette progress for value calculation
-        {
-          let query = freshClient
-            .from('wellen_gl_progress')
-            .select('current_number, item_type, item_id, gebietsleiter_id, value_per_unit')
-            .eq('welle_id', welle.id)
-            .in('item_type', ['palette', 'schuette']);
-          
-          if (glFilter.length > 0) {
-            query = query.in('gebietsleiter_id', glFilter);
-          }
-          
-          const { data } = await query;
-          progressData = [...progressData, ...(data || [])];
-        }
-
-        // Fetch einzelprodukt progress
-        {
-          let query = freshClient
-            .from('wellen_gl_progress')
-            .select('current_number, item_type, item_id, gebietsleiter_id, value_per_unit')
-            .eq('welle_id', welle.id)
-            .eq('item_type', 'einzelprodukt');
-          
-          if (glFilter.length > 0) {
-            query = query.in('gebietsleiter_id', glFilter);
-          }
-          
-          const { data } = await query;
-          progressData = [...progressData, ...(data || [])];
-        }
+        progressData = [...progressData, ...allAggregated.filter(p => ['palette', 'schuette', 'einzelprodukt'].includes(p.item_type))];
 
         // Calculate display aggregates
         let displayCount = 0;
@@ -1367,13 +1310,14 @@ router.get('/', async (req: Request, res: Response) => {
           glsWithMarketsInWave = uniqueGLsInWave.size;
         }
 
-        // Calculate progress aggregates
-        const { data: progressData } = await freshClient
-          .from('wellen_gl_progress')
-          .select('current_number, item_type, item_id, gebietsleiter_id, value_per_unit')
+        // Calculate progress aggregates from submissions
+        const { data: rawProgressData } = await freshClient
+          .from('wellen_submissions')
+          .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
           .eq('welle_id', welle.id);
 
-        const uniqueGLs = new Set((progressData || []).map(p => p.gebietsleiter_id)).size;
+        const progressData = aggregateSubmissions(rawProgressData || []);
+        const uniqueGLs = new Set(progressData.map(p => p.gebietsleiter_id)).size;
 
         // Use stored types if available, otherwise derive from what items exist (backward compatibility)
         let types: ('display' | 'kartonware' | 'palette' | 'schuette' | 'einzelprodukt')[] = [];
@@ -1692,12 +1636,13 @@ router.get('/:id', async (req: Request, res: Response) => {
       .select('market_id')
       .eq('welle_id', id);
 
-    const { data: progressData } = await freshClient
-      .from('wellen_gl_progress')
-      .select('current_number, item_type, item_id, gebietsleiter_id, value_per_unit')
+    const { data: rawProgressSubs } = await freshClient
+      .from('wellen_submissions')
+      .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
       .eq('welle_id', id);
 
-    const uniqueGLs = new Set((progressData || []).map(p => p.gebietsleiter_id)).size;
+    const progressData = aggregateSubmissions(rawProgressSubs || []);
+    const uniqueGLs = new Set(progressData.map(p => p.gebietsleiter_id)).size;
 
     // Derive types based on what items exist
     const types: ('display' | 'kartonware' | 'einzelprodukt')[] = [];
@@ -2525,81 +2470,29 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: gebietsleiter_id, items' });
     }
 
-    // Fetch existing progress for this GL and welle
-    const { data: existingProgress, error: fetchError } = await freshClient
-      .from('wellen_gl_progress')
-      .select('item_type, item_id, current_number')
-      .eq('welle_id', welleId)
-      .eq('gebietsleiter_id', gebietsleiter_id);
-
-    // Create a map of existing progress for quick lookup
-    const existingMap = new Map<string, number>();
-    for (const p of (existingProgress || [])) {
-      const key = `${p.item_type}:${p.item_id}`;
-      existingMap.set(key, p.current_number || 0);
-    }
-
-    // Build upsert entries with cumulative values
-    const progressEntries = items.map((item: any) => {
-      const key = `${item.item_type}:${item.item_id}`;
-      const existingValue = existingMap.get(key) || 0;
-      const newTotal = existingValue + item.current_number;
-      
+    // Insert submissions (single source of truth)
+    const submissionLogs = items.map((item: any) => {
       const entry: any = {
         welle_id: welleId,
         gebietsleiter_id,
-        market_id: market_id || null, // Save market_id for tracking
+        market_id: market_id || null,
         item_type: item.item_type,
         item_id: item.item_id,
-        current_number: newTotal
+        quantity: item.current_number,
+        value_per_unit: item.value_per_unit || null
       };
-      
-      // Store value_per_unit for palette/schuette products
-      if ((item.item_type === 'palette' || item.item_type === 'schuette') && item.value_per_unit !== undefined) {
-        entry.value_per_unit = item.value_per_unit;
+      if (timestamp) {
+        entry.created_at = timestamp;
       }
-      
       return entry;
     });
 
     const { error } = await freshClient
-      .from('wellen_gl_progress')
-      .upsert(progressEntries, {
-        onConflict: 'welle_id,gebietsleiter_id,item_type,item_id'
-      });
+      .from('wellen_submissions')
+      .insert(submissionLogs);
 
     if (error) throw error;
-
-    // Log each submission separately for history/audit (each action is a new row)
-    if (market_id) {
-      const submissionLogs = items.map((item: any) => {
-        const entry: any = {
-          welle_id: welleId,
-          gebietsleiter_id,
-          market_id,
-          item_type: item.item_type,
-          item_id: item.item_id,
-          quantity: item.current_number,
-          value_per_unit: item.value_per_unit || null
-        };
-        // Use provided timestamp for created_at (for history page edits)
-        if (timestamp) {
-          entry.created_at = timestamp;
-        }
-        return entry;
-      });
-
-      const { error: logError } = await freshClient
-        .from('wellen_submissions')
-        .insert(submissionLogs);
-
-      if (logError) {
-        console.warn('⚠️ Could not log submissions:', logError.message);
-        // Don't fail the whole request if logging fails
-      } else {
-        console.log(`📝 Logged ${submissionLogs.length} submissions for market ${market_id}`);
-      }
-    }
+    console.log(`📝 Logged ${submissionLogs.length} submissions for market ${market_id || 'N/A'}`);
 
     // Update market visit count (if market_id is provided and not skipping)
     if (market_id && !skipVisitUpdate) {
@@ -2657,63 +2550,22 @@ router.post('/:id/progress', async (req: Request, res: Response) => {
     
     const freshClient = createFreshClient();
 
-    // Fetch existing progress for this specific item
-    const { data: existing } = await freshClient
-      .from('wellen_gl_progress')
-      .select('current_number')
-      .eq('welle_id', welleId)
-      .eq('gebietsleiter_id', gebietsleiter_id)
-      .eq('item_type', item_type)
-      .eq('item_id', item_id)
-      .single();
-
-    const existingValue = existing?.current_number || 0;
-    const newTotal = existingValue + current_number;
-
-    // Build upsert entry
-    const progressEntry: any = {
-      welle_id: welleId,
-      gebietsleiter_id,
-      market_id: market_id || null,
-      item_type,
-      item_id,
-      current_number: newTotal
-    };
-    
-    // Store value_per_unit for palette/schuette products
-    if ((item_type === 'palette' || item_type === 'schuette') && value_per_unit !== undefined) {
-      progressEntry.value_per_unit = value_per_unit;
-    }
-
-    // Upsert with cumulative value
+    // Insert submission (single source of truth)
     const { error } = await freshClient
-      .from('wellen_gl_progress')
-      .upsert(progressEntry, {
-        onConflict: 'welle_id,gebietsleiter_id,item_type,item_id'
+      .from('wellen_submissions')
+      .insert({
+        welle_id: welleId,
+        gebietsleiter_id,
+        market_id: market_id || null,
+        item_type,
+        item_id,
+        quantity: current_number,
+        value_per_unit: value_per_unit || null
       });
 
     if (error) throw error;
 
-    // Also log to wellen_submissions for consistency with batch endpoint
-    if (market_id) {
-      const { error: logError } = await freshClient
-        .from('wellen_submissions')
-        .insert({
-          welle_id: welleId,
-          gebietsleiter_id,
-          market_id,
-          item_type,
-          item_id,
-          quantity: current_number,
-          value_per_unit: value_per_unit || null
-        });
-
-      if (logError) {
-        console.warn('⚠️ Could not log submission:', logError.message);
-      }
-    }
-
-    console.log(`✅ Updated progress entry (cumulative: ${existingValue} + ${current_number} = ${newTotal})`);
+    console.log(`✅ Inserted submission for welle ${welleId}`);
     res.json({ message: 'Progress updated successfully' });
   } catch (error: any) {
     console.error('❌ Error updating progress:', error);
@@ -2731,16 +2583,17 @@ router.get('/:id/progress/:glId', async (req: Request, res: Response) => {
     
     const freshClient = createFreshClient();
 
-    const { data, error } = await freshClient
-      .from('wellen_gl_progress')
-      .select('*')
+    const { data: rawSubs, error } = await freshClient
+      .from('wellen_submissions')
+      .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, market_id')
       .eq('welle_id', welleId)
       .eq('gebietsleiter_id', glId);
 
     if (error) throw error;
 
-    console.log(`✅ Fetched ${data?.length || 0} progress entries`);
-    res.json(data || []);
+    const data = aggregateSubmissions(rawSubs || []);
+    console.log(`✅ Fetched ${data.length} progress entries`);
+    res.json(data);
   } catch (error: any) {
     console.error('❌ Error fetching progress:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
@@ -3234,12 +3087,14 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
       hagebau: ['Hagebau']
     };
 
-    // Get all progress entries for this GL
-    const { data: allProgress, error: progressError } = await freshClient
-      .from('wellen_gl_progress')
-      .select('*')
+    // Get all submission entries for this GL (raw - need per-entry created_at for KW grouping)
+    const { data: rawAllSubs, error: progressError } = await freshClient
+      .from('wellen_submissions')
+      .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, market_id, created_at')
       .eq('gebietsleiter_id', glId)
       .order('created_at', { ascending: true });
+    
+    const allProgress = (rawAllSubs || []).map(s => ({ ...s, current_number: s.quantity }));
 
     if (progressError) throw progressError;
 
@@ -4139,25 +3994,6 @@ router.put('/submissions/:submissionId', async (req: Request, res: Response) => 
       return res.status(500).json({ error: updateError.message });
     }
 
-    // Update the aggregated progress entry if it exists
-    if (quantityDiff !== 0) {
-      const { data: progressEntry } = await freshClient
-        .from('wellen_gl_progress')
-        .select('id, current_number')
-        .eq('welle_id', submission.welle_id)
-        .eq('gebietsleiter_id', submission.gebietsleiter_id)
-        .eq('item_type', submission.item_type)
-        .eq('item_id', submission.item_id)
-        .single();
-
-      if (progressEntry) {
-        await freshClient
-          .from('wellen_gl_progress')
-          .update({ current_number: Math.max(0, progressEntry.current_number + quantityDiff) })
-          .eq('id', progressEntry.id);
-      }
-    }
-
     res.json({ message: 'Submission updated', submissionId, newQuantity: quantity });
   } catch (error) {
     console.error('Error updating submission:', error);
@@ -4195,32 +4031,6 @@ router.delete('/submissions/:submissionId', async (req: Request, res: Response) 
       return res.status(500).json({ error: deleteError.message });
     }
 
-    // Update the aggregated progress entry
-    const { data: progressEntry } = await freshClient
-      .from('wellen_gl_progress')
-      .select('id, current_number')
-      .eq('welle_id', submission.welle_id)
-      .eq('gebietsleiter_id', submission.gebietsleiter_id)
-      .eq('item_type', submission.item_type)
-      .eq('item_id', submission.item_id)
-      .single();
-
-    if (progressEntry) {
-      const newNumber = Math.max(0, progressEntry.current_number - submission.quantity);
-      if (newNumber === 0) {
-        // Delete the progress entry if count goes to 0
-        await freshClient
-          .from('wellen_gl_progress')
-          .delete()
-          .eq('id', progressEntry.id);
-      } else {
-        await freshClient
-          .from('wellen_gl_progress')
-          .update({ current_number: newNumber })
-          .eq('id', progressEntry.id);
-      }
-    }
-
     res.json({ message: 'Submission deleted', submissionId });
   } catch (error) {
     console.error('Error deleting submission:', error);
@@ -4229,121 +4039,81 @@ router.delete('/submissions/:submissionId', async (req: Request, res: Response) 
 });
 
 // ============================================================================
-// TEMPORARY: EXPORT WELLEN_GL_PROGRESS TO EXCEL
+// EXPORT SUBMISSIONS TO EXCEL
 // ============================================================================
 router.get('/export/progress', async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     
-    // Get all progress entries
-    const { data: progress, error: progressError } = await freshClient
-      .from('wellen_gl_progress')
+    const { data: submissions, error: subsError } = await freshClient
+      .from('wellen_submissions')
       .select('*')
-      .order('updated_at', { ascending: false });
+      .order('created_at', { ascending: false });
     
-    if (progressError) throw progressError;
+    if (subsError) throw subsError;
     
-    if (!progress || progress.length === 0) {
-      return res.status(404).json({ error: 'No progress entries found' });
+    if (!submissions || submissions.length === 0) {
+      return res.status(404).json({ error: 'No submissions found' });
     }
     
-    // Collect unique IDs
-    const welleIds = [...new Set(progress.map(p => p.welle_id).filter(Boolean))];
-    const glIds = [...new Set(progress.map(p => p.gebietsleiter_id).filter(Boolean))];
+    const welleIds = [...new Set(submissions.map(p => p.welle_id).filter(Boolean))];
+    const glIds = [...new Set(submissions.map(p => p.gebietsleiter_id).filter(Boolean))];
     
-    // Fetch wellen names
-    const { data: wellen } = await freshClient
-      .from('wellen')
-      .select('id, name')
-      .in('id', welleIds);
+    const { data: wellen } = await freshClient.from('wellen').select('id, name').in('id', welleIds);
     const welleMap = new Map((wellen || []).map(w => [w.id, w.name]));
     
-    // Fetch GL names
-    const { data: gls } = await freshClient
-      .from('gebietsleiter')
-      .select('id, name')
-      .in('id', glIds);
+    const { data: gls } = await freshClient.from('gebietsleiter').select('id, name').in('id', glIds);
     const glMap = new Map((gls || []).map(g => [g.id, g.name]));
     
-    // Fetch item names (products, displays, palettes, schuetten)
-    const itemIds = [...new Set(progress.map(p => p.item_id).filter(Boolean))];
+    const itemIds = [...new Set(submissions.map(p => p.item_id).filter(Boolean))];
     
-    // Try to fetch from various product tables
-    const { data: wellenDisplays } = await freshClient
-      .from('wellen_displays')
-      .select('id, name')
-      .in('id', itemIds);
+    const [wellenDisplays, wellenPaletten, wellenSchuetten, wellenKartonware] = await Promise.all([
+      freshClient.from('wellen_displays').select('id, name').in('id', itemIds),
+      freshClient.from('wellen_paletten').select('id, name').in('id', itemIds),
+      freshClient.from('wellen_schuetten').select('id, name').in('id', itemIds),
+      freshClient.from('wellen_kartonware').select('id, name').in('id', itemIds)
+    ]);
     
-    const { data: wellenPaletten } = await freshClient
-      .from('wellen_paletten')
-      .select('id, name')
-      .in('id', itemIds);
-    
-    const { data: wellenSchuetten } = await freshClient
-      .from('wellen_schuetten')
-      .select('id, name')
-      .in('id', itemIds);
-    
-    const { data: wellenKartonware } = await freshClient
-      .from('wellen_kartonware')
-      .select('id, name')
-      .in('id', itemIds);
-    
-    // Build item name map
     const itemMap = new Map<string, string>();
-    (wellenDisplays || []).forEach(d => itemMap.set(d.id, d.name));
-    (wellenPaletten || []).forEach(p => itemMap.set(p.id, p.name));
-    (wellenSchuetten || []).forEach(s => itemMap.set(s.id, s.name));
-    (wellenKartonware || []).forEach(k => itemMap.set(k.id, k.name));
+    (wellenDisplays.data || []).forEach(d => itemMap.set(d.id, d.name));
+    (wellenPaletten.data || []).forEach(p => itemMap.set(p.id, p.name));
+    (wellenSchuetten.data || []).forEach(s => itemMap.set(s.id, s.name));
+    (wellenKartonware.data || []).forEach(k => itemMap.set(k.id, k.name));
     
-    // Transform progress to readable format
-    const excelData = progress.map(p => ({
-      'ID': p.id,
-      'Welle ID': p.welle_id,
-      'Welle Name': welleMap.get(p.welle_id) || p.welle_id,
-      'Gebietsleiter ID': p.gebietsleiter_id,
-      'Gebietsleiter Name': glMap.get(p.gebietsleiter_id) || p.gebietsleiter_id,
-      'Item Type': p.item_type,
-      'Item ID': p.item_id,
-      'Item Name': itemMap.get(p.item_id) || p.item_id,
-      'Current Number': p.current_number,
-      'Value Per Unit': p.value_per_unit,
-      'Created At': p.created_at,
-      'Updated At': p.updated_at
+    const excelData = submissions.map(s => ({
+      'ID': s.id,
+      'Welle ID': s.welle_id,
+      'Welle Name': welleMap.get(s.welle_id) || s.welle_id,
+      'Gebietsleiter ID': s.gebietsleiter_id,
+      'Gebietsleiter Name': glMap.get(s.gebietsleiter_id) || s.gebietsleiter_id,
+      'Market ID': s.market_id,
+      'Item Type': s.item_type,
+      'Item ID': s.item_id,
+      'Item Name': itemMap.get(s.item_id) || s.item_id,
+      'Quantity': s.quantity,
+      'Value Per Unit': s.value_per_unit,
+      'Created At': s.created_at
     }));
     
-    // Create workbook and worksheet
     const ws = XLSX.utils.json_to_sheet(excelData);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Progress');
+    XLSX.utils.book_append_sheet(wb, ws, 'Submissions');
     
-    // Set column widths
     ws['!cols'] = [
-      { wch: 38 }, // ID
-      { wch: 38 }, // Welle ID
-      { wch: 30 }, // Welle Name
-      { wch: 38 }, // GL ID
-      { wch: 25 }, // GL Name
-      { wch: 12 }, // Item Type
-      { wch: 38 }, // Item ID
-      { wch: 40 }, // Item Name
-      { wch: 15 }, // Current Number
-      { wch: 15 }, // Value Per Unit
-      { wch: 25 }, // Created At
-      { wch: 25 }, // Updated At
+      { wch: 38 }, { wch: 38 }, { wch: 30 }, { wch: 38 }, { wch: 25 },
+      { wch: 20 }, { wch: 12 }, { wch: 38 }, { wch: 40 }, { wch: 10 },
+      { wch: 15 }, { wch: 25 }
     ];
     
-    // Generate buffer
     const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
     
-    // Set headers and send file
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename=wellen_gl_progress_export.xlsx');
+    res.setHeader('Content-Disposition', 'attachment; filename=wellen_submissions_export.xlsx');
     res.send(buffer);
     
-    console.log(`📊 Exported ${progress.length} progress entries to Excel`);
+    console.log(`📊 Exported ${submissions.length} submission entries to Excel`);
   } catch (error: any) {
-    console.error('Error exporting progress:', error);
+    console.error('Error exporting submissions:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });

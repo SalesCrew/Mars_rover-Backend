@@ -492,27 +492,6 @@ router.put('/vorbestellung/product/:submissionId', async (req: Request, res: Res
     
     if (error) throw error;
     
-    // Update wellen_gl_progress with the difference
-    if (quantityDiff !== 0 && oldSubmission) {
-      const { data: progress } = await freshClient
-        .from('wellen_gl_progress')
-        .select('id, current_number')
-        .eq('welle_id', oldSubmission.welle_id)
-        .eq('gebietsleiter_id', oldSubmission.gebietsleiter_id)
-        .eq('item_type', oldSubmission.item_type)
-        .eq('item_id', oldSubmission.item_id)
-        .single();
-      
-      if (progress) {
-        const newCount = Math.max(0, (progress.current_number || 0) + quantityDiff);
-        await freshClient
-          .from('wellen_gl_progress')
-          .update({ current_number: newCount, updated_at: new Date().toISOString() })
-          .eq('id', progress.id);
-        console.log(`📊 Updated wellen_gl_progress by ${quantityDiff}, new count: ${newCount}`);
-      }
-    }
-    
     console.log(`✅ Updated product submission ${submissionId}`);
     res.json(data);
   } catch (error: any) {
@@ -570,7 +549,7 @@ router.delete('/:type/:id', async (req: Request, res: Response) => {
       const ids = id.includes(',') ? id.split(',') : [id];
       
       for (const submissionId of ids) {
-        // First get the submission details to update wellen_gl_progress
+        // Get the submission details before deleting
         const { data: submission, error: fetchError } = await freshClient
           .from('wellen_submissions')
           .select('welle_id, gebietsleiter_id, item_type, item_id, quantity')
@@ -593,26 +572,6 @@ router.delete('/:type/:id', async (req: Request, res: Response) => {
           continue;
         }
         
-        // Also decrement the count in wellen_gl_progress
-        if (submission) {
-          const { data: progress } = await freshClient
-            .from('wellen_gl_progress')
-            .select('id, current_number')
-            .eq('welle_id', submission.welle_id)
-            .eq('gebietsleiter_id', submission.gebietsleiter_id)
-            .eq('item_type', submission.item_type)
-            .eq('item_id', submission.item_id)
-            .single();
-          
-          if (progress) {
-            const newCount = Math.max(0, (progress.current_number || 0) - (submission.quantity || 0));
-            await freshClient
-              .from('wellen_gl_progress')
-              .update({ current_number: newCount, updated_at: new Date().toISOString() })
-              .eq('id', progress.id);
-            console.log(`📉 Decremented wellen_gl_progress by ${submission.quantity}, new count: ${newCount}`);
-          }
-        }
       }
       
       console.log(`✅ Deleted ${ids.length} submission(s)`);
