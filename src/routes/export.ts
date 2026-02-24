@@ -2,7 +2,7 @@ import express, { Request, Response } from 'express';
 import ExcelJS from 'exceljs';
 import { createFreshClient } from '../config/supabase';
 import { EXPORT_DATASETS, getColumnDef } from '../config/exportColumns';
-import { transformDataset } from '../utils/exportTransformers';
+import { transformDataset, transformSingleWaveExport } from '../utils/exportTransformers';
 
 const router = express.Router();
 
@@ -38,6 +38,230 @@ router.post('/custom', async (req: Request, res: Response) => {
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'Mars Rover Admin';
     workbook.created = new Date();
+
+    // Handle single wave matrix export
+    if (options?.singleWaveExport && options?.singleWaveId) {
+      console.log('📊 Single wave matrix export for:', options.singleWaveId);
+
+      const result = await transformSingleWaveExport(freshClient, options.singleWaveId);
+      const isValueBased = result.goalType === 'value';
+
+      const PASTEL_COLORS = [
+        'FFD4E4F7', 'FFFDE2D4', 'FFD4F7E4', 'FFF4D4F7', 'FFF7F0D4',
+        'FFD4F7F4', 'FFF7D4D4', 'FFE8D4F7', 'FFD4F0F7', 'FFF7E8D4',
+      ];
+
+      const sheet = workbook.addWorksheet(result.waveName, {
+        views: [{ state: 'frozen', xSplit: 3, ySplit: 3 }]
+      });
+
+      // Row 1: Wave name header
+      const titleRow = sheet.addRow([result.waveName]);
+      titleRow.font = { bold: true, size: 16 };
+      titleRow.height = 28;
+      sheet.mergeCells(1, 1, 1, 3 + result.markets.length + (isValueBased ? 2 : 1));
+
+      // Row 2: spacer
+      sheet.addRow([]);
+
+      // Row 3: Column headers
+      const headers = ['Nr.', 'Produkt', 'Preis/VE'];
+      result.markets.forEach(m => headers.push(m.name));
+      headers.push('Gesamt Menge');
+      if (isValueBased) headers.push('Gesamt Wert');
+
+      const headerRowObj = sheet.addRow(headers);
+      headerRowObj.font = { bold: true, size: 10 };
+      headerRowObj.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFE2E8F0' }
+      };
+      headerRowObj.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      headerRowObj.height = 40;
+
+      // Set column widths
+      sheet.getColumn(1).width = 6;
+      sheet.getColumn(2).width = 35;
+      sheet.getColumn(3).width = 12;
+      for (let i = 0; i < result.markets.length; i++) {
+        sheet.getColumn(4 + i).width = 14;
+      }
+      const gesamtMengeCol = 4 + result.markets.length;
+      const gesamtWertCol = gesamtMengeCol + 1;
+      sheet.getColumn(gesamtMengeCol).width = 14;
+      if (isValueBased) sheet.getColumn(gesamtWertCol).width = 14;
+
+      // Row 4+: Child items / Einzelprodukte
+      let rowNum = 1;
+      result.items.forEach(item => {
+        const rowData: any[] = [rowNum, item.name, item.pricePerUnit || ''];
+
+        let totalQty = 0;
+        let totalValue = 0;
+        result.markets.forEach(m => {
+          const qty = result.matrix[item.id]?.[m.id] || 0;
+          rowData.push(qty || '');
+          totalQty += qty;
+          totalValue += result.valueMatrix[item.id]?.[m.id] || 0;
+        });
+
+        rowData.push(totalQty || '');
+        if (isValueBased) {
+          rowData.push(totalValue);
+        }
+
+        const addedRow = sheet.addRow(rowData);
+
+        // Color coding by parent group
+        if (item.colorGroup >= 0) {
+          const colorArgb = PASTEL_COLORS[item.colorGroup % PASTEL_COLORS.length];
+          addedRow.eachCell((cell) => {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: colorArgb } };
+          });
+        }
+
+        // Format price column
+        const priceCell = addedRow.getCell(3);
+        if (item.pricePerUnit) {
+          priceCell.numFmt = '€#,##0.00';
+        }
+
+        // Format quantity cells as numbers (not empty strings)
+        for (let i = 0; i < result.markets.length; i++) {
+          const cell = addedRow.getCell(4 + i);
+          cell.alignment = { horizontal: 'center' };
+        }
+
+        // Format totals
+        const mengeCell = addedRow.getCell(gesamtMengeCol);
+        mengeCell.font = { bold: true };
+        mengeCell.alignment = { horizontal: 'center' };
+
+        if (isValueBased) {
+          const wertCell = addedRow.getCell(gesamtWertCol);
+          wertCell.font = { bold: true };
+          wertCell.numFmt = '€#,##0.00';
+          wertCell.alignment = { horizontal: 'right' };
+        }
+
+        rowNum++;
+      });
+
+      // Separator row
+      if (result.parentItems.length > 0) {
+        const sepRow = sheet.addRow([]);
+        sepRow.height = 8;
+      }
+
+      // Parent item rows (palette/schuette containers only -- no Gesamt Wert to avoid double-counting)
+      result.parentItems.forEach(parent => {
+        const rowData: any[] = ['', parent.name, ''];
+
+        let totalQty = 0;
+        result.markets.forEach(m => {
+          const qty = result.parentMatrix[parent.id]?.[m.id] || 0;
+          rowData.push(qty || '');
+          totalQty += qty;
+        });
+
+        rowData.push(totalQty || '');
+        if (isValueBased) rowData.push('');
+
+        const addedRow = sheet.addRow(rowData);
+        addedRow.font = { bold: true };
+
+        const colorArgb = PASTEL_COLORS[parent.colorGroup % PASTEL_COLORS.length];
+        addedRow.eachCell((cell) => {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: colorArgb } };
+          cell.alignment = { horizontal: 'center' };
+        });
+
+        addedRow.getCell(2).alignment = { horizontal: 'left' };
+
+        const mengeCell = addedRow.getCell(gesamtMengeCol);
+        mengeCell.font = { bold: true, size: 11 };
+      });
+
+      // Add borders to all data cells
+      const lastRow = sheet.rowCount;
+      for (let r = 3; r <= lastRow; r++) {
+        const row = sheet.getRow(r);
+        const colCount = 3 + result.markets.length + (isValueBased ? 2 : 1);
+        for (let c = 1; c <= colCount; c++) {
+          const cell = row.getCell(c);
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+            bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+            left: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+            right: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+          };
+        }
+      }
+
+      console.log(`✅ Single wave sheet created: ${result.items.length} items × ${result.markets.length} markets`);
+
+      // Still process other selected datasets (if any besides wellen_submissions)
+      const otherDatasets = datasets.filter((id: string) => id !== 'wellen_submissions');
+      for (const datasetId of otherDatasets) {
+        const datasetDef = EXPORT_DATASETS[datasetId];
+        if (!datasetDef) continue;
+        const datasetColumns = columns[datasetId] || [];
+        if (datasetColumns.length === 0) continue;
+
+        const rows = await transformDataset(freshClient, datasetId, {
+          columns: datasetColumns,
+          filters: filters || {},
+        });
+
+        if (rows.length === 0) continue;
+
+        const otherSheet = workbook.addWorksheet(datasetDef.label, {
+          views: [{ state: 'frozen', ySplit: 1 }]
+        });
+
+        const otherHeaders: string[] = [];
+        const otherCols: Partial<ExcelJS.Column>[] = [];
+        datasetColumns.forEach((colId: string) => {
+          const colDef = getColumnDef(datasetId, colId);
+          if (!colDef) return;
+          otherHeaders.push(colDef.label);
+          otherCols.push({ key: colId, width: colDef.width || 15 });
+        });
+        otherSheet.columns = otherCols;
+
+        const otherHeaderRow = otherSheet.addRow(otherHeaders);
+        otherHeaderRow.font = { bold: true, size: 11 };
+        otherHeaderRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+
+        rows.forEach((row: any) => {
+          const rowData = datasetColumns.map((colId: string) => {
+            const value = row[colId];
+            if (value === null || value === undefined || value === '') return '';
+            const colDef = getColumnDef(datasetId, colId);
+            switch (colDef?.type) {
+              case 'currency': return typeof value === 'number' ? value : 0;
+              case 'number': return typeof value === 'number' ? value : parseFloat(value) || 0;
+              case 'datetime': case 'date': return value ? new Date(value) : '';
+              default: return String(value);
+            }
+          });
+          otherSheet.addRow(rowData);
+        });
+      }
+
+      // Skip to file generation
+      if (workbook.worksheets.length === 0) {
+        return res.status(400).json({ error: 'No data to export' });
+      }
+
+      const fileName = options?.fileName || `export_${new Date().toISOString().split('T')[0]}.xlsx`;
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      await workbook.xlsx.write(res);
+      console.log('✅ Single wave Excel export completed');
+      return res.end();
+    }
 
     // Process each dataset
     for (const datasetId of datasets) {

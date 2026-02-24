@@ -1081,9 +1081,30 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
             submissionsQuery = submissionsQuery.in('gebietsleiter_id', glFilter);
           }
           
-          const { data: submissionsData } = await submissionsQuery;
+          // Paginated fetch to avoid 1000-row limit
+          let allSubmissionsData: any[] = [];
+          let subPageFrom = 0;
+          const subPageSize = 1000;
+          let subHasMore = true;
+          while (subHasMore) {
+            let pageQuery = freshClient
+              .from('wellen_submissions')
+              .select('quantity, item_type, item_id, value_per_unit')
+              .eq('welle_id', welle.id);
+            if (glFilter.length > 0) {
+              pageQuery = pageQuery.in('gebietsleiter_id', glFilter);
+            }
+            const { data: pageData } = await pageQuery.range(subPageFrom, subPageFrom + subPageSize - 1);
+            if (pageData && pageData.length > 0) {
+              allSubmissionsData = [...allSubmissionsData, ...pageData];
+              subPageFrom += subPageSize;
+              subHasMore = pageData.length === subPageSize;
+            } else {
+              subHasMore = false;
+            }
+          }
           
-          for (const sub of (submissionsData || [])) {
+          for (const sub of allSubmissionsData) {
             if (sub.item_type === 'display') {
               const display = displays.find(d => d.id === sub.item_id);
               if (display) {

@@ -725,6 +725,350 @@ export async function transformGebietsleiter(
   return rows;
 }
 
+// ============================================================================
+// SINGLE WAVE MATRIX EXPORT
+// ============================================================================
+
+export interface SingleWaveItem {
+  id: string;
+  name: string;
+  type: 'display' | 'kartonware' | 'einzelprodukt' | 'palette_product' | 'schuette_product';
+  pricePerUnit: number;
+  parentId: string | null;
+  parentName: string | null;
+  parentType: string | null;
+  colorGroup: number;
+  isParent: boolean;
+}
+
+export interface SingleWaveResult {
+  waveName: string;
+  goalType: string;
+  items: SingleWaveItem[];
+  parentItems: Array<{ id: string; name: string; type: string; colorGroup: number }>;
+  markets: Array<{ id: string; name: string }>;
+  matrix: Record<string, Record<string, number>>; // itemId -> marketId -> quantity
+  valueMatrix: Record<string, Record<string, number>>; // itemId -> marketId -> total value (from submissions)
+  parentMatrix: Record<string, Record<string, number>>; // parentId -> marketId -> quantity
+}
+
+const PASTEL_COLORS = [
+  'FFD4E4F7', // light blue
+  'FFFDE2D4', // light orange
+  'FFD4F7E4', // light green
+  'FFF4D4F7', // light purple
+  'FFF7F0D4', // light yellow
+  'FFD4F7F4', // light teal
+  'FFF7D4D4', // light red
+  'FFE8D4F7', // light violet
+  'FFD4F0F7', // light cyan
+  'FFF7E8D4', // light peach
+];
+
+export async function transformSingleWaveExport(
+  client: SupabaseClient,
+  welleId: string
+): Promise<SingleWaveResult> {
+  // 1. Fetch wave
+  const { data: welle, error: welleError } = await client
+    .from('wellen')
+    .select('id, name, goal_type')
+    .eq('id', welleId)
+    .single();
+
+  if (welleError || !welle) throw new Error('Welle nicht gefunden');
+
+  // 2. Fetch all item types in parallel
+  const [displaysRes, kartonwareRes, einzelprodukteRes, palettenRes, schuettenRes] = await Promise.all([
+    client.from('wellen_displays').select('id, name, item_value').eq('welle_id', welleId).order('display_order'),
+    client.from('wellen_kartonware').select('id, name, item_value').eq('welle_id', welleId).order('kartonware_order'),
+    client.from('wellen_einzelprodukte').select('id, name, item_value').eq('welle_id', welleId).order('einzelprodukt_order'),
+    client.from('wellen_paletten').select('id, name, size, palette_order').eq('welle_id', welleId).order('palette_order'),
+    client.from('wellen_schuetten').select('id, name, size, schuette_order').eq('welle_id', welleId).order('schuette_order'),
+  ]);
+
+  const displays = displaysRes.data || [];
+  const kartonware = kartonwareRes.data || [];
+  const einzelprodukte = einzelprodukteRes.data || [];
+  const paletten = palettenRes.data || [];
+  const schuetten = schuettenRes.data || [];
+
+  // Fetch palette + schuette products
+  const paletteIds = paletten.map(p => p.id);
+  const schutteIds = schuetten.map(s => s.id);
+
+  const [paletteProdsRes, schutteProdsRes] = await Promise.all([
+    paletteIds.length > 0
+      ? client.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('palette_id', paletteIds).order('product_order')
+      : { data: [] },
+    schutteIds.length > 0
+      ? client.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('schuette_id', schutteIds).order('product_order')
+      : { data: [] },
+  ]);
+
+  const paletteProducts = paletteProdsRes.data || [];
+  const schutteProducts = schutteProdsRes.data || [];
+
+  // 3. Fetch markets in this wave
+  const { data: welleMarketsData } = await client
+    .from('wellen_markets')
+    .select('market_id')
+    .eq('welle_id', welleId);
+
+  const welleMarketIds = (welleMarketsData || []).map(wm => wm.market_id);
+
+  let markets: Array<{ id: string; name: string }> = [];
+  if (welleMarketIds.length > 0) {
+    const { data: marketsData } = await client
+      .from('markets')
+      .select('id, name')
+      .in('id', welleMarketIds)
+      .order('name');
+    markets = (marketsData || []).map(m => ({ id: m.id, name: m.name }));
+  }
+
+  // 4. Fetch all submissions for this wave (paginated) -- include value_per_unit and created_at
+  let allSubs: any[] = [];
+  let subFrom = 0;
+  const pageSize = 1000;
+  let hasMore = true;
+  while (hasMore) {
+    const { data, error } = await client
+      .from('wellen_submissions')
+      .select('item_type, item_id, market_id, quantity, value_per_unit, created_at')
+      .eq('welle_id', welleId)
+      .range(subFrom, subFrom + pageSize - 1);
+    if (error) throw error;
+    if (data && data.length > 0) {
+      allSubs = [...allSubs, ...data];
+      subFrom += pageSize;
+      hasMore = data.length === pageSize;
+    } else {
+      hasMore = false;
+    }
+  }
+
+  // 5. Assign color groups -- one consistent order for both children and parents
+  // Order: paletten first, then schuetten, then displays, then kartonware
+  let colorIdx = 0;
+  const parentColorMap = new Map<string, number>();
+
+  paletten.forEach(p => { parentColorMap.set(p.id, colorIdx); colorIdx++; });
+  schuetten.forEach(s => { parentColorMap.set(s.id, colorIdx); colorIdx++; });
+  displays.forEach(d => { parentColorMap.set(d.id, colorIdx); colorIdx++; });
+  kartonware.forEach(k => { parentColorMap.set(k.id, colorIdx); colorIdx++; });
+
+  // 6. Build items list: children grouped by parent (same order), then standalone einzelprodukte
+  const items: SingleWaveItem[] = [];
+
+  // Palette children -- grouped by palette parent
+  paletten.forEach(pal => {
+    const children = paletteProducts.filter(pp => pp.palette_id === pal.id);
+    children.forEach(pp => {
+      items.push({
+        id: pp.id,
+        name: pp.name,
+        type: 'palette_product',
+        pricePerUnit: pp.value_per_ve || 0,
+        parentId: pp.palette_id,
+        parentName: pal.name,
+        parentType: 'palette',
+        colorGroup: parentColorMap.get(pal.id) ?? -1,
+        isParent: false,
+      });
+    });
+  });
+
+  // Schuette children -- grouped by schuette parent
+  schuetten.forEach(sch => {
+    const children = schutteProducts.filter(sp => sp.schuette_id === sch.id);
+    children.forEach(sp => {
+      items.push({
+        id: sp.id,
+        name: sp.name,
+        type: 'schuette_product',
+        pricePerUnit: sp.value_per_ve || 0,
+        parentId: sp.schuette_id,
+        parentName: sch.name,
+        parentType: 'schuette',
+        colorGroup: parentColorMap.get(sch.id) ?? -1,
+        isParent: false,
+      });
+    });
+  });
+
+  // Displays (standalone, no children -- treated as items with their own color + value)
+  displays.forEach(d => {
+    items.push({
+      id: d.id,
+      name: d.name,
+      type: 'display',
+      pricePerUnit: d.item_value || 0,
+      parentId: null,
+      parentName: null,
+      parentType: null,
+      colorGroup: parentColorMap.get(d.id) ?? -1,
+      isParent: false,
+    });
+  });
+
+  // Kartonware (standalone, no children -- treated as items with their own color + value)
+  kartonware.forEach(k => {
+    items.push({
+      id: k.id,
+      name: k.name,
+      type: 'kartonware',
+      pricePerUnit: k.item_value || 0,
+      parentId: null,
+      parentName: null,
+      parentType: null,
+      colorGroup: parentColorMap.get(k.id) ?? -1,
+      isParent: false,
+    });
+  });
+
+  // Einzelprodukte (standalone, no parent -- no color)
+  einzelprodukte.forEach(ep => {
+    items.push({
+      id: ep.id,
+      name: ep.name,
+      type: 'einzelprodukt',
+      pricePerUnit: ep.item_value || 0,
+      parentId: null,
+      parentName: null,
+      parentType: null,
+      colorGroup: -1,
+      isParent: false,
+    });
+  });
+
+  // Parent items -- only palette/schuette containers (displays/kartonware are already in items)
+  const parentItems: SingleWaveResult['parentItems'] = [];
+
+  paletten.forEach(p => {
+    parentItems.push({ id: p.id, name: p.name, type: 'palette', colorGroup: parentColorMap.get(p.id) ?? -1 });
+  });
+  schuetten.forEach(s => {
+    parentItems.push({ id: s.id, name: s.name, type: 'schuette', colorGroup: parentColorMap.get(s.id) ?? -1 });
+  });
+
+  // 7. Build quantity + value matrices
+  const matrix: Record<string, Record<string, number>> = {};
+  const valueMatrix: Record<string, Record<string, number>> = {}; // itemId -> marketId -> total value
+  const parentMatrix: Record<string, Record<string, number>> = {};
+
+  const paletteProductParentMap = new Map<string, string>();
+  paletteProducts.forEach(pp => paletteProductParentMap.set(pp.id, pp.palette_id));
+  const schutteProductParentMap = new Map<string, string>();
+  schutteProducts.forEach(sp => schutteProductParentMap.set(sp.id, sp.schuette_id));
+
+  // Fallback price map: item_id -> price from definition (used when submission has no value_per_unit)
+  const itemPriceMap = new Map<string, number>();
+  displays.forEach(d => itemPriceMap.set(d.id, d.item_value || 0));
+  kartonware.forEach(k => itemPriceMap.set(k.id, k.item_value || 0));
+  einzelprodukte.forEach(ep => itemPriceMap.set(ep.id, ep.item_value || 0));
+  paletteProducts.forEach(pp => itemPriceMap.set(pp.id, pp.value_per_ve || 0));
+  schutteProducts.forEach(sp => itemPriceMap.set(sp.id, sp.value_per_ve || 0));
+
+  allSubs.forEach(sub => {
+    const { item_type, item_id, market_id, quantity, value_per_unit } = sub;
+
+    let unitPrice = 0;
+    if (item_type === 'display' || item_type === 'kartonware' || item_type === 'einzelprodukt') {
+      unitPrice = itemPriceMap.get(item_id) || 0;
+    } else if (item_type === 'palette' || item_type === 'schuette') {
+      unitPrice = value_per_unit != null && value_per_unit > 0
+        ? value_per_unit
+        : (itemPriceMap.get(item_id) || 0);
+    }
+    const subValue = quantity * unitPrice;
+
+    if (!matrix[item_id]) matrix[item_id] = {};
+    matrix[item_id][market_id] = (matrix[item_id][market_id] || 0) + quantity;
+
+    if (!valueMatrix[item_id]) valueMatrix[item_id] = {};
+    valueMatrix[item_id][market_id] = (valueMatrix[item_id][market_id] || 0) + subValue;
+  });
+
+  // Recover orphaned submissions (products deleted from wave after submissions were made)
+  const allItemIds = new Set(items.map(i => i.id));
+  const orphanedItemIds = new Set<string>();
+  allSubs.forEach(sub => {
+    if (!allItemIds.has(sub.item_id)) orphanedItemIds.add(sub.item_id);
+  });
+
+  if (orphanedItemIds.size > 0) {
+    const orphanIds = Array.from(orphanedItemIds);
+    const [palOrphan, schOrphan, dispOrphan, kartOrphan, epOrphan] = await Promise.all([
+      client.from('wellen_paletten_products').select('id, name, value_per_ve').in('id', orphanIds),
+      client.from('wellen_schuetten_products').select('id, name, value_per_ve').in('id', orphanIds),
+      client.from('wellen_displays').select('id, name, item_value').in('id', orphanIds),
+      client.from('wellen_kartonware').select('id, name, item_value').in('id', orphanIds),
+      client.from('wellen_einzelprodukte').select('id, name, item_value').in('id', orphanIds),
+    ]);
+
+    const orphanNameMap = new Map<string, { name: string; price: number }>();
+    (palOrphan.data || []).forEach(p => orphanNameMap.set(p.id, { name: p.name, price: p.value_per_ve || 0 }));
+    (schOrphan.data || []).forEach(s => orphanNameMap.set(s.id, { name: s.name, price: s.value_per_ve || 0 }));
+    (dispOrphan.data || []).forEach(d => orphanNameMap.set(d.id, { name: d.name, price: d.item_value || 0 }));
+    (kartOrphan.data || []).forEach(k => orphanNameMap.set(k.id, { name: k.name, price: k.item_value || 0 }));
+    (epOrphan.data || []).forEach(e => orphanNameMap.set(e.id, { name: e.name, price: e.item_value || 0 }));
+
+    for (const oid of orphanIds) {
+      const info = orphanNameMap.get(oid);
+      items.push({
+        id: oid,
+        name: info?.name || `Gelöschtes Produkt (${oid.slice(0, 8)})`,
+        type: 'einzelprodukt',
+        pricePerUnit: info?.price || 0,
+        parentId: null,
+        parentName: null,
+        parentType: null,
+        colorGroup: -1,
+        isParent: false,
+      });
+    }
+  }
+
+  // Calculate parent container quantities for palette/schuette
+  if (paletteProducts.length > 0 || schutteProducts.length > 0) {
+    const containerCounts = new Map<string, Map<string, Set<string>>>();
+    allSubs.forEach(sub => {
+      if (sub.item_type !== 'palette' && sub.item_type !== 'schuette') return;
+      const parentId = sub.item_type === 'palette'
+        ? paletteProductParentMap.get(sub.item_id)
+        : schutteProductParentMap.get(sub.item_id);
+      if (!parentId) return;
+
+      const timestamp = new Date(sub.created_at).toISOString().slice(0, 16);
+      const groupKey = `${timestamp}|${parentId}`;
+
+      if (!containerCounts.has(parentId)) containerCounts.set(parentId, new Map());
+      const marketMap = containerCounts.get(parentId)!;
+      if (!marketMap.has(sub.market_id)) marketMap.set(sub.market_id, new Set());
+      marketMap.get(sub.market_id)!.add(groupKey);
+    });
+
+    containerCounts.forEach((marketMap, parentId) => {
+      if (!parentMatrix[parentId]) parentMatrix[parentId] = {};
+      marketMap.forEach((groups, marketId) => {
+        parentMatrix[parentId][marketId] = groups.size;
+      });
+    });
+  }
+
+  return {
+    waveName: welle.name,
+    goalType: welle.goal_type,
+    items,
+    parentItems,
+    markets,
+    matrix,
+    valueMatrix,
+    parentMatrix,
+  };
+}
+
 // Main transformer that routes to specific dataset transformers
 export async function transformDataset(
   client: SupabaseClient,
