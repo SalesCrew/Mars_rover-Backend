@@ -497,6 +497,15 @@ router.post('/:id/visit', async (req: Request, res: Response) => {
       throw updateError;
     }
 
+    await freshClient
+      .from('market_visits')
+      .upsert({
+        market_id: id,
+        gebietsleiter_id: gl_id || null,
+        visit_date: today,
+        source: 'manual'
+      }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
+
     console.log(`✅ Recorded visit for market ${id}: ${newVisitCount} total visits`);
     res.json({
       message: 'Visit recorded',
@@ -776,6 +785,41 @@ router.get('/:id/history', async (req: Request, res: Response) => {
             besuchszeitBis: ze.besuchszeit_bis
           }
         });
+      }
+    }
+
+    // 5. Get visit-only entries from market_visits (exclude dates already covered by other sources)
+    const existingDates = new Set(
+      activities.map(a => new Date(a.date).toISOString().split('T')[0])
+    );
+
+    let mvQuery = freshClient
+      .from('market_visits')
+      .select('id, market_id, gebietsleiter_id, visit_date, source, created_at')
+      .eq('market_id', id)
+      .order('visit_date', { ascending: false });
+    if (glId) mvQuery = mvQuery.eq('gebietsleiter_id', glId);
+    const { data: marketVisitsData } = await mvQuery;
+
+    if (marketVisitsData) {
+      const mvGlIds = [...new Set(marketVisitsData.map(mv => mv.gebietsleiter_id).filter(Boolean))];
+      const { data: mvGlDetails } = await freshClient
+        .from('gebietsleiter')
+        .select('id, name')
+        .in('id', mvGlIds.length > 0 ? mvGlIds : ['__none__']);
+
+      for (const mv of marketVisitsData) {
+        if (!existingDates.has(mv.visit_date)) {
+          const mvGl = (mvGlDetails || []).find((g: any) => g.id === mv.gebietsleiter_id);
+          activities.push({
+            id: mv.id,
+            type: 'marktbesuch',
+            date: mv.created_at,
+            glName: mvGl?.name || 'Unbekannt',
+            glId: mv.gebietsleiter_id,
+            details: { source: mv.source }
+          });
+        }
       }
     }
 

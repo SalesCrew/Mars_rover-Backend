@@ -2621,6 +2621,15 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
           .eq('id', market_id);
         console.log(`📍 Recorded visit for market ${market_id}`);
       }
+
+      await freshClient
+        .from('market_visits')
+        .upsert({
+          market_id,
+          gebietsleiter_id,
+          visit_date: today,
+          source: 'vorbesteller'
+        }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
     } else if (skipVisitUpdate) {
       console.log(`⏭️ Skipping visit update for market ${market_id} (user chose not to record new visit)`);
     }
@@ -3755,6 +3764,20 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
       submissionsByMarket.get(sub.market_id)!.push(sub);
     }
 
+    // Fetch visit history from market_visits for "besucht ohne Erfolg" check
+    const { data: visitHistory } = await freshClient
+      .from('market_visits')
+      .select('market_id, visit_date')
+      .in('market_id', assignedMarketIds);
+
+    const visitsByMarket = new Map<string, string[]>();
+    for (const v of (visitHistory || [])) {
+      if (!visitsByMarket.has(v.market_id)) {
+        visitsByMarket.set(v.market_id, []);
+      }
+      visitsByMarket.get(v.market_id)!.push(v.visit_date);
+    }
+
     // Build visited markets with their activity details
     const visited: any[] = [];
     const visitedNoSuccess: any[] = [];
@@ -3880,8 +3903,22 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
           activities
         });
       } else {
-        // Check if market was visited during the wave's selling period but has no submission
-        if (isDateInKWSellPeriod(market.last_visit_date)) {
+        // Check if market was visited during the wave's selling period using visit history
+        const marketVisitDates = visitsByMarket.get(market.id) || [];
+        const visitInPeriod = marketVisitDates.find(d => isDateInKWSellPeriod(d));
+
+        if (visitInPeriod) {
+          visitedNoSuccess.push({
+            id: market.id,
+            name: market.name,
+            chain: market.chain,
+            address: market.address,
+            city: market.city,
+            gebietsleiter: market.gebietsleiter_name,
+            lastVisitDate: visitInPeriod
+          });
+        } else if (isDateInKWSellPeriod(market.last_visit_date)) {
+          // Fallback to last_visit_date for visits recorded before market_visits table existed
           visitedNoSuccess.push({
             id: market.id,
             name: market.name,

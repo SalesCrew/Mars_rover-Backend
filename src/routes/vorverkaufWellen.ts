@@ -548,6 +548,15 @@ router.post('/submit', async (req: Request, res: Response) => {
         .eq('id', market_id);
     }
 
+    await freshClient
+      .from('market_visits')
+      .upsert({
+        market_id,
+        gebietsleiter_id,
+        visit_date: today,
+        source: 'vorverkauf_wellen'
+      }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
+
     res.status(201).json({
       id: submission.id,
       welleId: submission.vorverkauf_welle_id,

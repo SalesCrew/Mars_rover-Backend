@@ -281,6 +281,15 @@ router.post('/', async (req: Request, res: Response) => {
           .eq('id', market_id);
         console.log(`📍 Recorded visit for market ${market_id}`);
       }
+
+      await freshClient
+        .from('market_visits')
+        .upsert({
+          market_id,
+          gebietsleiter_id,
+          visit_date: today,
+          source: 'vorverkauf'
+        }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
     } else {
       console.log(`⏭️ Skipping visit update for market ${market_id} (user chose not to record new visit)`);
     }
@@ -456,6 +465,15 @@ router.put('/:id/fulfill', async (req: Request, res: Response) => {
       console.log(`📍 Recorded visit for market ${entry.market_id}`);
     }
 
+    await freshClient
+      .from('market_visits')
+      .upsert({
+        market_id: entry.market_id,
+        gebietsleiter_id: entry.gebietsleiter_id || null,
+        visit_date: today,
+        source: 'vorverkauf'
+      }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
+
     console.log(`✅ Fulfilled pending entry ${id}`);
     res.json({ 
       message: 'Entry fulfilled successfully',
@@ -569,6 +587,15 @@ router.post('/submit', async (req: Request, res: Response) => {
         .eq('id', market_id);
       console.log(`📍 Recorded visit for market ${market_id}`);
     }
+
+    await freshClient
+      .from('market_visits')
+      .upsert({
+        market_id,
+        gebietsleiter_id,
+        visit_date: today,
+        source: 'vorverkauf'
+      }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
 
     console.log(`✅ Created vorverkauf entry with ${products.length} products`);
     res.status(201).json({

@@ -2213,6 +2213,15 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
             .eq('id', entry.market_id);
           console.log(`📍 Incremented visit count for market ${entry.market_id}`);
         }
+
+        await freshClient
+          .from('market_visits')
+          .upsert({
+            market_id: entry.market_id,
+            gebietsleiter_id,
+            visit_date: today,
+            source: 'zusatz'
+          }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
       }
     }
     
