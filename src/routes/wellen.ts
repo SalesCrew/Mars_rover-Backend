@@ -609,21 +609,44 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           .select('id, value_per_ve, schuette_id')
           .in('schuette_id', (await freshClient.from('wellen_schuetten').select('id').in('welle_id', welleIds)).data?.map((s: any) => s.id) || []);
         
-        // Get progress
+        // Get einzelprodukte for value calculation
+        const { data: einzelprodukteZoo } = await freshClient
+          .from('wellen_einzelprodukte')
+          .select('id, item_value, welle_id')
+          .in('welle_id', welleIds);
+
+        // Get progress (paginated, including einzelprodukt)
         let displayProgress: any[] = [];
         let kartonwareProgress: any[] = [];
         let paletteProgressZoo: any[] = [];
         let schutteProgressZoo: any[] = [];
+        let einzelproduktProgressZoo: any[] = [];
         
         {
-          let query = freshClient.from('wellen_submissions').select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit').in('welle_id', welleIds).in('item_type', ['display', 'kartonware', 'palette', 'schuette']);
-          if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
-          const { data } = await query;
-          const aggregated = aggregateSubmissions(data || []);
+          let allChainSubs: any[] = [];
+          let chainSubFrom = 0;
+          const chainPageSize = 1000;
+          let chainHasMore = true;
+          while (chainHasMore) {
+            let query = freshClient.from('wellen_submissions')
+              .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
+              .in('welle_id', welleIds);
+            if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
+            const { data } = await query.range(chainSubFrom, chainSubFrom + chainPageSize - 1);
+            if (data && data.length > 0) {
+              allChainSubs = [...allChainSubs, ...data];
+              chainSubFrom += chainPageSize;
+              chainHasMore = data.length === chainPageSize;
+            } else {
+              chainHasMore = false;
+            }
+          }
+          const aggregated = aggregateSubmissions(allChainSubs);
           if (!itemType || itemType === 'displays') displayProgress = aggregated.filter(p => p.item_type === 'display');
           if (!itemType || itemType === 'kartonware') kartonwareProgress = aggregated.filter(p => p.item_type === 'kartonware');
           paletteProgressZoo = aggregated.filter(p => p.item_type === 'palette');
           schutteProgressZoo = aggregated.filter(p => p.item_type === 'schuette');
+          einzelproduktProgressZoo = aggregated.filter(p => p.item_type === 'einzelprodukt');
         }
         
         // Calculate total value (target * item_value)
@@ -631,7 +654,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           displays.reduce((sum, d) => sum + (d.target_number * (d.item_value || 0)), 0) +
           kartonware.reduce((sum, k) => sum + (k.target_number * (k.item_value || 0)), 0);
         
-        // Calculate current value (current * item_value)
+        // Calculate current value using dashboard-identical logic
         let currentValue = 0;
         for (const progress of displayProgress) {
           const display = displays.find(d => d.id === progress.item_id);
@@ -642,18 +665,21 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           if (kw) currentValue += progress.current_number * (kw.item_value || 0);
         }
         
-        // Add palette progress values
         for (const progress of paletteProgressZoo) {
           const product = (paletteProductsZoo || []).find((p: any) => p.id === progress.item_id);
           const valuePerUnit = progress.value_per_unit || product?.value_per_ve || 0;
           currentValue += progress.current_number * valuePerUnit;
         }
         
-        // Add schuette progress values
         for (const progress of schutteProgressZoo) {
           const product = (schutteProductsZoo || []).find((p: any) => p.id === progress.item_id);
           const valuePerUnit = progress.value_per_unit || product?.value_per_ve || 0;
           currentValue += progress.current_number * valuePerUnit;
+        }
+
+        for (const progress of einzelproduktProgressZoo) {
+          const ep = (einzelprodukteZoo || []).find((e: any) => e.id === progress.item_id);
+          if (ep) currentValue += progress.current_number * (ep.item_value || 0);
         }
         
         const marketsWithProgressSet = new Set<string>();
@@ -673,7 +699,6 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           goalValue: Math.round(goalValue * 100) / 100,
           currentValue: Math.round(currentValue * 100) / 100,
           totalValue: Math.round(totalValue * 100) / 100,
-          // Return GL's wave market count when filtering, otherwise total wave markets
           totalMarkets: glFilter.length > 0 ? glWaveMarketCount : totalWaveMarkets,
           marketsWithProgress: marketsWithProgressSet.size
         };
@@ -823,21 +848,44 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           .select('id, value_per_ve, schuette_id')
           .in('schuette_id', (await freshClient.from('wellen_schuetten').select('id').in('welle_id', welleIds)).data?.map((s: any) => s.id) || []);
         
-        // Get progress
+        // Get einzelprodukte for value calculation
+        const { data: einzelprodukteHage } = await freshClient
+          .from('wellen_einzelprodukte')
+          .select('id, item_value, welle_id')
+          .in('welle_id', welleIds);
+
+        // Get progress (paginated, including einzelprodukt)
         let displayProgress: any[] = [];
         let kartonwareProgress: any[] = [];
         let paletteProgress: any[] = [];
         let schutteProgress: any[] = [];
+        let einzelproduktProgress: any[] = [];
         
         {
-          let query = freshClient.from('wellen_submissions').select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit').in('welle_id', welleIds).in('item_type', ['display', 'kartonware', 'palette', 'schuette']);
-          if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
-          const { data } = await query;
-          const aggregated = aggregateSubmissions(data || []);
+          let allChainSubs: any[] = [];
+          let chainSubFrom = 0;
+          const chainPageSize = 1000;
+          let chainHasMore = true;
+          while (chainHasMore) {
+            let query = freshClient.from('wellen_submissions')
+              .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
+              .in('welle_id', welleIds);
+            if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
+            const { data } = await query.range(chainSubFrom, chainSubFrom + chainPageSize - 1);
+            if (data && data.length > 0) {
+              allChainSubs = [...allChainSubs, ...data];
+              chainSubFrom += chainPageSize;
+              chainHasMore = data.length === chainPageSize;
+            } else {
+              chainHasMore = false;
+            }
+          }
+          const aggregated = aggregateSubmissions(allChainSubs);
           if (!itemType || itemType === 'displays') displayProgress = aggregated.filter(p => p.item_type === 'display');
           if (!itemType || itemType === 'kartonware') kartonwareProgress = aggregated.filter(p => p.item_type === 'kartonware');
           paletteProgress = aggregated.filter(p => p.item_type === 'palette');
           schutteProgress = aggregated.filter(p => p.item_type === 'schuette');
+          einzelproduktProgress = aggregated.filter(p => p.item_type === 'einzelprodukt');
         }
         
         const totalValue = 
@@ -854,18 +902,21 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           if (kw) currentValue += progress.current_number * (kw.item_value || 0);
         }
         
-        // Add palette progress values
         for (const progress of paletteProgress) {
           const product = (paletteProducts || []).find((p: any) => p.id === progress.item_id);
           const valuePerUnit = progress.value_per_unit || product?.value_per_ve || 0;
           currentValue += progress.current_number * valuePerUnit;
         }
         
-        // Add schuette progress values
         for (const progress of schutteProgress) {
           const product = (schutteProducts || []).find((p: any) => p.id === progress.item_id);
           const valuePerUnit = progress.value_per_unit || product?.value_per_ve || 0;
           currentValue += progress.current_number * valuePerUnit;
+        }
+
+        for (const progress of einzelproduktProgress) {
+          const ep = (einzelprodukteHage || []).find((e: any) => e.id === progress.item_id);
+          if (ep) currentValue += progress.current_number * (ep.item_value || 0);
         }
         
         const marketsWithProgressSet = new Set<string>();
@@ -885,7 +936,6 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           goalValue: Math.round(goalValue * 100) / 100,
           currentValue: Math.round(currentValue * 100) / 100,
           totalValue: Math.round(totalValue * 100) / 100,
-          // Return GL's wave market count when filtering, otherwise total wave markets
           totalMarkets: glFilter.length > 0 ? glWaveMarketCount : totalWaveMarkets,
           marketsWithProgress: marketsWithProgressSet.size
         };
