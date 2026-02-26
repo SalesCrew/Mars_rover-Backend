@@ -1622,16 +1622,10 @@ router.get('/photos', async (req: Request, res: Response) => {
         console.error('⚠️ Error fetching market data for photos:', marketError.message);
       }
       (marketData || []).forEach(m => marketMap.set(m.id, { name: m.name, chain: m.chain, address: m.address || '', city: m.city || '', postalCode: m.postal_code || '' }));
-      if (marketIds.length > 0 && marketMap.size === 0) {
-        console.warn(`⚠️ No markets found for ${marketIds.length} market IDs. First IDs:`, marketIds.slice(0, 3));
-      }
     }
 
     const photos = (data || []).map(p => {
       const market = marketMap.get(p.market_id);
-      if (!market && p.market_id) {
-        console.warn(`⚠️ Photo ${p.id}: market_id "${p.market_id}" not found in markets table`);
-      }
       return {
         id: p.id, welleId: p.welle_id, welleName: (p.welle as any)?.name || '',
         glId: p.gebietsleiter_id, glName: glMap.get(p.gebietsleiter_id) || '',
@@ -1640,9 +1634,6 @@ router.get('/photos', async (req: Request, res: Response) => {
         photoUrl: p.photo_url, tags: p.tags || [], comment: p.comment || null, createdAt: p.created_at
       };
     });
-
-    const photosWithMarket = photos.filter(p => p.marketName);
-    console.log(`📷 Photos: ${photos.length} total, ${photosWithMarket.length} with market name, ${marketMap.size} markets resolved from ${marketIds.length} IDs`);
 
     res.json({ photos, total: count || photos.length });
   } catch (error: any) {
