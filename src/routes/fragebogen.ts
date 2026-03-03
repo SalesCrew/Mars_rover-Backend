@@ -1899,7 +1899,7 @@ router.get('/zeiterfassung/gl/:glId', async (req: Request, res: Response) => {
       .from('fb_zeiterfassung_submissions')
       .select(`
         *,
-        market:markets (id, name, chain),
+        market:markets (id, name, chain, address, postal_code, city),
         fragebogen:fb_fragebogen (id, name)
       `)
       .eq('gebietsleiter_id', glId)
