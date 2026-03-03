@@ -2446,7 +2446,7 @@ router.get('/day-tracking-all', async (req: Request, res: Response) => {
     const freshClient = createFreshClient();
     const { data, error } = await freshClient
       .from('fb_day_tracking')
-      .select('gebietsleiter_id, tracking_date, day_start_time, day_end_time, skipped_first_fahrzeit')
+      .select('gebietsleiter_id, tracking_date, day_start_time, day_end_time, skipped_first_fahrzeit, km_stand_start, km_stand_end')
       .order('tracking_date', { ascending: false });
 
     if (error) throw error;
@@ -2461,7 +2461,7 @@ router.get('/day-tracking-all', async (req: Request, res: Response) => {
 router.post('/day-tracking/start', async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
-    const { gebietsleiter_id, skip_fahrzeit, start_time } = req.body;
+    const { gebietsleiter_id, skip_fahrzeit, start_time, km_stand_start } = req.body;
     
     if (!gebietsleiter_id) {
       return res.status(400).json({ error: 'gebietsleiter_id is required' });
@@ -2482,17 +2482,22 @@ router.post('/day-tracking/start', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Day tracking already started for today' });
     }
     
+    const upsertData: Record<string, any> = {
+      gebietsleiter_id,
+      tracking_date: today,
+      day_start_time: dayStartTime,
+      skipped_first_fahrzeit: skip_fahrzeit || false,
+      status: 'active',
+      markets_visited: 0
+    };
+    if (km_stand_start !== undefined && km_stand_start !== null && km_stand_start !== '') {
+      upsertData.km_stand_start = parseFloat(km_stand_start);
+    }
+    
     // Create or update day tracking record
     const { data, error } = await freshClient
       .from('fb_day_tracking')
-      .upsert({
-        gebietsleiter_id,
-        tracking_date: today,
-        day_start_time: dayStartTime,
-        skipped_first_fahrzeit: skip_fahrzeit || false,
-        status: 'active',
-        markets_visited: 0
-      }, {
+      .upsert(upsertData, {
         onConflict: 'gebietsleiter_id,tracking_date'
       })
       .select()
@@ -2549,7 +2554,7 @@ router.patch('/day-tracking/update-times', async (req: Request, res: Response) =
 router.post('/day-tracking/end', async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
-    const { gebietsleiter_id, end_time, force_close } = req.body;
+    const { gebietsleiter_id, end_time, force_close, km_stand_end } = req.body;
     
     if (!gebietsleiter_id || !end_time) {
       return res.status(400).json({ error: 'gebietsleiter_id and end_time are required' });
@@ -2670,7 +2675,8 @@ router.post('/day-tracking/end', async (req: Request, res: Response) => {
         total_unterbrechung: formatInterval(totalUnterbrechungMinutes),
         total_arbeitszeit: formatInterval(totalArbeitszeitMinutes),
         markets_visited: visits?.length || 0,
-        status: force_close ? 'force_closed' : 'completed'
+        status: force_close ? 'force_closed' : 'completed',
+        ...(km_stand_end !== undefined && km_stand_end !== null && km_stand_end !== '' ? { km_stand_end: parseFloat(km_stand_end) } : {})
       })
       .eq('id', dayTracking.id)
       .select()
