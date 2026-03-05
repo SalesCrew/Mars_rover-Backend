@@ -551,13 +551,11 @@ router.post('/submit', async (req: Request, res: Response) => {
       throw entryError;
     }
 
-    // Create items with their individual reasons
     const itemsToInsert = products.map((p: { productId: string; quantity: number; reason: string }) => ({
       vorverkauf_entry_id: entry.id,
       product_id: p.productId,
       quantity: p.quantity || 1,
-      item_type: 'take_out',
-      reason: p.reason
+      item_type: 'take_out'
     }));
 
     const { error: itemsError } = await freshClient
