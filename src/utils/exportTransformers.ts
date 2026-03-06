@@ -60,10 +60,10 @@ export async function transformWellenSubmissions(
       .range(subFrom, subFrom + subPageSize - 1);
 
     if (filters?.dateRange?.start) {
-      query = query.gte('created_at', filters.dateRange.start);
+      query = query.gte('created_at', filters.dateRange.start + 'T00:00:00');
     }
     if (filters?.dateRange?.end) {
-      query = query.lte('created_at', filters.dateRange.end + 'T23:59:59');
+      query = query.lte('created_at', filters.dateRange.end + 'T23:59:59.999Z');
     }
     if (filters?.glIds && filters.glIds.length > 0) {
       query = query.in('gebietsleiter_id', filters.glIds);
@@ -374,10 +374,10 @@ export async function transformMarkets(
       .range(mktFrom, mktFrom + mktPageSize - 1);
 
     if (filters?.dateRange?.start) {
-      query = query.gte('created_at', filters.dateRange.start);
+      query = query.gte('last_visit_date', filters.dateRange.start);
     }
     if (filters?.dateRange?.end) {
-      query = query.lte('created_at', filters.dateRange.end + 'T23:59:59');
+      query = query.lte('last_visit_date', filters.dateRange.end);
     }
     if (filters?.glIds && filters.glIds.length > 0) {
       query = query.in('gebietsleiter_id', filters.glIds);
@@ -452,10 +452,10 @@ export async function transformVorverkaufEntries(
       .range(entFrom, entFrom + entPageSize - 1);
 
     if (filters?.dateRange?.start) {
-      query = query.gte('created_at', filters.dateRange.start);
+      query = query.gte('created_at', filters.dateRange.start + 'T00:00:00');
     }
     if (filters?.dateRange?.end) {
-      query = query.lte('created_at', filters.dateRange.end + 'T23:59:59');
+      query = query.lte('created_at', filters.dateRange.end + 'T23:59:59.999Z');
     }
     if (filters?.glIds && filters.glIds.length > 0) {
       query = query.in('gebietsleiter_id', filters.glIds);
@@ -555,10 +555,10 @@ export async function transformActionHistory(
     .order('timestamp', { ascending: false });
 
   if (filters?.dateRange?.start) {
-    query = query.gte('timestamp', filters.dateRange.start);
+    query = query.gte('timestamp', filters.dateRange.start + 'T00:00:00');
   }
   if (filters?.dateRange?.end) {
-    query = query.lte('timestamp', filters.dateRange.end + 'T23:59:59');
+    query = query.lte('timestamp', filters.dateRange.end + 'T23:59:59.999Z');
   }
 
   const { data: actions, error } = await query;
@@ -606,13 +606,6 @@ export async function transformGebietsleiter(
     .select('*')
     .eq('is_active', true)
     .order('name', { ascending: true });
-
-  if (filters?.dateRange?.start) {
-    glQuery = glQuery.gte('created_at', filters.dateRange.start);
-  }
-  if (filters?.dateRange?.end) {
-    glQuery = glQuery.lte('created_at', filters.dateRange.end + 'T23:59:59');
-  }
 
   const { data: gls, error } = await glQuery;
 

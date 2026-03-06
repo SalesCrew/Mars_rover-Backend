@@ -366,6 +366,39 @@ router.post('/', async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/markets/import-mars-fil
+ * Bulk update only mars_fil by matching market internal_id
+ */
+router.post('/import-mars-fil', async (req: Request, res: Response) => {
+  try {
+    const entries: Array<{ id: string; mars_fil: string }> = req.body;
+
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return res.status(400).json({ error: 'Invalid request: entries array required' });
+    }
+
+    console.log(`📥 Updating mars_fil for ${entries.length} markets...`);
+    const freshClient = createFreshClient();
+
+    let updated = 0;
+    for (const entry of entries) {
+      if (!entry.id || !entry.mars_fil) continue;
+      const { error } = await freshClient
+        .from('markets')
+        .update({ mars_fil: entry.mars_fil })
+        .eq('internal_id', entry.id);
+      if (!error) updated++;
+    }
+
+    console.log(`✅ Updated mars_fil for ${updated} markets`);
+    res.json({ success: updated, failed: entries.length - updated });
+  } catch (error: any) {
+    console.error('Error updating mars_fil:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+/**
  * POST /api/markets/import
  * Bulk import markets
  */
