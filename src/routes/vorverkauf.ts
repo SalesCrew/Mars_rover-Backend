@@ -513,6 +513,34 @@ router.delete('/:id', async (req: Request, res: Response) => {
 });
 
 // ============================================================================
+// UPDATE ITEM QUANTITY
+// ============================================================================
+router.put('/items/:itemId', async (req: Request, res: Response) => {
+  try {
+    const { itemId } = req.params;
+    const { quantity } = req.body;
+
+    if (typeof quantity !== 'number' || quantity < 1) {
+      return res.status(400).json({ error: 'Invalid quantity' });
+    }
+
+    const freshClient = createFreshClient();
+
+    const { error } = await freshClient
+      .from('vorverkauf_items')
+      .update({ quantity })
+      .eq('id', itemId);
+
+    if (error) throw error;
+
+    res.json({ message: 'Item updated', itemId, newQuantity: quantity });
+  } catch (error: any) {
+    console.error('Error updating vorverkauf item:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ============================================================================
 // SUBMIT VORVERKAUF (GL - no wave required)
 // ============================================================================
 router.post('/submit', async (req: Request, res: Response) => {
