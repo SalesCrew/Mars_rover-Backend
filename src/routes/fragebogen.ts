@@ -2550,6 +2550,36 @@ router.patch('/day-tracking/update-times', async (req: Request, res: Response) =
   }
 });
 
+// UPDATE KM STAND START - Update km_stand_start on an active day record
+router.patch('/day-tracking/update-km-start', async (req: Request, res: Response) => {
+  try {
+    const freshClient = createFreshClient();
+    const { gebietsleiter_id, km_stand_start } = req.body;
+
+    if (!gebietsleiter_id || km_stand_start === undefined || km_stand_start === '') {
+      return res.status(400).json({ error: 'gebietsleiter_id and km_stand_start are required' });
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+
+    const { data, error } = await freshClient
+      .from('fb_day_tracking')
+      .update({ km_stand_start: parseFloat(String(km_stand_start).replace(',', '.')) })
+      .eq('gebietsleiter_id', gebietsleiter_id)
+      .eq('tracking_date', today)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    console.log(`✅ km_stand_start updated for GL ${gebietsleiter_id} on ${today}:`, km_stand_start);
+    res.json(data);
+  } catch (error: any) {
+    console.error('Error updating km_stand_start:', error);
+    res.status(500).json({ error: error.message || 'Failed to update km_stand_start' });
+  }
+});
+
 // END DAY - Complete day tracking and calculate totals
 router.post('/day-tracking/end', async (req: Request, res: Response) => {
   try {
