@@ -2140,7 +2140,7 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
       
       const dbEntry: any = {
         gebietsleiter_id,
-        entry_date: today,
+        entry_date: entry.entryDate || today,
         reason: entry.reason,
         reason_label: entry.reasonLabel,
         zeit_von: entry.von,
@@ -2165,9 +2165,11 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
     
     if (error) throw error;
     
-    // For sonderaufgabe entries with market_id, also create a zeiterfassung submission (market visit)
+    // For sonderaufgabe/marktbesuch entries with market_id, also create a zeiterfassung submission (market visit)
     for (const entry of entries) {
-      if (entry.reason === 'sonderaufgabe' && entry.market_id) {
+      if ((entry.reason === 'sonderaufgabe' || entry.reason === 'marktbesuch') && entry.market_id) {
+        const entryDateStr = entry.entryDate || today;
+
         // Calculate besuchszeit_diff
         const [vonH, vonM] = entry.von.split(':').map(Number);
         const [bisH, bisM] = entry.bis.split(':').map(Number);
@@ -2175,6 +2177,10 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
         if (diffMinutes < 0) diffMinutes += 24 * 60;
         const diffHours = Math.floor(diffMinutes / 60);
         const diffMins = diffMinutes % 60;
+
+        const kommentarLabel = entry.reason === 'marktbesuch'
+          ? (entry.kommentar ? `Marktbesuch (nachgetragen): ${entry.kommentar}` : 'Marktbesuch (nachgetragen)')
+          : (entry.kommentar ? `Sonderaufgabe: ${entry.kommentar}` : 'Sonderaufgabe');
         
         // Insert zeiterfassung submission so it counts as a market visit
         const { error: zeitError } = await freshClient
@@ -2185,15 +2191,16 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
             besuchszeit_von: entry.von,
             besuchszeit_bis: entry.bis,
             besuchszeit_diff: `${diffHours}:${diffMins.toString().padStart(2, '0')}:00`,
-            kommentar: entry.kommentar ? `Sonderaufgabe: ${entry.kommentar}` : 'Sonderaufgabe',
+            kommentar: kommentarLabel,
             market_start_time: entry.von,
-            market_end_time: entry.bis
+            market_end_time: entry.bis,
+            created_at: `${entryDateStr}T${entry.von}:00`
           });
         
         if (zeitError) {
-          console.warn('⚠️ Could not create zeiterfassung submission for sonderaufgabe:', zeitError.message);
+          console.warn(`⚠️ Could not create zeiterfassung submission for ${entry.reason}:`, zeitError.message);
         } else {
-          console.log(`📍 Created zeiterfassung submission for sonderaufgabe at market ${entry.market_id}`);
+          console.log(`📍 Created zeiterfassung submission for ${entry.reason} at market ${entry.market_id}`);
         }
         
         // Increment market visit count
@@ -2203,12 +2210,12 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
           .eq('id', entry.market_id)
           .single();
         
-        if (market && market.last_visit_date !== today) {
+        if (market && market.last_visit_date !== entryDateStr) {
           await freshClient
             .from('markets')
             .update({
               current_visits: (market.current_visits || 0) + 1,
-              last_visit_date: today
+              last_visit_date: entryDateStr
             })
             .eq('id', entry.market_id);
           console.log(`📍 Incremented visit count for market ${entry.market_id}`);
@@ -2219,7 +2226,7 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
           .upsert({
             market_id: entry.market_id,
             gebietsleiter_id,
-            visit_date: today,
+            visit_date: entryDateStr,
             source: 'zusatz'
           }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
       }
