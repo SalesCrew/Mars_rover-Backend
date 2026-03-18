@@ -2340,11 +2340,12 @@ router.patch('/zusatz-zeiterfassung/:id', async (req: Request, res: Response) =>
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
-    const { zeit_von, zeit_bis } = req.body;
+    const { zeit_von, zeit_bis, kommentar } = req.body;
 
     const updateData: Record<string, any> = {};
     if (zeit_von !== undefined) updateData.zeit_von = zeit_von || null;
     if (zeit_bis !== undefined) updateData.zeit_bis = zeit_bis || null;
+    if (kommentar !== undefined) updateData.kommentar = kommentar;
 
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({ error: 'No fields to update' });
