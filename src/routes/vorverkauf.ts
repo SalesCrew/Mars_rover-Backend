@@ -87,6 +87,7 @@ router.get('/', async (req: Request, res: Response) => {
         marketName: market?.name || 'Unknown',
         marketChain: market?.chain || '',
         marketAddress: market?.address || '',
+        marketPostalCode: market?.postal_code || '',
         marketCity: market?.city || '',
         reason: entry.reason,
         notes: entry.notes,

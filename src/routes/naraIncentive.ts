@@ -62,7 +62,7 @@ router.get('/', async (req: Request, res: Response) => {
         market_id,
         created_at,
         gebietsleiter ( name ),
-        markets ( name, chain, address, city ),
+        markets ( name, chain, address, postal_code, city ),
         nara_incentive_items (
           id,
           product_id,
@@ -105,6 +105,7 @@ router.get('/', async (req: Request, res: Response) => {
         marketName: row.markets?.name || 'Unbekannt',
         marketChain: row.markets?.chain || '',
         marketAddress: row.markets?.address || '',
+        marketPostalCode: row.markets?.postal_code || '',
         marketCity: row.markets?.city || '',
         totalValue: items.reduce((sum: number, i: any) => sum + i.lineTotal, 0),
         createdAt: row.created_at,
