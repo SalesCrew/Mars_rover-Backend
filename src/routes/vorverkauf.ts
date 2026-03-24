@@ -74,6 +74,7 @@ router.get('/', async (req: Request, res: Response) => {
             productName: product?.name || product?.productName || 'Unknown',
             productBrand: product?.brand || product?.productBrand || '',
             productSize: product?.size || product?.weight || product?.content || '',
+            productPrice: product?.price || 0,
             quantity: item.quantity,
             itemType: item.item_type || 'take_out'
           };
