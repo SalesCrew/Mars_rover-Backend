@@ -203,7 +203,8 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         // Get all wellen assigned to these markets (optionally filtered by date)
         let wellenQuery = freshClient
           .from('wellen')
-          .select('id, start_date, end_date');
+          .select('id, start_date, end_date')
+          .eq('no_limit_welle', false);
         
         if (startDate) {
           wellenQuery = wellenQuery.gte('end_date', startDate);
@@ -375,7 +376,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         }
         
         // Get wellen filtered by date range
-        let wellenQuery = freshClient.from('wellen').select('id');
+        let wellenQuery = freshClient.from('wellen').select('id').eq('no_limit_welle', false);
         if (startDate) wellenQuery = wellenQuery.gte('end_date', startDate);
         if (endDate) wellenQuery = wellenQuery.lte('start_date', endDate);
         const { data: filteredWellen } = await wellenQuery;
@@ -512,7 +513,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         }
         
         // Get wellen filtered by date range
-        let wellenQuery = freshClient.from('wellen').select('id, goal_value, goal_type');
+        let wellenQuery = freshClient.from('wellen').select('id, goal_value, goal_type').eq('no_limit_welle', false);
         if (startDate) wellenQuery = wellenQuery.gte('end_date', startDate);
         if (endDate) wellenQuery = wellenQuery.lte('start_date', endDate);
         const { data: filteredWellen } = await wellenQuery;
@@ -751,7 +752,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         }
         
         // Get wellen filtered by date range
-        let wellenQuery = freshClient.from('wellen').select('id, goal_value, goal_type');
+        let wellenQuery = freshClient.from('wellen').select('id, goal_value, goal_type').eq('no_limit_welle', false);
         if (startDate) wellenQuery = wellenQuery.gte('end_date', startDate);
         if (endDate) wellenQuery = wellenQuery.lte('start_date', endDate);
         const { data: filteredWellen } = await wellenQuery;
@@ -1500,7 +1501,8 @@ router.get('/', async (req: Request, res: Response) => {
           fotoHeader: welle.foto_header || null,
           fotoDescription: welle.foto_description || null,
           fotoTags: (fotoTagsData || []).map(t => ({ id: t.id, name: t.tag_name, type: t.tag_type })),
-          fotoOnly: welle.foto_only || false
+          fotoOnly: welle.foto_only || false,
+          noLimitWelle: welle.no_limit_welle || false
         };
       })
     );
@@ -1779,7 +1781,8 @@ router.get('/:id', async (req: Request, res: Response) => {
       fotoHeader: welle.foto_header || null,
       fotoDescription: welle.foto_description || null,
       fotoTags: [], // Tags loaded via GET all endpoint
-      fotoOnly: welle.foto_only || false
+      fotoOnly: welle.foto_only || false,
+      noLimitWelle: welle.no_limit_welle || false
     };
 
     console.log(`✅ Fetched welle ${id}`);
@@ -1816,7 +1819,8 @@ router.post('/', async (req: Request, res: Response) => {
       fotoHeader,
       fotoDescription,
       fotoTags,
-      fotoOnly
+      fotoOnly,
+      noLimitWelle
     } = req.body;
 
     console.log('📦 Received data:', {
@@ -1853,7 +1857,7 @@ router.post('/', async (req: Request, res: Response) => {
       types: types || [],
       status,
       goal_type: goalType,
-      goal_percentage: goalType === 'percentage' ? goalPercentage : null,
+      goal_percentage: goalType === 'percentage' ? (noLimitWelle ? 0 : goalPercentage) : null,
       goal_value: goalType === 'value' ? goalValue : null,
     };
     // Only include foto fields if they exist (column might not exist on older DBs)
@@ -1861,6 +1865,7 @@ router.post('/', async (req: Request, res: Response) => {
     if (fotoHeader !== undefined) insertPayload.foto_header = fotoHeader || null;
     if (fotoDescription !== undefined) insertPayload.foto_description = fotoDescription || null;
     if (fotoOnly !== undefined) insertPayload.foto_only = fotoOnly || false;
+    if (noLimitWelle !== undefined) insertPayload.no_limit_welle = noLimitWelle || false;
 
     const freshClient = createFreshClient();
     const { data: welle, error: welleError } = await freshClient
@@ -2107,7 +2112,8 @@ router.put('/:id', async (req: Request, res: Response) => {
       fotoHeader,
       fotoDescription,
       fotoTags,
-      fotoOnly
+      fotoOnly,
+      noLimitWelle
     } = req.body;
 
     // Update main welle record
@@ -2120,12 +2126,13 @@ router.put('/:id', async (req: Request, res: Response) => {
         end_date: endDate,
         types: types || [],
         goal_type: goalType,
-        goal_percentage: goalType === 'percentage' ? goalPercentage : null,
+        goal_percentage: goalType === 'percentage' ? (noLimitWelle ? 0 : goalPercentage) : null,
         goal_value: goalType === 'value' ? goalValue : null,
         foto_enabled: fotoEnabled || false,
         foto_header: fotoHeader || null,
         foto_description: fotoDescription || null,
-        foto_only: fotoOnly || false
+        foto_only: fotoOnly || false,
+        no_limit_welle: noLimitWelle || false
       })
       .eq('id', id);
 
