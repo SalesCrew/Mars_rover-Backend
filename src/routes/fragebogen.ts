@@ -2150,9 +2150,12 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
         is_work_time_deduction: entry.reason === 'unterbrechung'
       };
       
-      // Store market_id for sonderaufgabe entries
       if (entry.market_id) {
         dbEntry.market_id = entry.market_id;
+      }
+
+      if (entry.schulungOrt) {
+        dbEntry.schulung_ort = entry.schulungOrt;
       }
       
       return dbEntry;
