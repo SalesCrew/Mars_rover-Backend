@@ -2591,6 +2591,46 @@ router.patch('/day-tracking/update-km-start', async (req: Request, res: Response
   }
 });
 
+// UPDATE KM STAND BY DATE - Update km_stand_start or km_stand_end for any specific date
+router.patch('/day-tracking/update-km', async (req: Request, res: Response) => {
+  try {
+    const freshClient = createFreshClient();
+    const { gebietsleiter_id, date, km_stand_start, km_stand_end } = req.body;
+
+    if (!gebietsleiter_id || !date) {
+      return res.status(400).json({ error: 'gebietsleiter_id and date are required' });
+    }
+
+    const updateData: Record<string, any> = {};
+    if (km_stand_start !== undefined && km_stand_start !== null && km_stand_start !== '') {
+      updateData.km_stand_start = parseFloat(String(km_stand_start).replace(',', '.'));
+    }
+    if (km_stand_end !== undefined && km_stand_end !== null && km_stand_end !== '') {
+      updateData.km_stand_end = parseFloat(String(km_stand_end).replace(',', '.'));
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: 'No KM fields to update' });
+    }
+
+    const { data, error } = await freshClient
+      .from('fb_day_tracking')
+      .update(updateData)
+      .eq('gebietsleiter_id', gebietsleiter_id)
+      .eq('tracking_date', date)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    console.log(`✅ KM Stand updated for GL ${gebietsleiter_id} on ${date}:`, updateData);
+    res.json(data);
+  } catch (error: any) {
+    console.error('Error updating KM Stand:', error);
+    res.status(500).json({ error: error.message || 'Failed to update KM Stand' });
+  }
+});
+
 // END DAY - Complete day tracking and calculate totals
 router.post('/day-tracking/end', async (req: Request, res: Response) => {
   try {
