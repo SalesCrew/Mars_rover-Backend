@@ -204,7 +204,8 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         let wellenQuery = freshClient
           .from('wellen')
           .select('id, start_date, end_date')
-          .eq('no_limit_welle', false);
+          .eq('no_limit_welle', false)
+          .eq('is_deleted', false);
         
         if (startDate) {
           wellenQuery = wellenQuery.gte('end_date', startDate);
@@ -376,7 +377,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         }
         
         // Get wellen filtered by date range
-        let wellenQuery = freshClient.from('wellen').select('id').eq('no_limit_welle', false);
+        let wellenQuery = freshClient.from('wellen').select('id').eq('no_limit_welle', false).eq('is_deleted', false);
         if (startDate) wellenQuery = wellenQuery.gte('end_date', startDate);
         if (endDate) wellenQuery = wellenQuery.lte('start_date', endDate);
         const { data: filteredWellen } = await wellenQuery;
@@ -513,7 +514,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         }
         
         // Get wellen filtered by date range
-        let wellenQuery = freshClient.from('wellen').select('id, goal_value, goal_type').eq('no_limit_welle', false);
+        let wellenQuery = freshClient.from('wellen').select('id, goal_value, goal_type').eq('no_limit_welle', false).eq('is_deleted', false);
         if (startDate) wellenQuery = wellenQuery.gte('end_date', startDate);
         if (endDate) wellenQuery = wellenQuery.lte('start_date', endDate);
         const { data: filteredWellen } = await wellenQuery;
@@ -752,7 +753,7 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
         }
         
         // Get wellen filtered by date range
-        let wellenQuery = freshClient.from('wellen').select('id, goal_value, goal_type').eq('no_limit_welle', false);
+        let wellenQuery = freshClient.from('wellen').select('id, goal_value, goal_type').eq('no_limit_welle', false).eq('is_deleted', false);
         if (startDate) wellenQuery = wellenQuery.gte('end_date', startDate);
         if (endDate) wellenQuery = wellenQuery.lte('start_date', endDate);
         const { data: filteredWellen } = await wellenQuery;
@@ -994,6 +995,7 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
     const { data: wellen, error: wellenError } = await freshClient
       .from('wellen')
       .select('*')
+      .eq('is_deleted', false)
       .or(`status.eq.active,status.eq.upcoming,and(status.eq.past,end_date.gte.${threeDaysAgo.toISOString().split('T')[0]})`)
       .order('start_date', { ascending: false });
 
@@ -1268,6 +1270,7 @@ router.get('/', async (req: Request, res: Response) => {
     const { data: wellen, error: wellenError } = await freshClient
       .from('wellen')
       .select('*')
+      .eq('is_deleted', false)
       .order('created_at', { ascending: false });
 
     if (wellenError) {
@@ -1675,6 +1678,7 @@ router.get('/:id', async (req: Request, res: Response) => {
       .from('wellen')
       .select('*')
       .eq('id', id)
+      .eq('is_deleted', false)
       .single();
 
     if (welleError) throw welleError;
@@ -2511,23 +2515,22 @@ router.put('/:id', async (req: Request, res: Response) => {
 });
 
 // ============================================================================
-// DELETE WELLE
+// DELETE WELLE (soft delete — sets is_deleted=true, never removes the row)
 // ============================================================================
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    console.log(`🗑️ Deleting welle ${id}...`);
+    console.log(`🗑️ Soft-deleting welle ${id}...`);
 
-    // Delete welle (cascade will handle related tables)
     const freshClient = createFreshClient();
     const { error } = await freshClient
       .from('wellen')
-      .delete()
+      .update({ is_deleted: true })
       .eq('id', id);
 
     if (error) throw error;
 
-    console.log(`✅ Deleted welle ${id}`);
+    console.log(`✅ Soft-deleted welle ${id} (row preserved, is_deleted=true)`);
     res.json({ message: 'Welle deleted successfully' });
   } catch (error: any) {
     console.error('❌ Error deleting welle:', error);
