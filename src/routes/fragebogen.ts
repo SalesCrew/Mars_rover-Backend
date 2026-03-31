@@ -14,6 +14,43 @@ router.use((req, res, next) => {
 // ============================================================================
 
 /**
+ * POST /api/fragebogen/questions/upload-image
+ * Upload an image for a question to Supabase storage
+ */
+router.post('/questions/upload-image', async (req: Request, res: Response) => {
+  try {
+    const { image, filename } = req.body;
+    if (!image) return res.status(400).json({ error: 'No image provided' });
+
+    let base64Data = image;
+    let contentType = 'image/jpeg';
+    if (image.startsWith('data:')) {
+      const matches = image.match(/^data:([^;]+);base64,(.+)$/);
+      if (matches) { contentType = matches[1]; base64Data = matches[2]; }
+    }
+
+    const buffer = Buffer.from(base64Data, 'base64');
+    const ext = contentType.split('/')[1] || 'jpg';
+    const finalFilename = filename || `${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
+    const filePath = `questions/${finalFilename}`;
+
+    const storageClient = createFreshClient();
+    const { data, error } = await storageClient.storage
+      .from('question-images')
+      .upload(filePath, buffer, { contentType, upsert: true });
+
+    if (error) { console.error('❌ Question image upload error:', error); return res.status(500).json({ error: error.message }); }
+
+    const { data: urlData } = storageClient.storage.from('question-images').getPublicUrl(data.path);
+    console.log('✅ Question image uploaded:', urlData.publicUrl);
+    res.json({ success: true, url: urlData.publicUrl });
+  } catch (error: any) {
+    console.error('Error uploading question image:', error);
+    res.status(500).json({ error: error.message || 'Failed to upload image' });
+  }
+});
+
+/**
  * GET /api/fragebogen/questions
  * List all questions with optional filtering
  */
@@ -136,6 +173,7 @@ router.post('/questions', async (req: Request, res: Response) => {
         matrix_config: matrix_config || null,
         numeric_constraints: numeric_constraints || null,
         slider_config: slider_config || null,
+        images: req.body.images || [],
         created_by: created_by || null
       })
       .select()
