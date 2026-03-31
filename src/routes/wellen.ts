@@ -1505,7 +1505,19 @@ router.get('/', async (req: Request, res: Response) => {
           fotoDescription: welle.foto_description || null,
           fotoTags: (fotoTagsData || []).map(t => ({ id: t.id, name: t.tag_name, type: t.tag_type })),
           fotoOnly: welle.foto_only || false,
-          noLimitWelle: welle.no_limit_welle || false
+          noLimitWelle: welle.no_limit_welle || false,
+          // Value from submissions for items no longer present in wellen_displays / kartonware / einzelprodukte
+          // (products hard-deleted before soft-delete was introduced)
+          orphanedValueCurrent: (() => {
+            const knownIds = new Set([
+              ...(displays || []).map((d: any) => d.id),
+              ...(kartonware || []).map((k: any) => k.id),
+              ...(einzelprodukte || []).map((e: any) => e.id),
+            ]);
+            return (progressData || [])
+              .filter(p => ['display', 'kartonware', 'einzelprodukt'].includes(p.item_type) && !knownIds.has(p.item_id))
+              .reduce((sum, p) => sum + (p.current_number * (p.value_per_unit || 0)), 0);
+          })()
         };
       })
     );
