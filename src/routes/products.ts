@@ -35,14 +35,15 @@ const transformProductToDB = (product: any) => ({
   is_active: product.isActive !== false,
 });
 
-// GET /api/products - Get all products
+// GET /api/products - Get all active (non-deleted) products
 router.get('/', async (req, res) => {
   try {
     const freshClient = createFreshClient();
-    
+
     const { data, error } = await freshClient
       .from('products')
       .select('*')
+      .eq('is_deleted', false)
       .order('name', { ascending: true });
 
     if (error) {
@@ -62,7 +63,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const freshClient = createFreshClient();
-    
+
     const { data, error } = await freshClient
       .from('products')
       .select('*')
@@ -85,7 +86,7 @@ router.get('/:id', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const freshClient = createFreshClient();
-    
+
     const products = Array.isArray(req.body) ? req.body : [req.body];
     const dbProducts = products.map(transformProductToDB);
 
@@ -111,9 +112,9 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const freshClient = createFreshClient();
-    
+
     const updates: any = {};
-    
+
     if (req.body.name !== undefined) updates.name = req.body.name;
     if (req.body.department !== undefined) updates.department = req.body.department;
     if (req.body.productType !== undefined) updates.product_type = req.body.productType;
@@ -144,24 +145,28 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// DELETE /api/products/:id - Delete product
-router.delete('/:id', async (req, res) => {
+// PATCH /api/products/:id/archive - Soft-delete a product (sets is_deleted=true, row is never removed)
+// Hard deletion is intentionally not supported to preserve historical submission data.
+router.patch('/:id/archive', async (req, res) => {
   try {
     const freshClient = createFreshClient();
-    
-    const { error } = await freshClient
+
+    const { data, error } = await freshClient
       .from('products')
-      .delete()
-      .eq('id', req.params.id);
+      .update({ is_deleted: true })
+      .eq('id', req.params.id)
+      .select()
+      .single();
 
     if (error) {
-      console.error('Error deleting product:', error);
-      return res.status(500).json({ error: 'Failed to delete product' });
+      console.error('Error archiving product:', error);
+      return res.status(500).json({ error: 'Failed to archive product' });
     }
 
-    res.status(204).send();
+    console.log(`✅ Product archived (soft-deleted): ${req.params.id}`);
+    res.json(transformProductFromDB(data));
   } catch (error) {
-    console.error('Error in DELETE /products/:id:', error);
+    console.error('Error in PATCH /products/:id/archive:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
