@@ -17,6 +17,7 @@ const transformProductFromDB = (dbProduct: any) => ({
   artikelNr: dbProduct.artikel_nr || undefined,
   paletteProducts: dbProduct.palette_products || undefined,
   isActive: dbProduct.is_active !== false,
+  isArchived: dbProduct.is_deleted === true,
 });
 
 // Transform from API format to DB format
@@ -36,15 +37,22 @@ const transformProductToDB = (product: any) => ({
 });
 
 // GET /api/products - Get all active (non-deleted) products
+// Optional query param: ?includeArchived=true — returns all products including archived ones
 router.get('/', async (req, res) => {
   try {
     const freshClient = createFreshClient();
+    const includeArchived = req.query.includeArchived === 'true';
 
-    const { data, error } = await freshClient
+    let query = freshClient
       .from('products')
       .select('*')
-      .eq('is_deleted', false)
       .order('name', { ascending: true });
+
+    if (!includeArchived) {
+      query = query.eq('is_deleted', false);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       console.error('Error fetching products:', error);
