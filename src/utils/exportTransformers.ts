@@ -3,6 +3,75 @@
 
 import { SupabaseClient } from '@supabase/supabase-js';
 
+// Normalize product names for robust matching across exports and copied Excel names.
+const normalizeNameStrict = (name: string): string =>
+  name
+    .normalize('NFKC')
+    .replace(/\u00a0/g, ' ') // non-breaking space from Excel/copy-paste
+    .replace(/[™®]/g, '') // optional trademark symbols
+    .replace(/[’`´]/g, "'") // apostrophe variants
+    .replace(/[×]/g, 'x') // multiplication symbol variants
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+
+const normalizeNameLoose = (name: string): string =>
+  normalizeNameStrict(name).replace(/[^a-z0-9]/g, '');
+
+const parseVe = (value: any): number | null => {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = parseInt(String(value), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+const setBestVe = (map: Map<string, number | null>, key: string, ve: number | null) => {
+  if (!key) return;
+  if (!map.has(key)) {
+    map.set(key, ve);
+    return;
+  }
+  const current = map.get(key);
+  if (current == null && ve != null) {
+    map.set(key, ve);
+  }
+};
+
+async function buildProductVeLookup(client: SupabaseClient): Promise<{
+  strictMap: Map<string, number | null>;
+  looseMap: Map<string, number | null>;
+}> {
+  const strictMap = new Map<string, number | null>();
+  const looseMap = new Map<string, number | null>();
+
+  let from = 0;
+  const pageSize = 1000;
+  let hasMore = true;
+
+  while (hasMore) {
+    const { data, error } = await client
+      .from('products')
+      .select('name, content')
+      .range(from, from + pageSize - 1);
+
+    if (error) throw error;
+
+    const rows = data || [];
+    rows.forEach((row: any) => {
+      if (!row?.name) return;
+      const strictKey = normalizeNameStrict(String(row.name));
+      const looseKey = normalizeNameLoose(String(row.name));
+      const ve = parseVe(row.content);
+      setBestVe(strictMap, strictKey, ve);
+      setBestVe(looseMap, looseKey, ve);
+    });
+
+    from += pageSize;
+    hasMore = rows.length === pageSize;
+  }
+
+  return { strictMap, looseMap };
+}
+
 export interface ExportRow {
   [key: string]: any;
 }
@@ -123,19 +192,8 @@ export async function transformWellenSubmissions(
     schutteProductIds.length > 0 ? client.from('wellen_schuetten_products').select('id, name, schuette_id').in('id', schutteProductIds) : { data: [] }
   ]);
 
-  // Fetch products.content (VE) for Einzelprodukte by name-matching against the products table
-  const einzelproduktNames = (einzelprodukteData.data || []).map(e => e.name).filter(Boolean);
-  let productVeMap = new Map<string, number | null>(); // product name -> parsed VE (integer)
-  if (einzelproduktNames.length > 0) {
-    const { data: productsData } = await client
-      .from('products')
-      .select('name, content')
-      .in('name', einzelproduktNames);
-    (productsData || []).forEach(p => {
-      const ve = p.content ? parseInt(String(p.content), 10) : null;
-      productVeMap.set(p.name, isNaN(ve as number) ? null : ve);
-    });
-  }
+  // Build VE lookup from products table and match by robust normalized keys.
+  const { strictMap: productVeMap, looseMap: productVeLooseMap } = await buildProductVeLookup(client);
 
   console.log(`✅ Fetched items:`, {
     displays: displaysData.data?.length || 0,
@@ -329,7 +387,9 @@ export async function transformWellenSubmissions(
         let einzelproduktVe: number | null = null;
         let quantityInVe: number | null = null;
         if (sub.item_type === 'einzelprodukt' && item?.name) {
-          const ve = productVeMap.get(item.name);
+          const strictKey = normalizeNameStrict(item.name);
+          const looseKey = normalizeNameLoose(item.name);
+          const ve = productVeMap.get(strictKey) ?? productVeLooseMap.get(looseKey);
           if (ve != null && ve > 0) {
             einzelproduktVe = ve;
             quantityInVe = sub.quantity / ve;
@@ -1084,19 +1144,13 @@ export async function transformSingleWaveExport(
   const einzelproduktItemNames = einzelprodukte.map(ep => ep.name).filter(Boolean);
   const einzelproduktVeMap: Record<string, number | null> = {};
   if (einzelproduktItemNames.length > 0) {
-    const { data: prodVeData } = await client
-      .from('products')
-      .select('name, content')
-      .in('name', einzelproduktItemNames);
-    const nameToVe = new Map<string, number | null>();
-    (prodVeData || []).forEach(p => {
-      const parsed = p.content ? parseInt(String(p.content), 10) : NaN;
-      nameToVe.set(p.name, isNaN(parsed) ? null : parsed);
-    });
+    const { strictMap: nameToVe, looseMap: looseNameToVe } = await buildProductVeLookup(client);
     // Apply VE to each einzelprodukt item
     items.forEach(item => {
       if (item.type === 'einzelprodukt') {
-        const ve = nameToVe.get(item.name) ?? null;
+        const strictKey = normalizeNameStrict(item.name);
+        const looseKey = normalizeNameLoose(item.name);
+        const ve = nameToVe.get(strictKey) ?? looseNameToVe.get(looseKey) ?? null;
         item.ve = ve;
         einzelproduktVeMap[item.id] = ve;
       }
