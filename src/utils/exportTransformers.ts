@@ -123,6 +123,20 @@ export async function transformWellenSubmissions(
     schutteProductIds.length > 0 ? client.from('wellen_schuetten_products').select('id, name, schuette_id').in('id', schutteProductIds) : { data: [] }
   ]);
 
+  // Fetch products.content (VE) for Einzelprodukte by name-matching against the products table
+  const einzelproduktNames = (einzelprodukteData.data || []).map(e => e.name).filter(Boolean);
+  let productVeMap = new Map<string, number | null>(); // product name -> parsed VE (integer)
+  if (einzelproduktNames.length > 0) {
+    const { data: productsData } = await client
+      .from('products')
+      .select('name, content')
+      .in('name', einzelproduktNames);
+    (productsData || []).forEach(p => {
+      const ve = p.content ? parseInt(String(p.content), 10) : null;
+      productVeMap.set(p.name, isNaN(ve as number) ? null : ve);
+    });
+  }
+
   console.log(`✅ Fetched items:`, {
     displays: displaysData.data?.length || 0,
     kartonware: kartonwareData.data?.length || 0,
@@ -310,6 +324,17 @@ export async function transformWellenSubmissions(
         // Regular item (display, kartonware, einzelprodukt)
         // Use item_value from wave definition if available (for value-based waves)
         const valuePerUnit = item?.itemValue || sub.value_per_unit || 0;
+
+        // VE enrichment for Einzelprodukte only
+        let einzelproduktVe: number | null = null;
+        let quantityInVe: number | null = null;
+        if (sub.item_type === 'einzelprodukt' && item?.name) {
+          const ve = productVeMap.get(item.name);
+          if (ve != null && ve > 0) {
+            einzelproduktVe = ve;
+            quantityInVe = sub.quantity / ve;
+          }
+        }
         
         const row: SubmissionWithMeta = {
           submission_id: sub.id,
@@ -330,7 +355,9 @@ export async function transformWellenSubmissions(
           value_per_unit: valuePerUnit,
           total_value: (sub.quantity * valuePerUnit),
           photo_url: sub.photo_url || '',
-          delivery_photo_url: sub.delivery_photo_url || ''
+          delivery_photo_url: sub.delivery_photo_url || '',
+          einzelprodukt_ve: einzelproduktVe !== null ? einzelproduktVe : '',
+          quantity_in_ve: quantityInVe !== null ? +quantityInVe.toFixed(2) : '',
         };
         rows.push(row);
         processedIds.add(sub.id);
@@ -732,6 +759,7 @@ export interface SingleWaveItem {
   parentType: string | null;
   colorGroup: number;
   isParent: boolean;
+  ve?: number | null;
 }
 
 export interface SingleWaveResult {
@@ -743,6 +771,7 @@ export interface SingleWaveResult {
   matrix: Record<string, Record<string, number>>; // itemId -> marketId -> quantity
   valueMatrix: Record<string, Record<string, number>>; // itemId -> marketId -> total value (from submissions)
   parentMatrix: Record<string, Record<string, number>>; // parentId -> marketId -> quantity
+  einzelproduktVeMap: Record<string, number | null>; // itemId -> VE (from products.content)
 }
 
 const PASTEL_COLORS = [
@@ -932,6 +961,7 @@ export async function transformSingleWaveExport(
       parentType: null,
       colorGroup: -1,
       isParent: false,
+      ve: null, // will be enriched below
     });
   });
 
@@ -1050,6 +1080,36 @@ export async function transformSingleWaveExport(
     });
   }
 
+  // Enrich Einzelprodukt items with VE from products.content
+  const einzelproduktItemNames = einzelprodukte.map(ep => ep.name).filter(Boolean);
+  const einzelproduktVeMap: Record<string, number | null> = {};
+  if (einzelproduktItemNames.length > 0) {
+    const { data: prodVeData } = await client
+      .from('products')
+      .select('name, content')
+      .in('name', einzelproduktItemNames);
+    const nameToVe = new Map<string, number | null>();
+    (prodVeData || []).forEach(p => {
+      const parsed = p.content ? parseInt(String(p.content), 10) : NaN;
+      nameToVe.set(p.name, isNaN(parsed) ? null : parsed);
+    });
+    // Apply VE to each einzelprodukt item
+    items.forEach(item => {
+      if (item.type === 'einzelprodukt') {
+        const ve = nameToVe.get(item.name) ?? null;
+        item.ve = ve;
+        einzelproduktVeMap[item.id] = ve;
+      }
+    });
+  } else {
+    // no einzelprodukte, map stays empty
+    items.forEach(item => {
+      if (item.type === 'einzelprodukt') {
+        einzelproduktVeMap[item.id] = null;
+      }
+    });
+  }
+
   return {
     waveName: welle.name,
     goalType: welle.goal_type,
@@ -1059,6 +1119,7 @@ export async function transformSingleWaveExport(
     matrix,
     valueMatrix,
     parentMatrix,
+    einzelproduktVeMap,
   };
 }
 

@@ -42,7 +42,9 @@ export const EXPORT_DATASETS: Record<string, DatasetDefinition> = {
       { id: 'total_value', label: 'Gesamtwert', type: 'currency', width: 14, default: true },
       { id: 'photo_url', label: 'Foto URL', type: 'string', width: 40, default: false },
       { id: 'delivery_photo_url', label: 'Lieferung Foto URL', type: 'string', width: 40, default: false },
-      { id: 'submission_id', label: 'Submission ID', type: 'string', width: 36, default: false }
+      { id: 'submission_id', label: 'Submission ID', type: 'string', width: 36, default: false },
+      { id: 'einzelprodukt_ve', label: 'VE', type: 'number', width: 10, default: true },
+      { id: 'quantity_in_ve', label: 'Menge in VE', type: 'number', width: 14, default: true }
     ]
   },
 

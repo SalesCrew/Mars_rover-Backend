@@ -52,22 +52,24 @@ router.post('/custom', async (req: Request, res: Response) => {
       ];
 
       const sheet = workbook.addWorksheet(result.waveName, {
-        views: [{ state: 'frozen', xSplit: 3, ySplit: 3 }]
+        views: [{ state: 'frozen', xSplit: 4, ySplit: 3 }]
       });
 
       // Row 1: Wave name header
       const titleRow = sheet.addRow([result.waveName]);
       titleRow.font = { bold: true, size: 16 };
       titleRow.height = 28;
-      sheet.mergeCells(1, 1, 1, 3 + result.markets.length + (isValueBased ? 2 : 1));
+      sheet.mergeCells(1, 1, 1, 4 + result.markets.length + (isValueBased ? 3 : 2));
 
       // Row 2: spacer
       sheet.addRow([]);
 
       // Row 3: Column headers
-      const headers = ['Nr.', 'Produkt', 'Preis/VE'];
+      // Layout: Nr. | Produkt | Preis/VE | VE | [markets...] | Gesamt Menge | Gesamt VE | [Gesamt Wert]
+      const headers = ['Nr.', 'Produkt', 'Preis/VE', 'VE'];
       result.markets.forEach(m => headers.push(m.name));
       headers.push('Gesamt Menge');
+      headers.push('Gesamt VE');
       if (isValueBased) headers.push('Gesamt Wert');
 
       const headerRowObj = sheet.addRow(headers);
@@ -84,18 +86,26 @@ router.post('/custom', async (req: Request, res: Response) => {
       sheet.getColumn(1).width = 6;
       sheet.getColumn(2).width = 35;
       sheet.getColumn(3).width = 12;
+      sheet.getColumn(4).width = 8; // VE column
       for (let i = 0; i < result.markets.length; i++) {
-        sheet.getColumn(4 + i).width = 14;
+        sheet.getColumn(5 + i).width = 14;
       }
-      const gesamtMengeCol = 4 + result.markets.length;
-      const gesamtWertCol = gesamtMengeCol + 1;
+      const gesamtMengeCol = 5 + result.markets.length;
+      const gesamtVeCol = gesamtMengeCol + 1;
+      const gesamtWertCol = gesamtVeCol + 1;
       sheet.getColumn(gesamtMengeCol).width = 14;
+      sheet.getColumn(gesamtVeCol).width = 14;
       if (isValueBased) sheet.getColumn(gesamtWertCol).width = 14;
 
       // Row 4+: Child items / Einzelprodukte
       let rowNum = 1;
       result.items.forEach(item => {
-        const rowData: any[] = [rowNum, item.name, item.pricePerUnit || ''];
+        // VE is only available for einzelprodukt items
+        const isEinzelprodukt = item.type === 'einzelprodukt';
+        const itemVe: number | null = isEinzelprodukt ? (item.ve ?? null) : null;
+        const veDisplay = itemVe != null && itemVe > 0 ? itemVe : '';
+
+        const rowData: any[] = [rowNum, item.name, item.pricePerUnit || '', veDisplay];
 
         let totalQty = 0;
         let totalValue = 0;
@@ -107,6 +117,11 @@ router.post('/custom', async (req: Request, res: Response) => {
         });
 
         rowData.push(totalQty || '');
+        // Gesamt VE: totalQty / ve (only for einzelprodukt with a known ve)
+        const totalVe = (isEinzelprodukt && itemVe != null && itemVe > 0 && totalQty > 0)
+          ? +(totalQty / itemVe).toFixed(2)
+          : '';
+        rowData.push(totalVe);
         if (isValueBased) {
           rowData.push(totalValue);
         }
@@ -127,9 +142,9 @@ router.post('/custom', async (req: Request, res: Response) => {
           priceCell.numFmt = '€#,##0.00';
         }
 
-        // Format quantity cells as numbers (not empty strings)
+        // Format market quantity cells
         for (let i = 0; i < result.markets.length; i++) {
-          const cell = addedRow.getCell(4 + i);
+          const cell = addedRow.getCell(5 + i);
           cell.alignment = { horizontal: 'center' };
         }
 
@@ -137,6 +152,10 @@ router.post('/custom', async (req: Request, res: Response) => {
         const mengeCell = addedRow.getCell(gesamtMengeCol);
         mengeCell.font = { bold: true };
         mengeCell.alignment = { horizontal: 'center' };
+
+        const veCell = addedRow.getCell(gesamtVeCol);
+        veCell.font = { bold: true };
+        veCell.alignment = { horizontal: 'center' };
 
         if (isValueBased) {
           const wertCell = addedRow.getCell(gesamtWertCol);
@@ -156,7 +175,7 @@ router.post('/custom', async (req: Request, res: Response) => {
 
       // Parent item rows (palette/schuette containers only -- no Gesamt Wert to avoid double-counting)
       result.parentItems.forEach(parent => {
-        const rowData: any[] = ['', parent.name, ''];
+        const rowData: any[] = ['', parent.name, '', ''];
 
         let totalQty = 0;
         result.markets.forEach(m => {
@@ -166,6 +185,7 @@ router.post('/custom', async (req: Request, res: Response) => {
         });
 
         rowData.push(totalQty || '');
+        rowData.push(''); // Gesamt VE: blank for palette/schuette
         if (isValueBased) rowData.push('');
 
         const addedRow = sheet.addRow(rowData);
@@ -187,7 +207,7 @@ router.post('/custom', async (req: Request, res: Response) => {
       const lastRow = sheet.rowCount;
       for (let r = 3; r <= lastRow; r++) {
         const row = sheet.getRow(r);
-        const colCount = 3 + result.markets.length + (isValueBased ? 2 : 1);
+        const colCount = 4 + result.markets.length + (isValueBased ? 3 : 2);
         for (let c = 1; c <= colCount; c++) {
           const cell = row.getCell(c);
           cell.border = {
