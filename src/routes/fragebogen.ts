@@ -125,7 +125,7 @@ router.get('/questions/:id', async (req: Request, res: Response) => {
 
 /**
  * POST /api/fragebogen/questions
- * Create a new question
+ * Create a new question. Ensures options and matrix entries have stable IDs.
  */
 router.post('/questions', async (req: Request, res: Response) => {
   try {
@@ -143,22 +143,49 @@ router.post('/questions', async (req: Request, res: Response) => {
       created_by
     } = req.body;
     
-    // Validate required fields
     if (!type || !question_text) {
       return res.status(400).json({ error: 'type and question_text are required' });
     }
     
-    // Validate type-specific fields
     if ((type === 'single_choice' || type === 'multiple_choice') && (!options || !Array.isArray(options))) {
       return res.status(400).json({ error: 'options array is required for choice questions' });
     }
-    
     if (type === 'likert' && !likert_scale) {
       return res.status(400).json({ error: 'likert_scale is required for likert questions' });
     }
-    
     if (type === 'matrix' && !matrix_config) {
       return res.status(400).json({ error: 'matrix_config is required for matrix questions' });
+    }
+
+    // Ensure options carry stable IDs — accept both string[] (legacy) and {id,label}[]
+    let normalisedOptions: any[] | null = null;
+    if (options && Array.isArray(options)) {
+      normalisedOptions = options.map((opt: any, idx: number) => {
+        if (typeof opt === 'string') {
+          return { id: `opt_${idx}_${Date.now().toString(36)}`, label: opt };
+        }
+        if (!opt.id) {
+          return { ...opt, id: `opt_${idx}_${Date.now().toString(36)}` };
+        }
+        return opt;
+      });
+    }
+
+    // Ensure matrix rows and columns carry stable IDs
+    let normalisedMatrix: any = matrix_config || null;
+    if (normalisedMatrix) {
+      normalisedMatrix = {
+        rows: (normalisedMatrix.rows || []).map((r: any, idx: number) => {
+          if (typeof r === 'string') return { id: `row_${idx}_${Date.now().toString(36)}`, label: r };
+          if (!r.id) return { ...r, id: `row_${idx}_${Date.now().toString(36)}` };
+          return r;
+        }),
+        columns: (normalisedMatrix.columns || []).map((c: any, idx: number) => {
+          if (typeof c === 'string') return { id: `col_${idx}_${Date.now().toString(36)}`, label: c };
+          if (!c.id) return { ...c, id: `col_${idx}_${Date.now().toString(36)}` };
+          return c;
+        }),
+      };
     }
     
     const { data, error } = await freshClient
@@ -168,9 +195,9 @@ router.post('/questions', async (req: Request, res: Response) => {
         question_text,
         instruction: instruction || null,
         is_template: is_template || false,
-        options: options || null,
+        options: normalisedOptions,
         likert_scale: likert_scale || null,
-        matrix_config: matrix_config || null,
+        matrix_config: normalisedMatrix,
         numeric_constraints: numeric_constraints || null,
         slider_config: slider_config || null,
         images: req.body.images || [],
@@ -191,18 +218,43 @@ router.post('/questions', async (req: Request, res: Response) => {
 
 /**
  * PUT /api/fragebogen/questions/:id
- * Update an existing question
+ * Update an existing question. Preserves existing option/matrix IDs; assigns new
+ * stable IDs to any item that arrives without one.
  */
 router.put('/questions/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
-    const updates = req.body;
+    const updates = { ...req.body };
     
-    // Remove fields that shouldn't be updated directly
     delete updates.id;
     delete updates.created_at;
     delete updates.created_by;
+
+    // Normalise options if present
+    if (updates.options && Array.isArray(updates.options)) {
+      updates.options = updates.options.map((opt: any, idx: number) => {
+        if (typeof opt === 'string') return { id: `opt_${idx}_${Date.now().toString(36)}`, label: opt };
+        if (!opt.id) return { ...opt, id: `opt_${idx}_${Date.now().toString(36)}` };
+        return opt;
+      });
+    }
+
+    // Normalise matrix_config if present
+    if (updates.matrix_config) {
+      updates.matrix_config = {
+        rows: (updates.matrix_config.rows || []).map((r: any, idx: number) => {
+          if (typeof r === 'string') return { id: `row_${idx}_${Date.now().toString(36)}`, label: r };
+          if (!r.id) return { ...r, id: `row_${idx}_${Date.now().toString(36)}` };
+          return r;
+        }),
+        columns: (updates.matrix_config.columns || []).map((c: any, idx: number) => {
+          if (typeof c === 'string') return { id: `col_${idx}_${Date.now().toString(36)}`, label: c };
+          if (!c.id) return { ...c, id: `col_${idx}_${Date.now().toString(36)}` };
+          return c;
+        }),
+      };
+    }
     
     const { data, error } = await freshClient
       .from('fb_questions')
@@ -779,7 +831,8 @@ router.get('/modules/:id/usage', async (req: Request, res: Response) => {
 
 /**
  * DELETE /api/fragebogen/modules/:id/permanent
- * Permanently delete a module and optionally its questions
+ * Permanently delete a module and optionally its questions.
+ * Blocked if any question in this module has existing answers.
  */
 router.delete('/modules/:id/permanent', async (req: Request, res: Response) => {
   try {
@@ -787,7 +840,7 @@ router.delete('/modules/:id/permanent', async (req: Request, res: Response) => {
     const { deleteQuestions } = req.query;
     const freshClient = createFreshClient();
     
-    // First get all question IDs associated with this module
+    // Get all question IDs associated with this module
     const { data: moduleQuestions, error: mqError } = await freshClient
       .from('fb_module_questions')
       .select('question_id')
@@ -795,7 +848,21 @@ router.delete('/modules/:id/permanent', async (req: Request, res: Response) => {
     
     if (mqError) throw mqError;
     
-    const questionIds = (moduleQuestions || []).map(mq => mq.question_id);
+    const questionIds = (moduleQuestions || []).map((mq: any) => mq.question_id);
+
+    // Guard: block deletion if any question in this module has saved answers
+    if (questionIds.length > 0) {
+      const { count: answerCount, error: acError } = await freshClient
+        .from('fb_response_answers')
+        .select('*', { count: 'exact', head: true })
+        .in('question_id', questionIds);
+      if (acError) throw acError;
+      if ((answerCount ?? 0) > 0) {
+        return res.status(409).json({
+          error: 'Cannot permanently delete this module because it contains questions with saved answers. Archive it instead.'
+        });
+      }
+    }
     
     // Delete module rules
     const { error: rulesError } = await freshClient
@@ -1324,12 +1391,26 @@ router.delete('/fragebogen/:id', async (req: Request, res: Response) => {
 
 /**
  * DELETE /api/fragebogen/fragebogen/:id/permanent
- * Permanently delete a fragebogen (keeps modules and questions intact)
+ * Permanently delete a fragebogen (keeps modules and questions intact).
+ * Blocked if any completed responses exist.
  */
 router.delete('/fragebogen/:id/permanent', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
+
+    // Guard: block if completed responses exist
+    const { count: completedCount, error: ccError } = await freshClient
+      .from('fb_responses')
+      .select('*', { count: 'exact', head: true })
+      .eq('fragebogen_id', id)
+      .eq('status', 'completed');
+    if (ccError) throw ccError;
+    if ((completedCount ?? 0) > 0) {
+      return res.status(409).json({
+        error: 'Cannot permanently delete this Fragebogen because it has completed responses. Archive it instead.'
+      });
+    }
     
     // Delete fragebogen-module associations
     const { error: fmError } = await freshClient
@@ -1461,14 +1542,13 @@ router.get('/responses/fragebogen/:fragebogenId', async (req: Request, res: Resp
 
 /**
  * GET /api/fragebogen/responses/:id
- * Get a single response with all answers
+ * Get a single response with all answers and resolved label context.
  */
 router.get('/responses/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
     
-    // Get response
     const { data: response, error: responseError } = await freshClient
       .from('fb_responses')
       .select(`
@@ -1480,27 +1560,73 @@ router.get('/responses/:id', async (req: Request, res: Response) => {
       .single();
     
     if (responseError) throw responseError;
-    
     if (!response) {
       return res.status(404).json({ error: 'Response not found' });
     }
     
-    // Get answers
     const { data: answers, error: answersError } = await freshClient
       .from('fb_response_answers')
       .select(`
         *,
-        question:fb_questions (id, type, question_text)
+        question:fb_questions (id, type, question_text, options, matrix_config, likert_scale)
       `)
       .eq('response_id', id)
       .order('answered_at', { ascending: true });
     
     if (answersError) throw answersError;
-    
-    res.json({
-      ...response,
-      answers: answers || []
+
+    // Enrich each answer with a human-readable display value resolved from current definitions
+    const enrichedAnswers = (answers || []).map((a: any) => {
+      let displayValue: any = null;
+      const q = a.question;
+      if (!q) return { ...a, display_value: null };
+
+      switch (q.type) {
+        case 'yesno':
+          displayValue = a.answer_boolean === true ? 'Ja' : a.answer_boolean === false ? 'Nein' : null;
+          break;
+        case 'single_choice': {
+          const opt = (q.options || []).find((o: any) => o.id === a.answer_text);
+          displayValue = opt ? opt.label : a.answer_text;
+          break;
+        }
+        case 'multiple_choice': {
+          const ids: string[] = a.answer_json || [];
+          displayValue = ids.map((id: string) => {
+            const opt = (q.options || []).find((o: any) => o.id === id);
+            return opt ? opt.label : id;
+          });
+          break;
+        }
+        case 'matrix': {
+          const map: Record<string, string> = a.answer_json || {};
+          displayValue = Object.entries(map).map(([rowId, colId]) => {
+            const row = (q.matrix_config?.rows || []).find((r: any) => r.id === rowId);
+            const col = (q.matrix_config?.columns || []).find((c: any) => c.id === colId);
+            return `${row?.label ?? rowId}: ${col?.label ?? colId}`;
+          });
+          break;
+        }
+        case 'likert':
+        case 'open_numeric':
+        case 'slider':
+          displayValue = a.answer_numeric;
+          break;
+        case 'open_text':
+        case 'barcode_scanner':
+          displayValue = a.answer_text;
+          break;
+        case 'photo_upload':
+          displayValue = a.answer_file_url;
+          break;
+        default:
+          displayValue = a.answer_text ?? a.answer_numeric ?? a.answer_json;
+      }
+
+      return { ...a, display_value: displayValue };
     });
+    
+    res.json({ ...response, answers: enrichedAnswers });
   } catch (error: any) {
     console.error('Error fetching response:', error);
     res.status(500).json({ error: error.message || 'Failed to fetch response' });
@@ -1509,12 +1635,13 @@ router.get('/responses/:id', async (req: Request, res: Response) => {
 
 /**
  * POST /api/fragebogen/responses
- * Start a new response (GL)
+ * Start a new response run for a GL at a market.
+ * Multiple runs per (fragebogen, GL, market) are supported.
  */
 router.post('/responses', async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
-    const { fragebogen_id, gebietsleiter_id, market_id } = req.body;
+    const { fragebogen_id, gebietsleiter_id, market_id, zeiterfassung_submission_id } = req.body;
     
     if (!fragebogen_id || !gebietsleiter_id || !market_id) {
       return res.status(400).json({ 
@@ -1522,26 +1649,14 @@ router.post('/responses', async (req: Request, res: Response) => {
       });
     }
     
-    // Check if response already exists
-    const { data: existing } = await freshClient
-      .from('fb_responses')
-      .select('id, status')
-      .eq('fragebogen_id', fragebogen_id)
-      .eq('gebietsleiter_id', gebietsleiter_id)
-      .eq('market_id', market_id)
-      .single();
-    
-    if (existing) {
-      return res.json(existing); // Return existing response
-    }
-    
-    // Create new response
+    // Always create a new run — multiple historical runs are intentional
     const { data, error } = await freshClient
       .from('fb_responses')
       .insert({
         fragebogen_id,
         gebietsleiter_id,
         market_id,
+        zeiterfassung_submission_id: zeiterfassung_submission_id || null,
         status: 'in_progress'
       })
       .select()
@@ -1549,7 +1664,7 @@ router.post('/responses', async (req: Request, res: Response) => {
     
     if (error) throw error;
     
-    console.log(`✅ Started response: ${data.id}`);
+    console.log(`✅ Started response run: ${data.id}`);
     res.status(201).json(data);
   } catch (error: any) {
     console.error('Error creating response:', error);
@@ -1559,7 +1674,8 @@ router.post('/responses', async (req: Request, res: Response) => {
 
 /**
  * PUT /api/fragebogen/responses/:id
- * Update a response (add/update answers)
+ * Save/update answers for a response run. Validates each answer against the
+ * authoritative question definition in the database before persisting.
  */
 router.put('/responses/:id', async (req: Request, res: Response) => {
   try {
@@ -1570,60 +1686,257 @@ router.put('/responses/:id', async (req: Request, res: Response) => {
     if (!answers || !Array.isArray(answers)) {
       return res.status(400).json({ error: 'answers array is required' });
     }
-    
-    // Upsert answers
+
+    // --- Guard: response must exist and must not be completed ---
+    const { data: responseRow, error: responseFetchError } = await freshClient
+      .from('fb_responses')
+      .select('id, status')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (responseFetchError) throw responseFetchError;
+    if (!responseRow) {
+      return res.status(404).json({ error: 'Response not found' });
+    }
+    if (responseRow.status === 'completed') {
+      return res.status(409).json({ error: 'Response is already completed and cannot be modified' });
+    }
+
+    const now = new Date().toISOString();
+
     for (const answer of answers) {
-      const { question_id, module_id, answer_text, answer_numeric, answer_json, answer_file_url } = answer;
-      
-      // Check if answer exists
+      const { question_id, module_id } = answer;
+
+      if (!question_id || !module_id) {
+        return res.status(400).json({ error: 'Each answer must have question_id and module_id' });
+      }
+
+      // --- Validate question belongs to module ---
+      const { data: moduleQuestion, error: mqError } = await freshClient
+        .from('fb_module_questions')
+        .select('question_id')
+        .eq('module_id', module_id)
+        .eq('question_id', question_id)
+        .maybeSingle();
+
+      if (mqError) throw mqError;
+      if (!moduleQuestion) {
+        return res.status(400).json({
+          error: `Question ${question_id} is not part of module ${module_id}`
+        });
+      }
+
+      // --- Fetch authoritative question definition ---
+      const { data: questionDef, error: qError } = await freshClient
+        .from('fb_questions')
+        .select('id, type, options, matrix_config, likert_scale, numeric_constraints, slider_config')
+        .eq('id', question_id)
+        .single();
+
+      if (qError || !questionDef) {
+        return res.status(400).json({ error: `Question ${question_id} not found` });
+      }
+
+      // Use DB question_type — do not trust client-provided question_type
+      const dbType: string = questionDef.type;
+
+      // --- Per-type validation ---
+      let kind: string;
+      let text: any = null;
+      let numeric: any = null;
+      let boolVal: any = null;
+      let json: any = null;
+      let file: any = null;
+
+      if (dbType === 'yesno') {
+        if (typeof answer.answer_boolean !== 'boolean') {
+          return res.status(400).json({ error: `Question ${question_id} (yesno) requires a boolean answer_boolean` });
+        }
+        kind = 'boolean';
+        boolVal = answer.answer_boolean;
+
+      } else if (dbType === 'likert') {
+        const numVal = answer.answer_numeric;
+        if (typeof numVal !== 'number' || isNaN(numVal)) {
+          return res.status(400).json({ error: `Question ${question_id} (likert) requires a numeric answer_numeric` });
+        }
+        const scale = questionDef.likert_scale as { min?: number; max?: number } | null;
+        if (scale?.min !== undefined && numVal < scale.min) {
+          return res.status(400).json({ error: `Question ${question_id}: value ${numVal} below likert min ${scale.min}` });
+        }
+        if (scale?.max !== undefined && numVal > scale.max) {
+          return res.status(400).json({ error: `Question ${question_id}: value ${numVal} above likert max ${scale.max}` });
+        }
+        kind = 'numeric';
+        numeric = numVal;
+
+      } else if (dbType === 'open_numeric') {
+        const numVal = answer.answer_numeric;
+        if (typeof numVal !== 'number' || isNaN(numVal)) {
+          return res.status(400).json({ error: `Question ${question_id} (open_numeric) requires a numeric answer_numeric` });
+        }
+        const nc = questionDef.numeric_constraints as { min?: number; max?: number; decimals?: number } | null;
+        if (nc?.min !== undefined && numVal < nc.min) {
+          return res.status(400).json({ error: `Question ${question_id}: value ${numVal} below min ${nc.min}` });
+        }
+        if (nc?.max !== undefined && numVal > nc.max) {
+          return res.status(400).json({ error: `Question ${question_id}: value ${numVal} above max ${nc.max}` });
+        }
+        if (nc?.decimals !== undefined && Number.isInteger(nc.decimals) && nc.decimals >= 0) {
+          const scale = Math.pow(10, nc.decimals);
+          const rounded = Math.round(numVal * scale) / scale;
+          if (Math.abs(rounded - numVal) > 1e-9) {
+            return res.status(400).json({ error: `Question ${question_id}: value ${numVal} exceeds allowed decimal places (${nc.decimals})` });
+          }
+        }
+        kind = 'numeric';
+        numeric = numVal;
+
+      } else if (dbType === 'slider') {
+        const numVal = answer.answer_numeric;
+        if (typeof numVal !== 'number' || isNaN(numVal)) {
+          return res.status(400).json({ error: `Question ${question_id} (slider) requires a numeric answer_numeric` });
+        }
+        const sc = questionDef.slider_config as { min?: number; max?: number; step?: number } | null;
+        if (sc?.min !== undefined && numVal < sc.min) {
+          return res.status(400).json({ error: `Question ${question_id}: slider value ${numVal} below min ${sc.min}` });
+        }
+        if (sc?.max !== undefined && numVal > sc.max) {
+          return res.status(400).json({ error: `Question ${question_id}: slider value ${numVal} above max ${sc.max}` });
+        }
+        if (sc?.step !== undefined && sc.step > 0 && sc.min !== undefined) {
+          const stepsFromMin = (numVal - sc.min) / sc.step;
+          if (Math.abs(stepsFromMin - Math.round(stepsFromMin)) > 1e-9) {
+            return res.status(400).json({ error: `Question ${question_id}: slider value ${numVal} is not aligned to step ${sc.step}` });
+          }
+        }
+        kind = 'numeric';
+        numeric = numVal;
+
+      } else if (dbType === 'single_choice') {
+        const val = answer.answer_text;
+        if (!val || typeof val !== 'string') {
+          return res.status(400).json({ error: `Question ${question_id} (single_choice) requires a string answer_text` });
+        }
+        const options = (questionDef.options ?? []) as { id: string; label: string }[];
+        if (options.length > 0 && !options.some(o => o.id === val)) {
+          return res.status(400).json({ error: `Question ${question_id}: option id '${val}' is not valid` });
+        }
+        kind = 'text';
+        text = val;
+
+      } else if (dbType === 'multiple_choice') {
+        const vals = answer.answer_json;
+        if (!Array.isArray(vals)) {
+          return res.status(400).json({ error: `Question ${question_id} (multiple_choice) requires an array answer_json` });
+        }
+        if (vals.some((v: unknown) => typeof v !== 'string')) {
+          return res.status(400).json({ error: `Question ${question_id} (multiple_choice) requires string[] option ids` });
+        }
+        const options = (questionDef.options ?? []) as { id: string; label: string }[];
+        if (options.length > 0) {
+          const validIds = new Set(options.map(o => o.id));
+          const invalid = vals.filter((v: string) => !validIds.has(v));
+          if (invalid.length > 0) {
+            return res.status(400).json({ error: `Question ${question_id}: invalid option ids: ${invalid.join(', ')}` });
+          }
+        }
+        kind = 'json';
+        json = vals;
+
+      } else if (dbType === 'matrix') {
+        const val = answer.answer_json;
+        if (!val || typeof val !== 'object' || Array.isArray(val)) {
+          return res.status(400).json({ error: `Question ${question_id} (matrix) requires an object answer_json` });
+        }
+        const mc = questionDef.matrix_config as { rows?: { id: string }[]; columns?: { id: string }[] } | null;
+        if (mc) {
+          const validRows = new Set((mc.rows ?? []).map((r: { id: string }) => r.id));
+          const validCols = new Set((mc.columns ?? []).map((c: { id: string }) => c.id));
+          for (const [rowId, colId] of Object.entries(val)) {
+            if (validRows.size > 0 && !validRows.has(rowId)) {
+              return res.status(400).json({ error: `Question ${question_id}: invalid matrix row id '${rowId}'` });
+            }
+            if (validCols.size > 0 && !validCols.has(colId as string)) {
+              return res.status(400).json({ error: `Question ${question_id}: invalid matrix column id '${colId}'` });
+            }
+          }
+        }
+        kind = 'json';
+        json = val;
+
+      } else if (dbType === 'photo_upload') {
+        const val = answer.answer_file_url;
+        if (!val || typeof val !== 'string') {
+          return res.status(400).json({ error: `Question ${question_id} (photo_upload) requires a string answer_file_url` });
+        }
+        kind = 'file';
+        file = val;
+
+      } else {
+        // open_text, barcode_scanner, fallback
+        const val = answer.answer_text;
+        if (val === undefined || val === null || val === '') {
+          return res.status(400).json({ error: `Question ${question_id} (${dbType}) requires a non-empty answer_text` });
+        }
+        kind = 'text';
+        text = String(val);
+      }
+
+      // --- Upsert the validated answer ---
       const { data: existing } = await freshClient
         .from('fb_response_answers')
         .select('id')
         .eq('response_id', id)
         .eq('question_id', question_id)
         .eq('module_id', module_id)
-        .single();
+        .maybeSingle();
       
       if (existing) {
-        // Update existing answer
         const { error: updateError } = await freshClient
           .from('fb_response_answers')
           .update({
-            answer_text,
-            answer_numeric,
-            answer_json,
-            answer_file_url,
-            answered_at: new Date().toISOString()
+            question_type: dbType,
+            answer_kind: kind,
+            answer_text: text,
+            answer_numeric: numeric,
+            answer_boolean: boolVal,
+            answer_json: json,
+            answer_file_url: file,
+            answered_at: now,
+            updated_at: now
           })
           .eq('id', existing.id);
-        
         if (updateError) throw updateError;
       } else {
-        // Insert new answer
         const { error: insertError } = await freshClient
           .from('fb_response_answers')
           .insert({
             response_id: id,
             question_id,
             module_id,
-            answer_text,
-            answer_numeric,
-            answer_json,
-            answer_file_url
+            question_type: dbType,
+            answer_kind: kind,
+            answer_text: text,
+            answer_numeric: numeric,
+            answer_boolean: boolVal,
+            answer_json: json,
+            answer_file_url: file,
+            answered_at: now,
+            created_at: now,
+            updated_at: now
           });
-        
         if (insertError) throw insertError;
       }
     }
     
-    // Get updated response
     const { data: response } = await freshClient
       .from('fb_responses')
       .select('*')
       .eq('id', id)
       .single();
     
-    console.log(`✅ Updated response: ${id}`);
+    console.log(`✅ Saved ${answers.length} answer(s) for response: ${id}`);
     res.json(response);
   } catch (error: any) {
     console.error('Error updating response:', error);
