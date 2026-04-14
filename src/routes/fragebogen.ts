@@ -1119,11 +1119,19 @@ router.get('/fragebogen/:id', async (req: Request, res: Response) => {
           .select('*')
           .eq('module_id', moduleId);
         
+        // Normalise question.images to always be a safe array
+        const normalisedQuestions = (questions || []).map((q: any) => ({
+          ...q,
+          question: q.question
+            ? { ...q.question, images: Array.isArray(q.question.images) ? q.question.images : [] }
+            : q.question
+        }));
+
         return {
           ...fm,
           module: {
             ...fm.module,
-            questions: questions || [],
+            questions: normalisedQuestions,
             rules: rules || []
           }
         };
@@ -3025,6 +3033,13 @@ router.post('/day-tracking/end', async (req: Request, res: Response) => {
       .eq('gebietsleiter_id', gebietsleiter_id)
       .eq('entry_date', today)
       .eq('reason', 'unterbrechung');
+
+    // Load all zusatz entries for today to detect homeoffice-as-last-action
+    const { data: allZusatzToday } = await freshClient
+      .from('fb_zusatz_zeiterfassung')
+      .select('reason, zeit_bis')
+      .eq('gebietsleiter_id', gebietsleiter_id)
+      .eq('entry_date', today);
     
     // Calculate totals
     let totalFahrzeitMinutes = 0;
@@ -3069,9 +3084,24 @@ router.post('/day-tracking/end', async (req: Request, res: Response) => {
         totalBesuchszeitMinutes += parseInt(parts[0]) * 60 + parseInt(parts[1]);
       }
     }
-    
-    // Calculate Heimfahrt (last visit end to day end)
-    if (visits && visits.length > 0) {
+
+    // --- Homeoffice last-action check ---
+    // Build a list of all actions (market + zusatz) by their end time to find the final one
+    const allActions: { endTime: string; isHomeoffice: boolean }[] = [];
+    for (const v of (visits || [])) {
+      const endTime = v.market_end_time || v.besuchszeit_bis;
+      if (endTime) allActions.push({ endTime: endTime.substring(0, 5), isHomeoffice: false });
+    }
+    for (const z of (allZusatzToday || [])) {
+      if (z.zeit_bis) allActions.push({ endTime: z.zeit_bis.substring(0, 5), isHomeoffice: (z.reason || '').toLowerCase() === 'homeoffice' });
+    }
+    allActions.sort((a, b) => a.endTime.localeCompare(b.endTime));
+    const lastAction = allActions.length > 0 ? allActions[allActions.length - 1] : null;
+    const lastIsHomeoffice = lastAction?.isHomeoffice === true;
+    const effectiveEndTime = lastIsHomeoffice ? lastAction!.endTime : end_time;
+
+    // Calculate Heimfahrt (last visit end to day end) — skipped when last action is homeoffice
+    if (!lastIsHomeoffice && visits && visits.length > 0) {
       const lastVisit = visits[visits.length - 1];
       const lastVisitEndTime = lastVisit.market_end_time || lastVisit.besuchszeit_bis;
       if (lastVisitEndTime) {
@@ -3088,9 +3118,10 @@ router.post('/day-tracking/end', async (req: Request, res: Response) => {
       }
     }
     
-    // Calculate total Arbeitszeit (day end - day start - unterbrechung)
-    const { minutes: totalDayMinutes } = calculateTimeDiff(dayTracking.day_start_time, end_time);
-    const totalArbeitszeitMinutes = totalDayMinutes - totalUnterbrechungMinutes;
+    // Calculate total Arbeitszeit:
+    // When last action is homeoffice, cap at homeoffice end (no phantom Heimfahrt time)
+    const { minutes: totalDayMinutes } = calculateTimeDiff(dayTracking.day_start_time, effectiveEndTime);
+    const totalArbeitszeitMinutes = Math.max(0, totalDayMinutes - totalUnterbrechungMinutes);
     
     // Format intervals
     const formatInterval = (mins: number) => {
