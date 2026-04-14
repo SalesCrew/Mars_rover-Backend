@@ -184,12 +184,14 @@ export async function transformWellenSubmissions(
     schutteProducts: schutteProductIds.length
   });
 
-  const [displaysData, kartonwareData, einzelprodukteData, paletteProductsData, schutteProductsData] = await Promise.all([
+  const [displaysData, kartonwareData, einzelprodukteData, paletteProductsData, schutteProductsData, masterProductsData] = await Promise.all([
     displayIds.length > 0 ? client.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
     kartonwareIds.length > 0 ? client.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] },
     einzelproduktIds.length > 0 ? client.from('wellen_einzelprodukte').select('id, name, item_value').in('id', einzelproduktIds) : { data: [] },
     paletteProductIds.length > 0 ? client.from('wellen_paletten_products').select('id, name, palette_id').in('id', paletteProductIds) : { data: [] },
-    schutteProductIds.length > 0 ? client.from('wellen_schuetten_products').select('id, name, schuette_id').in('id', schutteProductIds) : { data: [] }
+    schutteProductIds.length > 0 ? client.from('wellen_schuetten_products').select('id, name, schuette_id').in('id', schutteProductIds) : { data: [] },
+    // Dual-source: also fetch from master products table (no is_deleted filter — preserve archived product names in history)
+    einzelproduktIds.length > 0 ? client.from('products').select('id, name, price').in('id', einzelproduktIds) : { data: [] }
   ]);
 
   // Build VE lookup from products table and match by robust normalized keys.
@@ -215,6 +217,9 @@ export async function transformWellenSubmissions(
   const itemNameMap = new Map<string, { name: string; container: string | null; itemValue: number | null }>([
     ...(displaysData.data || []).map(d => [d.id, { name: d.name, container: null, itemValue: d.item_value || null }]),
     ...(kartonwareData.data || []).map(k => [k.id, { name: k.name, container: null, itemValue: k.item_value || null }]),
+    // Master products first (lower priority — wave-local entries will overwrite below)
+    ...(masterProductsData.data || []).map((p: any) => [p.id, { name: p.name, container: null, itemValue: parseFloat(p.price) || null }]),
+    // Wave-local einzelprodukte overwrite master entries (higher priority)
     ...(einzelprodukteData.data || []).map(e => [e.id, { name: e.name, container: null, itemValue: e.item_value || null }])
   ] as [string, { name: string; container: string | null; itemValue: number | null }][]);
 
@@ -1082,15 +1087,19 @@ export async function transformSingleWaveExport(
 
   if (orphanedItemIds.size > 0) {
     const orphanIds = Array.from(orphanedItemIds);
-    const [palOrphan, schOrphan, dispOrphan, kartOrphan, epOrphan] = await Promise.all([
+    const [palOrphan, schOrphan, dispOrphan, kartOrphan, epOrphan, masterOrphan] = await Promise.all([
       client.from('wellen_paletten_products').select('id, name, value_per_ve').in('id', orphanIds),
       client.from('wellen_schuetten_products').select('id, name, value_per_ve').in('id', orphanIds),
       client.from('wellen_displays').select('id, name, item_value').in('id', orphanIds),
       client.from('wellen_kartonware').select('id, name, item_value').in('id', orphanIds),
       client.from('wellen_einzelprodukte').select('id, name, item_value').in('id', orphanIds),
+      // Also check master products table — submissions from GL product catalog
+      client.from('products').select('id, name, price').in('id', orphanIds)
     ]);
 
     const orphanNameMap = new Map<string, { name: string; price: number }>();
+    // Master products go in first (lower priority — wave tables override if found)
+    (masterOrphan.data || []).forEach((p: any) => orphanNameMap.set(p.id, { name: p.name, price: parseFloat(p.price) || 0 }));
     (palOrphan.data || []).forEach(p => orphanNameMap.set(p.id, { name: p.name, price: p.value_per_ve || 0 }));
     (schOrphan.data || []).forEach(s => orphanNameMap.set(s.id, { name: s.name, price: s.value_per_ve || 0 }));
     (dispOrphan.data || []).forEach(d => orphanNameMap.set(d.id, { name: d.name, price: d.item_value || 0 }));

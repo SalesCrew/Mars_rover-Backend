@@ -40,6 +40,38 @@ export function aggregateSubmissions(submissions: any[]): Array<{
 }
 
 // ============================================================================
+// SHARED HELPER: Resolve einzelprodukt names from both wave-local and master tables
+// Needed because GLs can submit items from the master `products` catalogue
+// under item_type='einzelprodukt'. Wave-local wellen_einzelprodukte entries take
+// precedence; products table is the fallback (including soft-deleted rows so
+// historical submissions keep their names after archiving).
+// ============================================================================
+async function resolveEinzelproduktMap(
+  client: ReturnType<typeof createFreshClient>,
+  einzelproduktIds: string[]
+): Promise<Map<string, { name: string; itemValue: number }>> {
+  const result = new Map<string, { name: string; itemValue: number }>();
+  if (einzelproduktIds.length === 0) return result;
+
+  const [waveRes, masterRes] = await Promise.all([
+    client.from('wellen_einzelprodukte').select('id, name, item_value').in('id', einzelproduktIds),
+    // No is_deleted filter — historical submissions must remain readable after archive
+    client.from('products').select('id, name, price').in('id', einzelproduktIds)
+  ]);
+
+  // Master products go in first (lower priority)
+  for (const p of (masterRes.data || [])) {
+    result.set(p.id, { name: p.name, itemValue: parseFloat(p.price) || 0 });
+  }
+  // Wave-local entries overwrite if present (higher priority)
+  for (const e of (waveRes.data || [])) {
+    result.set(e.id, { name: e.name, itemValue: e.item_value || 0 });
+  }
+
+  return result;
+}
+
+// ============================================================================
 // KW (Calendar Week) HELPER FUNCTIONS
 // ============================================================================
 
@@ -1172,9 +1204,8 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
               currentValue += sub.quantity * (sub.value_per_unit || 0);
             } else if (sub.item_type === 'einzelprodukt') {
               const ep = einzelprodukte.find(e => e.id === sub.item_id);
-              if (ep) {
-                currentValue += sub.quantity * (ep.item_value || 0);
-              }
+              // For wave-local items use item_value; for master products fall back to submitted value_per_unit
+              currentValue += sub.quantity * (ep?.item_value || sub.value_per_unit || 0);
             }
           }
         }
@@ -2724,11 +2755,10 @@ router.get('/:welleId/gl-submissions/:glId', async (req: Request, res: Response)
     const schutteProductIds = submissions.filter(s => s.item_type === 'schuette').map(s => s.item_id).filter(Boolean);
 
     // Fetch related data in parallel
-    const [marketsResult, displaysResult, kartonwareResult, einzelproduktResult, paletteProductsResult, schutteProductsResult] = await Promise.all([
+    const [marketsResult, displaysResult, kartonwareResult, paletteProductsResult, schutteProductsResult] = await Promise.all([
       marketIds.length > 0 ? freshClient.from('markets').select('id, name, chain').in('id', marketIds) : { data: [] },
       displayIds.length > 0 ? freshClient.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
       kartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] },
-      einzelproduktIds.length > 0 ? freshClient.from('wellen_einzelprodukte').select('id, name, item_value').in('id', einzelproduktIds) : { data: [] },
       paletteProductIds.length > 0 ? freshClient.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('id', paletteProductIds) : { data: [] },
       schutteProductIds.length > 0 ? freshClient.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('id', schutteProductIds) : { data: [] }
     ]);
@@ -2736,7 +2766,7 @@ router.get('/:welleId/gl-submissions/:glId', async (req: Request, res: Response)
     const markets = marketsResult.data || [];
     const displays = displaysResult.data || [];
     const kartonware = kartonwareResult.data || [];
-    const einzelprodukte = einzelproduktResult.data || [];
+    const einzelprodukteMap = await resolveEinzelproduktMap(freshClient, einzelproduktIds);
     const paletteProducts = paletteProductsResult.data || [];
     const schutteProducts = schutteProductsResult.data || [];
 
@@ -2759,7 +2789,7 @@ router.get('/:welleId/gl-submissions/:glId', async (req: Request, res: Response)
       let item: any;
       if (entry.item_type === 'display') item = displays.find((d: any) => d.id === entry.item_id);
       else if (entry.item_type === 'kartonware') item = kartonware.find((k: any) => k.id === entry.item_id);
-      else item = einzelprodukte.find((e: any) => e.id === entry.item_id);
+      else item = einzelprodukteMap.get(entry.item_id);
 
       return {
         id: entry.id,
@@ -2769,8 +2799,8 @@ router.get('/:welleId/gl-submissions/:glId', async (req: Request, res: Response)
         itemType: entry.item_type,
         itemName: item?.name || 'Unknown',
         quantity: entry.quantity,
-        valuePerUnit: item?.item_value || entry.value_per_unit || 0,
-        value: entry.quantity * (item?.item_value || entry.value_per_unit || 0),
+        valuePerUnit: item?.item_value ?? item?.itemValue ?? entry.value_per_unit ?? 0,
+        value: entry.quantity * (item?.item_value ?? item?.itemValue ?? entry.value_per_unit ?? 0),
         timestamp: entry.created_at
       };
     });
@@ -2976,13 +3006,12 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     const paletteProductIds = submissions.filter(p => p.item_type === 'palette').map(p => p.item_id).filter(Boolean);
     const schutteProductIds = submissions.filter(p => p.item_type === 'schuette').map(p => p.item_id).filter(Boolean);
 
-    const [glsResult, glDetailsResult, marketsResult, displaysResult, kartonwareResult, einzelproduktResult, paletteProductsResult, schutteProductsResult] = await Promise.all([
+    const [glsResult, glDetailsResult, marketsResult, displaysResult, kartonwareResult, paletteProductsResult, schutteProductsResult] = await Promise.all([
       glIds.length > 0 ? freshClient.from('users').select('id, email').in('id', glIds) : { data: [] },
       glIds.length > 0 ? freshClient.from('gebietsleiter').select('id, name').in('id', glIds) : { data: [] },
       marketIds.length > 0 ? freshClient.from('markets').select('id, name, chain, address, postal_code, city').in('id', marketIds) : { data: [] },
       displayIds.length > 0 ? freshClient.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
       kartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] },
-      einzelproduktIds.length > 0 ? freshClient.from('wellen_einzelprodukte').select('id, name, item_value').in('id', einzelproduktIds) : { data: [] },
       paletteProductIds.length > 0 ? freshClient.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('id', paletteProductIds) : { data: [] },
       schutteProductIds.length > 0 ? freshClient.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('id', schutteProductIds) : { data: [] }
     ]);
@@ -2992,7 +3021,7 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     const markets = marketsResult.data || [];
     const displays = displaysResult.data || [];
     const kartonware = kartonwareResult.data || [];
-    const einzelprodukte = einzelproduktResult.data || [];
+    const einzelprodukteMap = await resolveEinzelproduktMap(freshClient, einzelproduktIds);
     let paletteProducts = paletteProductsResult.data || [];
     let schutteProducts = schutteProductsResult.data || [];
 
@@ -3018,13 +3047,13 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       const gl = glDetails.find((g: any) => g.id === entry.gebietsleiter_id);
       const glUser = gls.find((u: any) => u.id === entry.gebietsleiter_id);
       const market = markets.find((m: any) => m.id === entry.market_id);
-      let item;
+      let item: any;
       if (entry.item_type === 'display') {
         item = displays.find((d: any) => d.id === entry.item_id);
       } else if (entry.item_type === 'kartonware') {
         item = kartonware.find((k: any) => k.id === entry.item_id);
       } else {
-        item = einzelprodukte.find((e: any) => e.id === entry.item_id);
+        item = einzelprodukteMap.get(entry.item_id);
       }
 
       return {
@@ -3039,7 +3068,7 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
         itemType: entry.item_type as 'display' | 'kartonware' | 'einzelprodukt',
         itemName: item?.name || 'Unknown',
         quantity: entry.quantity,
-        value: entry.quantity * (item?.item_value || entry.value_per_unit || 0),
+        value: entry.quantity * (item?.item_value ?? item?.itemValue ?? entry.value_per_unit ?? 0),
         timestamp: entry.created_at,
         photoUrl: entry.photo_url
       };
@@ -3680,19 +3709,18 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
     const schutteProductIds = (submissions || []).filter(s => s.item_type === 'schuette').map(s => s.item_id).filter(Boolean);
     const einzelproduktIds = (submissions || []).filter(s => s.item_type === 'einzelprodukt').map(s => s.item_id).filter(Boolean);
 
-    const [displaysResult, kartonwareResult, paletteProductsResult, schutteProductsResult, einzelprodukteResult] = await Promise.all([
+    const [displaysResult, kartonwareResult, paletteProductsResult, schutteProductsResult] = await Promise.all([
       displayIds.length > 0 ? freshClient.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
       kartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] },
       paletteProductIds.length > 0 ? freshClient.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('id', paletteProductIds) : { data: [] },
-      schutteProductIds.length > 0 ? freshClient.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('id', schutteProductIds) : { data: [] },
-      einzelproduktIds.length > 0 ? freshClient.from('wellen_einzelprodukte').select('id, name, item_value').in('id', einzelproduktIds) : { data: [] }
+      schutteProductIds.length > 0 ? freshClient.from('wellen_schuetten_products').select('id, name, schuette_id, value_per_ve').in('id', schutteProductIds) : { data: [] }
     ]);
 
     const displays = displaysResult.data || [];
     const kartonware = kartonwareResult.data || [];
     const paletteProducts = paletteProductsResult.data || [];
     const schutteProducts = schutteProductsResult.data || [];
-    const einzelprodukte = einzelprodukteResult.data || [];
+    const einzelprodukteMap = await resolveEinzelproduktMap(freshClient, einzelproduktIds);
 
     // Get parent palette/schuette names - direct ID match only, no fallback
     const paletteIds = [...new Set(paletteProducts.map((p: any) => p.palette_id))].filter(Boolean);
@@ -3777,9 +3805,9 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
               itemName = k?.name || 'Kartonware';
               itemValue = (k?.item_value || 0) * s.quantity;
             } else {
-              const e = einzelprodukte.find((x: any) => x.id === s.item_id);
+              const e = einzelprodukteMap.get(s.item_id);
               itemName = e?.name || 'Einzelprodukt';
-              itemValue = (e?.item_value || 0) * s.quantity;
+              itemValue = (e?.itemValue || 0) * s.quantity;
             }
             items.push({ type: s.item_type, name: itemName, quantity: s.quantity, value: itemValue });
           }
@@ -3960,6 +3988,7 @@ router.get('/export/submissions', async (req: Request, res: Response) => {
     
     // Fetch item names (products, displays, palettes, schuetten)
     const itemIds = [...new Set(submissions.map(s => s.item_id).filter(Boolean))];
+    const einzelproduktIdsForExport = submissions.filter(s => s.item_type === 'einzelprodukt').map(s => s.item_id).filter(Boolean);
     
     // Try to fetch from various product tables
     const { data: wellenDisplays } = await freshClient
@@ -3982,12 +4011,14 @@ router.get('/export/submissions', async (req: Request, res: Response) => {
       .select('id, name')
       .in('id', itemIds);
     
-    // Build item name map
+    // Build item name map — einzelprodukt uses dual-source resolver
     const itemMap = new Map<string, string>();
     (wellenDisplays || []).forEach(d => itemMap.set(d.id, d.name));
     (wellenPaletten || []).forEach(p => itemMap.set(p.id, p.name));
     (wellenSchuetten || []).forEach(s => itemMap.set(s.id, s.name));
     (wellenKartonware || []).forEach(k => itemMap.set(k.id, k.name));
+    const einzelprodukteMapExport = await resolveEinzelproduktMap(freshClient, einzelproduktIdsForExport);
+    einzelprodukteMapExport.forEach((e, id) => { if (!itemMap.has(id)) itemMap.set(id, e.name); });
     
     // Transform submissions to readable format
     const excelData = submissions.map(sub => {
@@ -4266,15 +4297,12 @@ router.get('/market/:marketId/pending-photos', async (req: Request, res: Respons
     const schutteProductIds = submissions.filter(s => s.item_type === 'schuette').map(s => s.item_id);
 
     // Fetch item details including parent IDs for palette/schuette products
-    const [displays, kartonware, einzelprodukte, paletteProducts, schutteProducts] = await Promise.all([
+    const [displays, kartonware, paletteProducts, schutteProducts] = await Promise.all([
       displayIds.length > 0 
         ? freshClient.from('wellen_displays').select('id, name').in('id', displayIds)
         : { data: [] },
       kartonwareIds.length > 0 
         ? freshClient.from('wellen_kartonware').select('id, name').in('id', kartonwareIds)
-        : { data: [] },
-      einzelproduktIds.length > 0 
-        ? freshClient.from('wellen_einzelprodukte').select('id, name').in('id', einzelproduktIds)
         : { data: [] },
       paletteProductIds.length > 0 
         ? freshClient.from('wellen_paletten_products').select('id, name, palette_id').in('id', paletteProductIds)
@@ -4283,6 +4311,8 @@ router.get('/market/:marketId/pending-photos', async (req: Request, res: Respons
         ? freshClient.from('wellen_schuetten_products').select('id, name, schuette_id').in('id', schutteProductIds)
         : { data: [] }
     ]);
+
+    const einzelprodukteMap = await resolveEinzelproduktMap(freshClient, einzelproduktIds);
 
     // Get parent palette/schuette names
     const paletteParentIds = [...new Set((paletteProducts.data || []).map((p: any) => p.palette_id).filter(Boolean))];
@@ -4303,7 +4333,7 @@ router.get('/market/:marketId/pending-photos', async (req: Request, res: Respons
 
     (displays.data || []).forEach((d: any) => { itemDetails[d.id] = { name: d.name }; });
     (kartonware.data || []).forEach((k: any) => { itemDetails[k.id] = { name: k.name }; });
-    (einzelprodukte.data || []).forEach((e: any) => { itemDetails[e.id] = { name: e.name }; });
+    einzelprodukteMap.forEach((e, id) => { itemDetails[id] = { name: e.name }; });
     (paletteProducts.data || []).forEach((p: any) => { itemDetails[p.id] = { name: p.name, parentId: p.palette_id }; });
     (schutteProducts.data || []).forEach((s: any) => { itemDetails[s.id] = { name: s.name, parentId: s.schuette_id }; });
     
