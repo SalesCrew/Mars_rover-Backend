@@ -10,6 +10,38 @@ router.use((req, res, next) => {
   next();
 });
 
+// Keep Fragebogen status transitions deterministic in Vienna local date.
+const getViennaDateString = (): string => {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Vienna',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  });
+  return formatter.format(new Date()); // YYYY-MM-DD
+};
+
+const refreshFragebogenStatuses = async (freshClient: ReturnType<typeof createFreshClient>): Promise<void> => {
+  const viennaDate = getViennaDateString();
+
+  const { error: inactiveError } = await freshClient
+    .from('fb_fragebogen')
+    .update({ status: 'inactive' })
+    .eq('archived', false)
+    .neq('status', 'inactive')
+    .lt('end_date', viennaDate);
+  if (inactiveError) throw inactiveError;
+
+  const { error: activeError } = await freshClient
+    .from('fb_fragebogen')
+    .update({ status: 'active' })
+    .eq('archived', false)
+    .eq('status', 'scheduled')
+    .lte('start_date', viennaDate)
+    .gte('end_date', viennaDate);
+  if (activeError) throw activeError;
+};
+
 // ============================================================================
 // QUESTIONS API - /api/fragebogen/questions
 // ============================================================================
@@ -967,6 +999,7 @@ router.get('/fragebogen', async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { status, archived, search } = req.query;
+    await refreshFragebogenStatuses(freshClient);
     
     // Get basic fragebogen data from overview
     let query = freshClient
@@ -1055,6 +1088,7 @@ router.get('/fragebogen/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
+    await refreshFragebogenStatuses(freshClient);
     
     // Get fragebogen
     const { data: fragebogen, error: fragebogenError } = await freshClient
@@ -1490,6 +1524,7 @@ router.get('/fragebogen/stats/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
+    await refreshFragebogenStatuses(freshClient);
     
     const { data, error } = await freshClient
       .from('fb_fragebogen_overview')
