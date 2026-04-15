@@ -28,31 +28,16 @@ npm run build
 npm start
 ```
 
-## Python exporter dependency (distribution Excel chart)
+## Distribution export service proxy
 
-The distribution export endpoint (`POST /api/fragebogen/fragebogen/distribution-export.xlsx`) uses a Python `xlsxwriter` exporter.
+The endpoint `POST /api/fragebogen/fragebogen/distribution-export.xlsx` proxies workbook generation to the dedicated `Perfectstore export backend` service.
 
-Install Python dependency:
-
-```bash
-python -m pip install -r src/exporters/requirements.txt
-```
-
-If needed, configure Python binary explicitly:
+Required env vars:
 
 ```bash
-PYTHON_BIN=python3
+PERFECTSTORE_EXPORT_BACKEND_URL=http://perfectstore-export-backend.railway.internal
+PERFECTSTORE_EXPORT_TIMEOUT_MS=120000
 ```
-
-### Railway / production runtime
-
-This backend includes `nixpacks.toml` to ensure Railway installs:
-
-- Python 3
-- pip
-- `xlsxwriter` from `src/exporters/requirements.txt`
-
-After pulling changes, trigger a fresh deploy so the new build phase installs Python.
 
 ## API Endpoints
 

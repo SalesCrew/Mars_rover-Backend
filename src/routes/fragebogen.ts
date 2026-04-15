@@ -1,9 +1,5 @@
 import express, { Router, Request, Response } from 'express';
 import ExcelJS from 'exceljs';
-import { spawn } from 'child_process';
-import { promises as fs } from 'fs';
-import os from 'os';
-import path from 'path';
 import { createFreshClient } from '../config/supabase';
 
 const router: Router = express.Router();
@@ -47,160 +43,37 @@ const refreshFragebogenStatuses = async (freshClient: ReturnType<typeof createFr
 };
 
 const runDistributionPythonExporter = async (payload: unknown): Promise<Buffer> => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fragebogen-distribution-'));
-  const inputPath = path.join(tempDir, 'input.json');
-  const outputPath = path.join(tempDir, 'export.xlsx');
-  const scriptPath = path.resolve(process.cwd(), 'src/exporters/fragebogen_distribution_export.py');
-  const pythonCandidates = Array.from(new Set([
-    process.env.PYTHON_BIN,
-    'py',
-    'python3',
-    'python',
-    'python3.13',
-    'python3.12',
-    'python3.11',
-    'python3.10',
-    '/usr/bin/python3',
-    '/usr/local/bin/python3',
-    '/opt/venv/bin/python',
-    '/nix/var/nix/profiles/default/bin/python3'
-  ].filter(Boolean))) as string[];
-  const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
+  const baseUrl = String(process.env.PERFECTSTORE_EXPORT_BACKEND_URL || '').trim();
+  if (!baseUrl) {
+    throw new Error('PERFECTSTORE_EXPORT_BACKEND_URL ist nicht konfiguriert.');
+  }
 
-  const executeExporter = async (pythonBin: string): Promise<void> => {
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(pythonBin, [scriptPath, inputPath, outputPath], {
-        cwd: process.cwd(),
-        windowsHide: true
-      });
-
-      let stderr = '';
-      let stdout = '';
-      let timedOut = false;
-
-      const timeoutMs = Number(process.env.FRAGEBOGEN_EXPORT_PY_TIMEOUT_MS || 90_000);
-      const timeoutHandle = setTimeout(() => {
-        timedOut = true;
-        child.kill('SIGTERM');
-      }, timeoutMs);
-
-      child.stdout.on('data', (chunk) => {
-        stdout += String(chunk);
-      });
-
-      child.stderr.on('data', (chunk) => {
-        stderr += String(chunk);
-      });
-
-      child.on('error', (error: NodeJS.ErrnoException) => {
-        clearTimeout(timeoutHandle);
-        if (error.code === 'ENOENT') {
-          reject(new Error(`Python runtime "${pythonBin}" wurde nicht gefunden.`));
-          return;
-        }
-        reject(error);
-      });
-
-      child.on('close', (code) => {
-        clearTimeout(timeoutHandle);
-        if (timedOut) {
-          reject(new Error(`Python Export Timeout (${timeoutMs}ms).`));
-          return;
-        }
-        if (code !== 0) {
-          reject(new Error((stderr || stdout || `Python exporter failed with code ${code}`).trim()));
-          return;
-        }
-        resolve();
-      });
-    });
-  };
-
-  const executeExporterViaShell = async (): Promise<void> => {
-    await new Promise<void>((resolve, reject) => {
-      const timeoutMs = Number(process.env.FRAGEBOGEN_EXPORT_PY_TIMEOUT_MS || 90_000);
-      const command = [
-        'python3',
-        'python',
-        'python3.13',
-        'python3.12',
-        'python3.11',
-        '/usr/bin/python3',
-        '/usr/local/bin/python3',
-        '/opt/venv/bin/python',
-        '/nix/var/nix/profiles/default/bin/python3'
-      ].map((bin) => `${bin} ${shellQuote(scriptPath)} ${shellQuote(inputPath)} ${shellQuote(outputPath)}`).join(' || ');
-      const child = spawn('sh', ['-lc', command], {
-        cwd: process.cwd(),
-        windowsHide: true
-      });
-
-      let stderr = '';
-      let stdout = '';
-      let timedOut = false;
-      const timeoutHandle = setTimeout(() => {
-        timedOut = true;
-        child.kill('SIGTERM');
-      }, timeoutMs);
-
-      child.stdout.on('data', (chunk) => {
-        stdout += String(chunk);
-      });
-
-      child.stderr.on('data', (chunk) => {
-        stderr += String(chunk);
-      });
-
-      child.on('error', (error) => {
-        clearTimeout(timeoutHandle);
-        reject(error);
-      });
-
-      child.on('close', (code) => {
-        clearTimeout(timeoutHandle);
-        if (timedOut) {
-          reject(new Error(`Python Export Timeout (${timeoutMs}ms).`));
-          return;
-        }
-        if (code !== 0) {
-          reject(new Error((stderr || stdout || `Python shell exporter failed with code ${code}`).trim()));
-          return;
-        }
-        resolve();
-      });
-    });
-  };
+  const timeoutMs = Number(process.env.PERFECTSTORE_EXPORT_TIMEOUT_MS || 120_000);
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    await fs.writeFile(inputPath, JSON.stringify(payload), 'utf-8');
+    const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/distribution-export.xlsx`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
 
-    let lastError: Error | null = null;
-    for (const pythonBin of pythonCandidates) {
-      try {
-        await executeExporter(pythonBin);
-        const fileBuffer = await fs.readFile(outputPath);
-        return fileBuffer;
-      } catch (error: any) {
-        lastError = error;
-      }
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(errorBody || `Export-Service Fehler (${response.status})`);
     }
 
-    try {
-      await executeExporterViaShell();
-      const fileBuffer = await fs.readFile(outputPath);
-      return fileBuffer;
-    } catch (error: any) {
-      lastError = error;
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return buffer;
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      throw new Error(`Export-Service Timeout (${timeoutMs}ms).`);
     }
-
-    if (lastError) {
-      throw new Error(
-        `Python Export konnte nicht gestartet werden. Versucht: ${pythonCandidates.join(', ')}, sh -lc python3/python. Letzter Fehler: ${lastError.message}`
-      );
-    }
-    throw new Error('Kein Python Runtime-Kandidat konfiguriert.');
+    throw new Error(`Export-Service Aufruf fehlgeschlagen: ${error?.message || error}`);
   } finally {
-    await fs.rm(tempDir, { recursive: true, force: true });
+    clearTimeout(timeoutHandle);
   }
 };
 
