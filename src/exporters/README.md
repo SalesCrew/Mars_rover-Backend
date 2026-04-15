@@ -45,6 +45,8 @@ python3 src/exporters/fragebogen_distribution_export.py ./tmp/input.json ./tmp/o
 
 - Node tries these Python binaries in order:
   1. `PYTHON_BIN` (if set)
-  2. `python3`
-  3. `python`
+  2. `py`
+  3. `python3`
+  4. `python`
 - Exporter timeout is controlled by `FRAGEBOGEN_EXPORT_PY_TIMEOUT_MS` (default: `90000`).
+- Railway deploys can use `backend/nixpacks.toml` to install Python + pip + `xlsxwriter`.

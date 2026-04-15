@@ -116,7 +116,11 @@ const runDistributionPythonExporter = async (payload: unknown): Promise<Buffer> 
       }
     }
 
-    if (lastError) throw lastError;
+    if (lastError) {
+      throw new Error(
+        `Python Export konnte nicht gestartet werden. Versucht: ${pythonCandidates.join(', ')}. Letzter Fehler: ${lastError.message}`
+      );
+    }
     throw new Error('Kein Python Runtime-Kandidat konfiguriert.');
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });

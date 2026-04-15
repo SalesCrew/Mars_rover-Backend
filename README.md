@@ -44,6 +44,16 @@ If needed, configure Python binary explicitly:
 PYTHON_BIN=python3
 ```
 
+### Railway / production runtime
+
+This backend includes `nixpacks.toml` to ensure Railway installs:
+
+- Python 3
+- pip
+- `xlsxwriter` from `src/exporters/requirements.txt`
+
+After pulling changes, trigger a fresh deploy so the new build phase installs Python.
+
 ## API Endpoints
 
 ### Markets
