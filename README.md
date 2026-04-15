@@ -28,6 +28,22 @@ npm run build
 npm start
 ```
 
+## Python exporter dependency (distribution Excel chart)
+
+The distribution export endpoint (`POST /api/fragebogen/fragebogen/distribution-export.xlsx`) uses a Python `xlsxwriter` exporter.
+
+Install Python dependency:
+
+```bash
+python -m pip install -r src/exporters/requirements.txt
+```
+
+If needed, configure Python binary explicitly:
+
+```bash
+PYTHON_BIN=python3
+```
+
 ## API Endpoints
 
 ### Markets

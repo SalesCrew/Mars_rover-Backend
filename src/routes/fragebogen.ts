@@ -1,5 +1,9 @@
 import express, { Router, Request, Response } from 'express';
 import ExcelJS from 'exceljs';
+import { spawn } from 'child_process';
+import { promises as fs } from 'fs';
+import os from 'os';
+import path from 'path';
 import { createFreshClient } from '../config/supabase';
 
 const router: Router = express.Router();
@@ -40,6 +44,83 @@ const refreshFragebogenStatuses = async (freshClient: ReturnType<typeof createFr
     .lte('start_date', viennaDate)
     .gte('end_date', viennaDate);
   if (activeError) throw activeError;
+};
+
+const runDistributionPythonExporter = async (payload: unknown): Promise<Buffer> => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fragebogen-distribution-'));
+  const inputPath = path.join(tempDir, 'input.json');
+  const outputPath = path.join(tempDir, 'export.xlsx');
+  const scriptPath = path.resolve(process.cwd(), 'src/exporters/fragebogen_distribution_export.py');
+  const pythonCandidates = [process.env.PYTHON_BIN, 'py', 'python3', 'python'].filter(Boolean) as string[];
+
+  const executeExporter = async (pythonBin: string): Promise<void> => {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(pythonBin, [scriptPath, inputPath, outputPath], {
+        cwd: process.cwd(),
+        windowsHide: true
+      });
+
+      let stderr = '';
+      let stdout = '';
+      let timedOut = false;
+
+      const timeoutMs = Number(process.env.FRAGEBOGEN_EXPORT_PY_TIMEOUT_MS || 90_000);
+      const timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGTERM');
+      }, timeoutMs);
+
+      child.stdout.on('data', (chunk) => {
+        stdout += String(chunk);
+      });
+
+      child.stderr.on('data', (chunk) => {
+        stderr += String(chunk);
+      });
+
+      child.on('error', (error: NodeJS.ErrnoException) => {
+        clearTimeout(timeoutHandle);
+        if (error.code === 'ENOENT') {
+          reject(new Error(`Python runtime "${pythonBin}" wurde nicht gefunden.`));
+          return;
+        }
+        reject(error);
+      });
+
+      child.on('close', (code) => {
+        clearTimeout(timeoutHandle);
+        if (timedOut) {
+          reject(new Error(`Python Export Timeout (${timeoutMs}ms).`));
+          return;
+        }
+        if (code !== 0) {
+          reject(new Error((stderr || stdout || `Python exporter failed with code ${code}`).trim()));
+          return;
+        }
+        resolve();
+      });
+    });
+  };
+
+  try {
+    await fs.writeFile(inputPath, JSON.stringify(payload), 'utf-8');
+
+    let lastError: Error | null = null;
+    for (const pythonBin of pythonCandidates) {
+      try {
+        await executeExporter(pythonBin);
+        const fileBuffer = await fs.readFile(outputPath);
+        return fileBuffer;
+      } catch (error: any) {
+        lastError = error;
+      }
+    }
+
+    if (lastError) throw lastError;
+    throw new Error('Kein Python Runtime-Kandidat konfiguriert.');
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 };
 
 // ============================================================================
@@ -4116,131 +4197,26 @@ router.post('/fragebogen/distribution-export.xlsx', async (req: Request, res: Re
         responseId: string;
       }>;
 
-    const workbook = new ExcelJS.Workbook();
-    workbook.creator = 'Mars Rover Admin';
-    workbook.created = new Date();
+    const exportPayload = {
+      generatedAt: new Date().toISOString(),
+      fragebogen: (fragebogenRows || []).map((fb: any) => ({
+        id: fb.id,
+        name: fb.name
+      })),
+      selectedChains,
+      selectedQuestionIds: questionIds,
+      selectedQuestions: (questionRows || []).map((q: any) => ({
+        id: q.id,
+        label: q.question_text || q.id
+      })),
+      rows
+    };
 
-    const rawSheet = workbook.addWorksheet('RawData');
-    rawSheet.columns = [
-      { header: 'Monat', key: 'monthLabel', width: 12 },
-      { header: 'Fragebogen', key: 'fragebogenName', width: 28 },
-      { header: 'Item', key: 'questionLabel', width: 45 },
-      { header: 'Antwort', key: 'answerLabel', width: 10 },
-      { header: 'Kunde', key: 'marketName', width: 28 },
-      { header: 'Handelskette', key: 'chain', width: 20 },
-      { header: 'AD-Mitarbeiter', key: 'glName', width: 24 },
-      { header: 'Response ID', key: 'responseId', width: 38 }
-    ];
-    rows.forEach(row => rawSheet.addRow(row));
-
-    const months = Array.from(new Set(rows.map(r => r.monthKey))).sort();
-    const selectedQuestionRows = questionRows.map((q: any) => ({
-      id: q.id,
-      label: q.question_text || q.id
-    }));
-
-    const itemSheet = workbook.addWorksheet('ItemDistribution_Monthly');
-    itemSheet.addRow(['Monat', ...selectedQuestionRows.map(q => q.label), 'Alle ausgewählten Items']);
-    months.forEach(month => {
-      const monthRows = rows.filter(r => r.monthKey === month);
-      const line: (string | number)[] = [
-        `${month.split('-')[1]}.${month.split('-')[0]}`
-      ];
-
-      selectedQuestionRows.forEach(q => {
-        const itemRows = monthRows.filter(r => r.questionId === q.id);
-        const total = itemRows.length;
-        const yes = itemRows.filter(r => r.answerBoolean).length;
-        line.push(total > 0 ? yes / total : 0);
-      });
-
-      const total = monthRows.length;
-      const yes = monthRows.filter(r => r.answerBoolean).length;
-      line.push(total > 0 ? yes / total : 0);
-      itemSheet.addRow(line);
-    });
-    for (let col = 2; col <= selectedQuestionRows.length + 2; col++) {
-      itemSheet.getColumn(col).numFmt = '0.00%';
-      itemSheet.getColumn(col).width = 24;
-    }
-    itemSheet.getColumn(1).width = 12;
-
-    const customerSheet = workbook.addWorksheet('CustomerDistribution_Monthly');
-    customerSheet.addRow(['Monat', 'Handelskette', 'Kunde', 'Ja', 'Gesamt', 'Distribution']);
-    const customerAgg = new Map<string, { yes: number; total: number }>();
-    rows.forEach(r => {
-      const key = `${r.monthKey}__${r.chain}__${r.marketName}`;
-      const cur = customerAgg.get(key) || { yes: 0, total: 0 };
-      cur.total += 1;
-      if (r.answerBoolean) cur.yes += 1;
-      customerAgg.set(key, cur);
-    });
-    Array.from(customerAgg.entries()).sort((a, b) => a[0].localeCompare(b[0], 'de')).forEach(([key, v]) => {
-      const [monthKey, chain, marketName] = key.split('__');
-      customerSheet.addRow([
-        `${monthKey.split('-')[1]}.${monthKey.split('-')[0]}`,
-        chain,
-        marketName,
-        v.yes,
-        v.total,
-        v.total > 0 ? v.yes / v.total : 0
-      ]);
-    });
-    customerSheet.getColumn(6).numFmt = '0.00%';
-
-    const adSheet = workbook.addWorksheet('ADDistribution_Monthly');
-    adSheet.addRow(['Monat', 'AD-Mitarbeiter', 'Ja', 'Gesamt', 'Distribution']);
-    const adAgg = new Map<string, { yes: number; total: number }>();
-    rows.forEach(r => {
-      const key = `${r.monthKey}__${r.glName}`;
-      const cur = adAgg.get(key) || { yes: 0, total: 0 };
-      cur.total += 1;
-      if (r.answerBoolean) cur.yes += 1;
-      adAgg.set(key, cur);
-    });
-    Array.from(adAgg.entries()).sort((a, b) => a[0].localeCompare(b[0], 'de')).forEach(([key, v]) => {
-      const [monthKey, glName] = key.split('__');
-      adSheet.addRow([
-        `${monthKey.split('-')[1]}.${monthKey.split('-')[0]}`,
-        glName,
-        v.yes,
-        v.total,
-        v.total > 0 ? v.yes / v.total : 0
-      ]);
-    });
-    adSheet.getColumn(5).numFmt = '0.00%';
-
-    const chartDataSheet = workbook.addWorksheet('ChartData');
-    chartDataSheet.addRow(['Monat', ...selectedQuestionRows.map(q => q.label), 'Alle ausgewählten Items']);
-    for (let i = 2; i <= itemSheet.rowCount; i++) {
-      const row = itemSheet.getRow(i);
-      chartDataSheet.addRow(row.values as any[]);
-    }
-    for (let col = 2; col <= selectedQuestionRows.length + 2; col++) {
-      chartDataSheet.getColumn(col).numFmt = '0.00%';
-    }
-
-    const chartSheet = workbook.addWorksheet('Chart');
-    chartSheet.getCell('A1').value = 'Distribution Export (Monatlich, Ja/Nein)';
-    chartSheet.getCell('A2').value = `Fragebögen: ${(fragebogenRows || []).map((f: any) => f.name).join(', ')}`;
-    chartSheet.getCell('A3').value = selectedChains.length > 0
-      ? `Handelsketten: ${selectedChains.join(', ')}`
-      : 'Handelsketten: Alle';
-    chartSheet.getCell('A5').value = 'Datenquelle für Linienchart: Sheet "ChartData".';
-    chartSheet.getCell('A6').value = 'Wenn ein Chart-Template genutzt wird, bitte dort auf ChartData referenzieren.';
-
-    if (rows.length === 0) {
-      rawSheet.addRow({
-        monthLabel: 'Keine Daten',
-        fragebogenName: 'Für die aktuelle Auswahl wurden keine besuchten Märkte mit Ja/Nein-Antworten gefunden.'
-      } as any);
-    }
-
+    const workbookBuffer = await runDistributionPythonExporter(exportPayload);
     const fileName = `fragebogen_distribution_${new Date().toISOString().slice(0, 10)}.xlsx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-    await workbook.xlsx.write(res);
-    res.end();
+    res.status(200).send(workbookBuffer);
   } catch (error: any) {
     console.error('Error generating distribution export:', error);
     if (!res.headersSent) {
