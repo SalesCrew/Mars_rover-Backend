@@ -51,14 +51,33 @@ const runDistributionPythonExporter = async (payload: unknown): Promise<Buffer> 
   const timeoutMs = Number(process.env.PERFECTSTORE_EXPORT_TIMEOUT_MS || 120_000);
   const controller = new AbortController();
   const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+  const requestBody = JSON.stringify(payload);
 
-  try {
-    const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/distribution-export.xlsx`, {
+  const postWithRedirectHandling = async (url: string, depth: number = 0): Promise<globalThis.Response> => {
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: controller.signal
+      body: requestBody,
+      signal: controller.signal,
+      redirect: 'manual'
     });
+
+    if (
+      [301, 302, 303, 307, 308].includes(response.status) &&
+      depth < 3
+    ) {
+      const location = response.headers.get('location');
+      if (location) {
+        const nextUrl = new URL(location, url).toString();
+        return postWithRedirectHandling(nextUrl, depth + 1);
+      }
+    }
+
+    return response;
+  };
+
+  try {
+    const response = await postWithRedirectHandling(`${baseUrl.replace(/\/+$/, '')}/distribution-export.xlsx`);
 
     if (!response.ok) {
       const errorBody = await response.text();
