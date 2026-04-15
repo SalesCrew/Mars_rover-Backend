@@ -51,7 +51,20 @@ const runDistributionPythonExporter = async (payload: unknown): Promise<Buffer> 
   const inputPath = path.join(tempDir, 'input.json');
   const outputPath = path.join(tempDir, 'export.xlsx');
   const scriptPath = path.resolve(process.cwd(), 'src/exporters/fragebogen_distribution_export.py');
-  const pythonCandidates = [process.env.PYTHON_BIN, 'py', 'python3', 'python'].filter(Boolean) as string[];
+  const pythonCandidates = Array.from(new Set([
+    process.env.PYTHON_BIN,
+    'py',
+    'python3',
+    'python',
+    'python3.13',
+    'python3.12',
+    'python3.11',
+    'python3.10',
+    '/usr/bin/python3',
+    '/usr/local/bin/python3',
+    '/opt/venv/bin/python',
+    '/nix/var/nix/profiles/default/bin/python3'
+  ].filter(Boolean))) as string[];
   const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
 
   const executeExporter = async (pythonBin: string): Promise<void> => {
@@ -106,7 +119,17 @@ const runDistributionPythonExporter = async (payload: unknown): Promise<Buffer> 
   const executeExporterViaShell = async (): Promise<void> => {
     await new Promise<void>((resolve, reject) => {
       const timeoutMs = Number(process.env.FRAGEBOGEN_EXPORT_PY_TIMEOUT_MS || 90_000);
-      const command = `python3 ${shellQuote(scriptPath)} ${shellQuote(inputPath)} ${shellQuote(outputPath)} || python ${shellQuote(scriptPath)} ${shellQuote(inputPath)} ${shellQuote(outputPath)}`;
+      const command = [
+        'python3',
+        'python',
+        'python3.13',
+        'python3.12',
+        'python3.11',
+        '/usr/bin/python3',
+        '/usr/local/bin/python3',
+        '/opt/venv/bin/python',
+        '/nix/var/nix/profiles/default/bin/python3'
+      ].map((bin) => `${bin} ${shellQuote(scriptPath)} ${shellQuote(inputPath)} ${shellQuote(outputPath)}`).join(' || ');
       const child = spawn('sh', ['-lc', command], {
         cwd: process.cwd(),
         windowsHide: true
