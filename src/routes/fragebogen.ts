@@ -1094,13 +1094,34 @@ router.get('/fragebogen', async (req: Request, res: Response) => {
     
     if (modulesError) throw modulesError;
     
-    // Fetch markets for all fragebogen in one query
-    const { data: allMarkets, error: marketsError } = await freshClient
-      .from('fb_fragebogen_markets')
-      .select('fragebogen_id, market_id')
-      .in('fragebogen_id', fragebogenIds);
-    
-    if (marketsError) throw marketsError;
+    // Fetch markets for all fragebogen using pagination.
+    // Supabase/PostgREST applies a default max rows window per request (commonly 1000),
+    // so a single select can silently truncate larger result sets.
+    const allMarkets: Array<{ fragebogen_id: string; market_id: string }> = [];
+    const marketPageSize = 1000;
+    let marketOffset = 0;
+    let marketPageCount = 0;
+
+    while (true) {
+      const { data: marketsPage, error: marketsError } = await freshClient
+        .from('fb_fragebogen_markets')
+        .select('fragebogen_id, market_id')
+        .in('fragebogen_id', fragebogenIds)
+        .order('fragebogen_id', { ascending: true })
+        .order('market_id', { ascending: true })
+        .range(marketOffset, marketOffset + marketPageSize - 1);
+
+      if (marketsError) throw marketsError;
+      const rows = marketsPage || [];
+      allMarkets.push(...rows);
+      marketPageCount += 1;
+
+      if (rows.length < marketPageSize) {
+        break;
+      }
+
+      marketOffset += marketPageSize;
+    }
     
     // Group modules and markets by fragebogen_id
     const modulesByFragebogen: Record<string, string[]> = {};
@@ -1126,7 +1147,7 @@ router.get('/fragebogen', async (req: Request, res: Response) => {
       module_ids: modulesByFragebogen[f.id] || [],
       market_ids: marketsByFragebogen[f.id] || []
     }));
-    
+
     res.json(enrichedFragebogen);
   } catch (error: any) {
     console.error('Error fetching fragebogen:', error);
