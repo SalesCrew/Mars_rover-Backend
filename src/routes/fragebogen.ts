@@ -138,6 +138,134 @@ router.post('/questions/upload-image', async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/fragebogen/responses/upload-photo
+ * Upload a GL response photo for a photo_upload question
+ */
+router.post('/responses/upload-photo', async (req: Request, res: Response) => {
+  try {
+    const {
+      image,
+      fragebogen_id,
+      market_id,
+      gebietsleiter_id,
+      response_id,
+      question_id,
+      filename
+    } = req.body || {};
+
+    if (!image || typeof image !== 'string') {
+      return res.status(400).json({ error: 'image (base64) is required' });
+    }
+    if (!fragebogen_id || !market_id || !gebietsleiter_id || !response_id || !question_id) {
+      return res.status(400).json({
+        error: 'fragebogen_id, market_id, gebietsleiter_id, response_id, and question_id are required'
+      });
+    }
+
+    const freshClient = createFreshClient();
+
+    // Ensure response exists and belongs to the given identifiers.
+    const { data: responseRow, error: responseError } = await freshClient
+      .from('fb_responses')
+      .select('id, fragebogen_id, gebietsleiter_id, market_id')
+      .eq('id', response_id)
+      .maybeSingle();
+    if (responseError) throw responseError;
+    if (!responseRow) {
+      return res.status(404).json({ error: 'Response not found' });
+    }
+    if (
+      responseRow.fragebogen_id !== fragebogen_id ||
+      responseRow.gebietsleiter_id !== gebietsleiter_id ||
+      responseRow.market_id !== market_id
+    ) {
+      return res.status(400).json({ error: 'response_id does not match provided fragebogen/market/gebietsleiter context' });
+    }
+
+    // Ensure question exists and is photo_upload
+    const { data: questionRow, error: questionError } = await freshClient
+      .from('fb_questions')
+      .select('id, type')
+      .eq('id', question_id)
+      .maybeSingle();
+    if (questionError) throw questionError;
+    if (!questionRow) {
+      return res.status(404).json({ error: 'Question not found' });
+    }
+    if (questionRow.type !== 'photo_upload') {
+      return res.status(400).json({ error: 'question_id is not a photo_upload question' });
+    }
+
+    let base64Data = image;
+    let contentType = 'image/jpeg';
+    if (image.startsWith('data:')) {
+      const matches = image.match(/^data:([^;]+);base64,(.+)$/);
+      if (!matches || !matches[2]) {
+        return res.status(400).json({ error: 'Invalid data URL image format' });
+      }
+      contentType = matches[1] || contentType;
+      base64Data = matches[2];
+    }
+
+    if (!contentType.startsWith('image/')) {
+      return res.status(400).json({ error: 'Only image uploads are allowed' });
+    }
+
+    const sanitizeSegment = (value: string) => String(value).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const extFromMime = contentType.split('/')[1]?.toLowerCase() || 'jpg';
+    const extCandidate = String(filename || '')
+      .split('.')
+      .pop()
+      ?.toLowerCase()
+      ?.replace(/[^a-z0-9]/g, '');
+    const ext = extCandidate || extFromMime || 'jpg';
+
+    const now = Date.now();
+    const rand = Math.random().toString(36).slice(2, 8);
+    const safeFragebogenId = sanitizeSegment(fragebogen_id);
+    const safeMarketId = sanitizeSegment(market_id);
+    const safeGebietsleiterId = sanitizeSegment(gebietsleiter_id);
+    const safeResponseId = sanitizeSegment(response_id);
+    const safeQuestionId = sanitizeSegment(question_id);
+
+    const filePath =
+      `fragebogen/${safeFragebogenId}/market/${safeMarketId}/gl/${safeGebietsleiterId}` +
+      `/response/${safeResponseId}/question/${safeQuestionId}/${now}_${rand}.${ext}`;
+
+    const buffer = Buffer.from(base64Data, 'base64');
+    if (!buffer || buffer.length === 0) {
+      return res.status(400).json({ error: 'Invalid image payload' });
+    }
+
+    const { error: uploadError } = await freshClient.storage
+      .from('fragebogen-response-images')
+      .upload(filePath, buffer, {
+        contentType,
+        cacheControl: '3600',
+        upsert: false
+      });
+    if (uploadError) {
+      console.error('Error uploading response photo:', uploadError);
+      return res.status(500).json({ error: uploadError.message || 'Failed to upload response photo' });
+    }
+
+    const { data: urlData } = freshClient.storage
+      .from('fragebogen-response-images')
+      .getPublicUrl(filePath);
+
+    res.status(201).json({
+      url: urlData.publicUrl,
+      path: filePath,
+      content_type: contentType,
+      size: buffer.length
+    });
+  } catch (error: any) {
+    console.error('Error in response photo upload:', error);
+    res.status(500).json({ error: error.message || 'Failed to upload response photo' });
+  }
+});
+
+/**
  * GET /api/fragebogen/questions
  * List all questions with optional filtering
  */
@@ -1756,6 +1884,7 @@ router.get('/responses/:id', async (req: Request, res: Response) => {
  * POST /api/fragebogen/responses
  * Start a new response run for a GL at a market.
  * Multiple runs per (fragebogen, GL, market) are supported.
+ * Compatibility: if a legacy DB still enforces unique_response, reuse/reopen existing.
  */
 router.post('/responses', async (req: Request, res: Response) => {
   try {
@@ -1768,7 +1897,7 @@ router.post('/responses', async (req: Request, res: Response) => {
       });
     }
     
-    // Always create a new run — multiple historical runs are intentional
+    // Prefer creating a new run (intended behavior with current schema).
     const { data, error } = await freshClient
       .from('fb_responses')
       .insert({
@@ -1781,7 +1910,45 @@ router.post('/responses', async (req: Request, res: Response) => {
       .select()
       .single();
     
-    if (error) throw error;
+    if (error) {
+      // Legacy compatibility path: some environments still have unique_response
+      // on (fragebogen_id, gebietsleiter_id, market_id), which blocks inserts.
+      if (error.code === '23505' && String(error.message || '').includes('unique_response')) {
+        const { data: existing, error: existingError } = await freshClient
+          .from('fb_responses')
+          .select('*')
+          .eq('fragebogen_id', fragebogen_id)
+          .eq('gebietsleiter_id', gebietsleiter_id)
+          .eq('market_id', market_id)
+          .maybeSingle();
+
+        if (existingError) throw existingError;
+        if (!existing) throw error;
+
+        // If the legacy single row was completed, reopen it for a new visit.
+        if (existing.status === 'completed') {
+          const { data: reopened, error: reopenError } = await freshClient
+            .from('fb_responses')
+            .update({
+              status: 'in_progress',
+              started_at: new Date().toISOString(),
+              completed_at: null,
+              zeiterfassung_submission_id: zeiterfassung_submission_id || null
+            })
+            .eq('id', existing.id)
+            .select()
+            .single();
+          if (reopenError) throw reopenError;
+
+          console.log(`✅ Reopened legacy unique response run: ${reopened.id}`);
+          return res.status(200).json(reopened);
+        }
+
+        console.log(`✅ Reusing legacy unique response run: ${existing.id}`);
+        return res.status(200).json(existing);
+      }
+      throw error;
+    }
     
     console.log(`✅ Started response run: ${data.id}`);
     res.status(201).json(data);
