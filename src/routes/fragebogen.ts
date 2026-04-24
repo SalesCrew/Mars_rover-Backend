@@ -500,10 +500,11 @@ router.delete('/questions/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
+    const nowIso = new Date().toISOString();
     
     const { data, error } = await freshClient
       .from('fb_questions')
-      .update({ archived: true })
+      .update({ archived: true, is_deleted: true, deleted_at: nowIso })
       .eq('id', id)
       .select()
       .single();
@@ -676,6 +677,127 @@ router.get('/modules/:id', async (req: Request, res: Response) => {
  * POST /api/fragebogen/modules
  * Create a new module with questions and rules
  */
+const detectRuleConflict = (rules: any[]): string | null => {
+  if (!Array.isArray(rules) || rules.length === 0) return null;
+
+  const toFiniteNumber = (value: any): number | null => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const buildNumericDomain = (rule: any):
+    | { kind: 'point'; value: number }
+    | { kind: 'interval'; min?: number; minInclusive: boolean; max?: number; maxInclusive: boolean }
+    | null => {
+    const operator = String(rule?.operator || 'equals');
+    const base = toFiniteNumber(rule?.trigger_answer);
+    if (base === null) return null;
+
+    if (operator === 'equals') {
+      return { kind: 'point', value: base };
+    }
+    if (operator === 'greater_than') {
+      return { kind: 'interval', min: base, minInclusive: false, max: undefined, maxInclusive: false };
+    }
+    if (operator === 'less_than') {
+      return { kind: 'interval', min: undefined, minInclusive: false, max: base, maxInclusive: false };
+    }
+    if (operator === 'between') {
+      const max = toFiniteNumber(rule?.trigger_answer_max);
+      if (max === null) return null;
+      const min = Math.min(base, max);
+      const top = Math.max(base, max);
+      return { kind: 'interval', min, minInclusive: true, max: top, maxInclusive: true };
+    }
+    return null;
+  };
+
+  const pointInInterval = (
+    point: number,
+    interval: { min?: number; minInclusive: boolean; max?: number; maxInclusive: boolean }
+  ): boolean => {
+    if (interval.min !== undefined) {
+      if (point < interval.min) return false;
+      if (point === interval.min && !interval.minInclusive) return false;
+    }
+    if (interval.max !== undefined) {
+      if (point > interval.max) return false;
+      if (point === interval.max && !interval.maxInclusive) return false;
+    }
+    return true;
+  };
+
+  const intervalsOverlap = (
+    a: { min?: number; minInclusive: boolean; max?: number; maxInclusive: boolean },
+    b: { min?: number; minInclusive: boolean; max?: number; maxInclusive: boolean }
+  ): boolean => {
+    if (a.max !== undefined && b.min !== undefined) {
+      if (a.max < b.min) return false;
+      if (a.max === b.min && (!a.maxInclusive || !b.minInclusive)) return false;
+    }
+    if (b.max !== undefined && a.min !== undefined) {
+      if (b.max < a.min) return false;
+      if (b.max === a.min && (!b.maxInclusive || !a.minInclusive)) return false;
+    }
+    return true;
+  };
+
+  const ruleDomainsOverlap = (a: any, b: any): boolean => {
+    const numericOperators = new Set(['equals', 'greater_than', 'less_than', 'between']);
+    const aOp = String(a?.operator || 'equals');
+    const bOp = String(b?.operator || 'equals');
+    const bothNumericComparable = numericOperators.has(aOp) && numericOperators.has(bOp);
+
+    if (bothNumericComparable) {
+      const domainA = buildNumericDomain(a);
+      const domainB = buildNumericDomain(b);
+      if (domainA && domainB) {
+        if (domainA.kind === 'point' && domainB.kind === 'point') {
+          return domainA.value === domainB.value;
+        }
+        if (domainA.kind === 'point' && domainB.kind === 'interval') {
+          return pointInInterval(domainA.value, domainB);
+        }
+        if (domainA.kind === 'interval' && domainB.kind === 'point') {
+          return pointInInterval(domainB.value, domainA);
+        }
+        if (domainA.kind === 'interval' && domainB.kind === 'interval') {
+          return intervalsOverlap(domainA, domainB);
+        }
+        return false;
+      }
+    }
+
+    // Conservative fallback for unsupported/non-numeric combinations.
+    return (
+      String(aOp) === String(bOp) &&
+      String(a?.trigger_answer || '') === String(b?.trigger_answer || '') &&
+      String(a?.trigger_answer_max || '') === String(b?.trigger_answer_max || '')
+    );
+  };
+
+  for (let i = 0; i < rules.length; i += 1) {
+    const a = rules[i] || {};
+    const aTargets = Array.isArray(a.target_local_ids) ? a.target_local_ids : [];
+    if (!a.trigger_local_id || !a.action || aTargets.length === 0) continue;
+
+    for (let j = i + 1; j < rules.length; j += 1) {
+      const b = rules[j] || {};
+      const bTargets = Array.isArray(b.target_local_ids) ? b.target_local_ids : [];
+      if (!b.trigger_local_id || !b.action || bTargets.length === 0) continue;
+      if (String(a.action) === String(b.action)) continue;
+      if (String(a.trigger_local_id) !== String(b.trigger_local_id)) continue;
+
+      const overlap = aTargets.filter((targetId: string) => bTargets.includes(targetId));
+      if (overlap.length > 0 && ruleDomainsOverlap(a, b)) {
+        return `Conflicting rules detected for trigger ${a.trigger_local_id} on targets: ${overlap.join(', ')}`;
+      }
+    }
+  }
+
+  return null;
+};
+
 router.post('/modules', async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
@@ -683,6 +805,11 @@ router.post('/modules', async (req: Request, res: Response) => {
     
     if (!name) {
       return res.status(400).json({ error: 'name is required' });
+    }
+
+    const createRuleConflict = detectRuleConflict(rules || []);
+    if (createRuleConflict) {
+      return res.status(400).json({ error: createRuleConflict });
     }
     
     // Create module
@@ -751,6 +878,11 @@ router.put('/modules/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
     const freshClient = createFreshClient();
     const { name, description, questions, rules } = req.body;
+
+    const updateRuleConflict = detectRuleConflict(rules || []);
+    if (updateRuleConflict) {
+      return res.status(400).json({ error: updateRuleConflict });
+    }
     
     // Update module basic info
     const moduleUpdates: any = {};
@@ -946,10 +1078,16 @@ router.put('/modules/:id/archive', async (req: Request, res: Response) => {
     const { id } = req.params;
     const freshClient = createFreshClient();
     const { archived } = req.body;
+    const shouldArchive = archived ?? true;
+    const nowIso = new Date().toISOString();
     
     const { data, error } = await freshClient
       .from('fb_modules')
-      .update({ archived: archived ?? true })
+      .update({
+        archived: shouldArchive,
+        is_deleted: shouldArchive,
+        deleted_at: shouldArchive ? nowIso : null
+      })
       .eq('id', id)
       .select()
       .single();
@@ -960,7 +1098,7 @@ router.put('/modules/:id/archive', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Module not found' });
     }
     
-    console.log(`✅ ${archived ? 'Archived' : 'Unarchived'} module: ${id}`);
+    console.log(`✅ ${shouldArchive ? 'Archived' : 'Unarchived'} module: ${id}`);
     res.json(data);
   } catch (error: any) {
     console.error('Error archiving module:', error);
@@ -976,10 +1114,11 @@ router.delete('/modules/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
+    const nowIso = new Date().toISOString();
     
     const { data, error } = await freshClient
       .from('fb_modules')
-      .update({ archived: true })
+      .update({ archived: true, is_deleted: true, deleted_at: nowIso })
       .eq('id', id)
       .select()
       .single();
@@ -1576,11 +1715,17 @@ router.put('/fragebogen/:id/archive', async (req: Request, res: Response) => {
     const { id } = req.params;
     const freshClient = createFreshClient();
     const { archived } = req.body;
+    const shouldArchive = archived ?? true;
+    const nowIso = new Date().toISOString();
     
-    const updates: any = { archived: archived ?? true };
+    const updates: any = {
+      archived: shouldArchive,
+      is_deleted: shouldArchive,
+      deleted_at: shouldArchive ? nowIso : null
+    };
     
     // If archiving, also set status to inactive
-    if (archived) {
+    if (shouldArchive) {
       updates.status = 'inactive';
     }
     
@@ -1597,7 +1742,7 @@ router.put('/fragebogen/:id/archive', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Fragebogen not found' });
     }
     
-    console.log(`✅ ${archived ? 'Archived' : 'Unarchived'} fragebogen: ${id}`);
+    console.log(`✅ ${shouldArchive ? 'Archived' : 'Unarchived'} fragebogen: ${id}`);
     res.json(data);
   } catch (error: any) {
     console.error('Error archiving fragebogen:', error);
@@ -1613,10 +1758,11 @@ router.delete('/fragebogen/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
+    const nowIso = new Date().toISOString();
     
     const { data, error } = await freshClient
       .from('fb_fragebogen')
-      .update({ archived: true, status: 'inactive' })
+      .update({ archived: true, is_deleted: true, deleted_at: nowIso, status: 'inactive' })
       .eq('id', id)
       .select()
       .single();
@@ -1788,6 +1934,58 @@ router.get('/responses/fragebogen/:fragebogenId', async (req: Request, res: Resp
 });
 
 /**
+ * GET /api/fragebogen/responses/completed-map
+ * Return completed fragebogen ids for a GL+market tuple.
+ */
+router.get('/responses/completed-map', async (req: Request, res: Response) => {
+  try {
+    const freshClient = createFreshClient();
+    const { gebietsleiter_id, market_id, fragebogen_ids } = req.query;
+
+    if (!gebietsleiter_id || !market_id) {
+      return res.status(400).json({
+        error: 'gebietsleiter_id and market_id are required'
+      });
+    }
+
+    let parsedFragebogenIds: string[] | null = null;
+    if (typeof fragebogen_ids === 'string' && fragebogen_ids.trim()) {
+      parsedFragebogenIds = fragebogen_ids
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean);
+    }
+
+    let query = freshClient
+      .from('fb_responses')
+      .select('fragebogen_id')
+      .eq('gebietsleiter_id', String(gebietsleiter_id))
+      .eq('market_id', String(market_id))
+      .eq('status', 'completed');
+
+    if (parsedFragebogenIds && parsedFragebogenIds.length > 0) {
+      query = query.in('fragebogen_id', parsedFragebogenIds);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const completedIds = Array.from(
+      new Set((data || []).map((row: any) => row.fragebogen_id).filter(Boolean))
+    );
+
+    res.json({
+      gebietsleiter_id: String(gebietsleiter_id),
+      market_id: String(market_id),
+      completed_fragebogen_ids: completedIds
+    });
+  } catch (error: any) {
+    console.error('Error fetching completed response map:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch completed response map' });
+  }
+});
+
+/**
  * GET /api/fragebogen/responses/:id
  * Get a single response with all answers and resolved label context.
  */
@@ -1896,8 +2094,25 @@ router.post('/responses', async (req: Request, res: Response) => {
         error: 'fragebogen_id, gebietsleiter_id, and market_id are required' 
       });
     }
-    
-    // Prefer creating a new run (intended behavior with current schema).
+
+    // One-time visibility rule: once completed by this GL for this market,
+    // this fragebogen must not be started again.
+    const { data: completedRows, error: completedLookupError } = await freshClient
+      .from('fb_responses')
+      .select('id')
+      .eq('fragebogen_id', fragebogen_id)
+      .eq('gebietsleiter_id', gebietsleiter_id)
+      .eq('market_id', market_id)
+      .eq('status', 'completed')
+      .limit(1);
+    if (completedLookupError) throw completedLookupError;
+    if ((completedRows || []).length > 0) {
+      return res.status(409).json({
+        error: 'Fragebogen already completed for this market by this GL'
+      });
+    }
+
+    // Prefer creating a new run when not already completed.
     const { data, error } = await freshClient
       .from('fb_responses')
       .insert({
@@ -1925,27 +2140,19 @@ router.post('/responses', async (req: Request, res: Response) => {
         if (existingError) throw existingError;
         if (!existing) throw error;
 
-        // If the legacy single row was completed, reopen it for a new visit.
+        // Never reopen completed runs under one-time visibility behavior.
         if (existing.status === 'completed') {
-          const { data: reopened, error: reopenError } = await freshClient
-            .from('fb_responses')
-            .update({
-              status: 'in_progress',
-              started_at: new Date().toISOString(),
-              completed_at: null,
-              zeiterfassung_submission_id: zeiterfassung_submission_id || null
-            })
-            .eq('id', existing.id)
-            .select()
-            .single();
-          if (reopenError) throw reopenError;
-
-          console.log(`✅ Reopened legacy unique response run: ${reopened.id}`);
-          return res.status(200).json(reopened);
+          return res.status(409).json({
+            error: 'Fragebogen already completed for this market by this GL'
+          });
         }
 
-        console.log(`✅ Reusing legacy unique response run: ${existing.id}`);
-        return res.status(200).json(existing);
+        if (existing.status === 'in_progress') {
+          console.log(`✅ Reusing legacy unique in-progress response run: ${existing.id}`);
+          return res.status(200).json(existing);
+        }
+
+        throw error;
       }
       throw error;
     }
