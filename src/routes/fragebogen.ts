@@ -1986,6 +1986,182 @@ router.get('/responses/completed-map', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/fragebogen/responses/gl-history/:glId
+ * Get all fragebogen response runs for a GL with ordered modules/questions, rules and answers.
+ */
+router.get('/responses/gl-history/:glId', async (req: Request, res: Response) => {
+  try {
+    const { glId } = req.params;
+    const requesterGlId = String(req.query.requester_gebietsleiter_id || '').trim();
+    if (!glId) {
+      return res.status(400).json({ error: 'glId is required' });
+    }
+    if (!requesterGlId) {
+      return res.status(400).json({ error: 'requester_gebietsleiter_id is required' });
+    }
+    if (requesterGlId !== glId) {
+      return res.status(403).json({ error: 'Forbidden: requester GL mismatch' });
+    }
+
+    const freshClient = createFreshClient();
+
+    const { data: responses, error: responsesError } = await freshClient
+      .from('fb_responses')
+      .select(`
+        id,
+        fragebogen_id,
+        gebietsleiter_id,
+        market_id,
+        status,
+        started_at,
+        completed_at,
+        market:markets (id, name, chain, address, city),
+        fragebogen:fb_fragebogen (id, name, description, start_date, end_date, status)
+      `)
+      .eq('gebietsleiter_id', glId)
+      .order('started_at', { ascending: false });
+
+    if (responsesError) throw responsesError;
+    if (!responses || responses.length === 0) {
+      return res.json([]);
+    }
+
+    const fragebogenIds = Array.from(new Set(responses.map((r: any) => r.fragebogen_id).filter(Boolean)));
+    const responseIds = responses.map((r: any) => r.id);
+
+    const { data: fragebogenModules, error: fmError } = await freshClient
+      .from('fb_fragebogen_modules')
+      .select(`
+        fragebogen_id,
+        module_id,
+        order_index,
+        module:fb_modules (id, name, description)
+      `)
+      .in('fragebogen_id', fragebogenIds)
+      .order('order_index', { ascending: true });
+    if (fmError) throw fmError;
+
+    const moduleIds = Array.from(new Set((fragebogenModules || []).map((row: any) => row.module_id).filter(Boolean)));
+
+    const [moduleQuestionsResult, moduleRulesResult] = await Promise.all([
+      moduleIds.length > 0
+        ? freshClient
+            .from('fb_module_questions')
+            .select(`
+              module_id,
+              question_id,
+              order_index,
+              required,
+              local_id,
+              question:fb_questions (
+                id,
+                type,
+                question_text,
+                instruction,
+                options,
+                likert_scale,
+                matrix_config,
+                numeric_constraints,
+                slider_config,
+                images
+              )
+            `)
+            .in('module_id', moduleIds)
+            .order('order_index', { ascending: true })
+        : Promise.resolve({ data: [], error: null } as any),
+      moduleIds.length > 0
+        ? freshClient
+            .from('fb_module_rules')
+            .select('id, module_id, trigger_local_id, trigger_answer, operator, trigger_answer_max, action, target_local_ids')
+            .in('module_id', moduleIds)
+        : Promise.resolve({ data: [], error: null } as any)
+    ]);
+
+    if (moduleQuestionsResult.error) throw moduleQuestionsResult.error;
+    if (moduleRulesResult.error) throw moduleRulesResult.error;
+
+    const { data: answers, error: answersError } = await freshClient
+      .from('fb_response_answers')
+      .select(`
+        id,
+        response_id,
+        question_id,
+        module_id,
+        question_type,
+        answer_kind,
+        answer_text,
+        answer_numeric,
+        answer_boolean,
+        answer_json,
+        answer_file_url,
+        answered_at,
+        created_at,
+        updated_at
+      `)
+      .in('response_id', responseIds)
+      .order('answered_at', { ascending: true });
+    if (answersError) throw answersError;
+
+    const questionsByModuleId = new Map<string, any[]>();
+    (moduleQuestionsResult.data || []).forEach((row: any) => {
+      const existing = questionsByModuleId.get(row.module_id) || [];
+      existing.push({
+        id: row.question_id,
+        module_id: row.module_id,
+        order_index: row.order_index,
+        required: !!row.required,
+        local_id: row.local_id,
+        question: row.question
+      });
+      questionsByModuleId.set(row.module_id, existing);
+    });
+
+    const rulesByModuleId = new Map<string, any[]>();
+    (moduleRulesResult.data || []).forEach((row: any) => {
+      const existing = rulesByModuleId.get(row.module_id) || [];
+      existing.push(row);
+      rulesByModuleId.set(row.module_id, existing);
+    });
+
+    const modulesByFragebogenId = new Map<string, any[]>();
+    (fragebogenModules || []).forEach((row: any) => {
+      const existing = modulesByFragebogenId.get(row.fragebogen_id) || [];
+      existing.push({
+        id: row.module?.id || row.module_id,
+        name: row.module?.name || 'Modul',
+        description: row.module?.description || '',
+        order_index: row.order_index,
+        questions: (questionsByModuleId.get(row.module_id) || []).sort((a, b) => a.order_index - b.order_index),
+        rules: rulesByModuleId.get(row.module_id) || []
+      });
+      modulesByFragebogenId.set(row.fragebogen_id, existing);
+    });
+
+    const answersByResponseId = new Map<string, any[]>();
+    (answers || []).forEach((answer: any) => {
+      const existing = answersByResponseId.get(answer.response_id) || [];
+      existing.push(answer);
+      answersByResponseId.set(answer.response_id, existing);
+    });
+
+    const payload = responses.map((response: any) => ({
+      ...response,
+      modules: (modulesByFragebogenId.get(response.fragebogen_id) || []).map((module: any) => ({
+        ...module,
+        questions: [...module.questions],
+        rules: [...module.rules]
+      })),
+      answers: answersByResponseId.get(response.id) || []
+    }));
+
+    res.json(payload);
+  } catch (error: any) {
+    console.error('Error fetching GL response history:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch GL response history' });
+  }
+});
+
+/**
  * GET /api/fragebogen/responses/:id
  * Get a single response with all answers and resolved label context.
  */
@@ -2174,16 +2350,19 @@ router.put('/responses/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
-    const { answers } = req.body;
+    const { answers, requester_gebietsleiter_id } = req.body;
     
     if (!answers || !Array.isArray(answers)) {
       return res.status(400).json({ error: 'answers array is required' });
     }
+    if (!requester_gebietsleiter_id || typeof requester_gebietsleiter_id !== 'string') {
+      return res.status(400).json({ error: 'requester_gebietsleiter_id is required' });
+    }
 
-    // --- Guard: response must exist and must not be completed ---
+    // --- Guard: response must exist ---
     const { data: responseRow, error: responseFetchError } = await freshClient
       .from('fb_responses')
-      .select('id, status')
+      .select('id, status, gebietsleiter_id')
       .eq('id', id)
       .maybeSingle();
 
@@ -2191,8 +2370,8 @@ router.put('/responses/:id', async (req: Request, res: Response) => {
     if (!responseRow) {
       return res.status(404).json({ error: 'Response not found' });
     }
-    if (responseRow.status === 'completed') {
-      return res.status(409).json({ error: 'Response is already completed and cannot be modified' });
+    if (String(responseRow.gebietsleiter_id || '') !== requester_gebietsleiter_id) {
+      return res.status(403).json({ error: 'Forbidden: response does not belong to requester GL' });
     }
 
     const now = new Date().toISOString();
@@ -2217,6 +2396,18 @@ router.put('/responses/:id', async (req: Request, res: Response) => {
         return res.status(400).json({
           error: `Question ${question_id} is not part of module ${module_id}`
         });
+      }
+
+      // Explicit clear request: remove/reset previously saved answer row.
+      if (answer.clear === true) {
+        const { error: deleteError } = await freshClient
+          .from('fb_response_answers')
+          .delete()
+          .eq('response_id', id)
+          .eq('question_id', question_id)
+          .eq('module_id', module_id);
+        if (deleteError) throw deleteError;
+        continue;
       }
 
       // --- Fetch authoritative question definition ---
