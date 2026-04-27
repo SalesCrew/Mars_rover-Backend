@@ -95,6 +95,8 @@ export const EXPORT_DATASETS: Record<string, DatasetDefinition> = {
       { id: 'reason', label: 'Grund', type: 'string', width: 20, default: true },
       { id: 'status', label: 'Status', type: 'string', width: 12, default: true },
       { id: 'notes', label: 'Notizen', type: 'string', width: 40, default: true },
+      { id: 'take_out_value', label: 'Warenwert Entnommen', type: 'currency', width: 18, default: true },
+      { id: 'replace_value', label: 'Warenwert Ersetzt', type: 'currency', width: 18, default: true },
       { id: 'products_summary', label: 'Produkte', type: 'string', width: 50, default: true },
       { id: 'products_json', label: 'Produkte (JSON)', type: 'string', width: 60, default: false }
     ]

@@ -24,6 +24,51 @@ const parseVe = (value: any): number | null => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
+const parseLocaleNumber = (value: any): number | null => {
+  if (value === null || value === undefined || value === '') return null;
+
+  const raw = String(value).replace(/[^\d,.-]/g, '').trim();
+  if (!raw) return null;
+
+  let normalized = raw;
+  const hasComma = raw.includes(',');
+  const hasDot = raw.includes('.');
+
+  if (hasComma && hasDot) {
+    // Pick decimal separator by last occurrence.
+    normalized = raw.lastIndexOf(',') > raw.lastIndexOf('.')
+      ? raw.replace(/\./g, '').replace(',', '.')
+      : raw.replace(/,/g, '');
+  } else if (hasComma) {
+    normalized = raw.replace(',', '.');
+  }
+
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const roundCurrency = (value: number): number =>
+  Math.round((value + Number.EPSILON) * 100) / 100;
+
+const parseWarenwertPairFromNotes = (notes: any): { takeOutValue: number; replaceValue: number } | null => {
+  if (!notes) return null;
+
+  const noteText = String(notes);
+  const match = noteText.match(
+    /warenwert[^0-9€-]*€?\s*([0-9][0-9.,]*)\s*(?:->|→)\s*€?\s*([0-9][0-9.,]*)/i
+  );
+  if (!match) return null;
+
+  const takeOutValue = parseLocaleNumber(match[1]);
+  const replaceValue = parseLocaleNumber(match[2]);
+  if (takeOutValue === null || replaceValue === null) return null;
+
+  return {
+    takeOutValue: roundCurrency(takeOutValue),
+    replaceValue: roundCurrency(replaceValue)
+  };
+};
+
 const setBestVe = (map: Map<string, number | null>, key: string, ve: number | null) => {
   if (!key) return;
   if (!map.has(key)) {
@@ -574,8 +619,15 @@ export async function transformVorverkaufEntries(
   const [glData, marketData, itemsData] = await Promise.all([
     client.from('gebietsleiter').select('id, name, email').in('id', glIds),
     client.from('markets').select('id, name, chain, city, address, postal_code').in('id', marketIds),
-    client.from('vorverkauf_items').select('*, products(name)').in('vorverkauf_entry_id', entryIds)
+    client.from('vorverkauf_items').select('*').in('vorverkauf_entry_id', entryIds)
   ]);
+
+  const rawItems = itemsData.data || [];
+  const rawProductIds = [...new Set(rawItems.map((i: any) => i.product_id).filter(Boolean))];
+  const { data: productsData } = rawProductIds.length > 0
+    ? await client.from('products').select('id, name, price').in('id', rawProductIds)
+    : { data: [] as any[] };
+  const productsById = new Map((productsData || []).map((p: any) => [String(p.id), p]));
 
   const glMap = new Map((glData.data || []).map(g => [g.id, g]));
   const marketMap = new Map((marketData.data || []).map(m => [m.id, m]));
@@ -594,15 +646,67 @@ export async function transformVorverkaufEntries(
     const market = marketMap.get(entry.market_id);
     const items = itemsByEntry.get(entry.id) || [];
 
+    const getItemProductName = (item: any): string => {
+      const lookupProduct = productsById.get(String(item.product_id));
+      if (lookupProduct?.name) return lookupProduct.name;
+      if (Array.isArray(item.products)) {
+        return item.products[0]?.name || 'Unbekannt';
+      }
+      return item.products?.name || 'Unbekannt';
+    };
+
+    const getItemProductPrice = (item: any): number => {
+      const lookupProduct = productsById.get(String(item.product_id));
+      if (lookupProduct) {
+        const directPrice = parseLocaleNumber(lookupProduct.price);
+        if (directPrice !== null) return directPrice;
+      }
+      const rawPrice = Array.isArray(item.products) ? item.products[0]?.price : item.products?.price;
+      const parsedPrice = parseLocaleNumber(rawPrice);
+      return parsedPrice === null ? 0 : parsedPrice;
+    };
+
+    let takeOutValue = 0;
+    let replaceValue = 0;
+    let takeOutItemCount = 0;
+    let replaceItemCount = 0;
+    items.forEach(item => {
+      const quantity = Number(item.quantity) || 0;
+      const price = getItemProductPrice(item);
+      const itemTotal = quantity * price;
+
+      if (item.item_type === 'replace') {
+        replaceItemCount += 1;
+        replaceValue += itemTotal;
+      } else {
+        takeOutItemCount += 1;
+        takeOutValue += itemTotal;
+      }
+    });
+
+    const parsedWarenwert = entry.reason === 'Produkttausch'
+      ? parseWarenwertPairFromNotes(entry.notes)
+      : null;
+    if (takeOutValue === 0 && replaceValue === 0 && parsedWarenwert) {
+      takeOutValue = parsedWarenwert.takeOutValue;
+      replaceValue = parsedWarenwert.replaceValue;
+    }
+
+    takeOutValue = roundCurrency(takeOutValue);
+    replaceValue = roundCurrency(replaceValue);
+
     const productsSummary = items
-      .map(item => `${item.products?.name || 'Unbekannt'} (${item.quantity}× ${item.item_type === 'replace' ? 'Ersatz' : 'Entnahme'})`)
+      .map(item => `${getItemProductName(item)} (${item.quantity}× ${item.item_type === 'replace' ? 'Ersatz' : 'Entnahme'})`)
       .join(', ');
 
     const productsJson = JSON.stringify(items.map(item => ({
-      name: item.products?.name || 'Unbekannt',
+      name: getItemProductName(item),
       quantity: item.quantity,
       type: item.item_type
     })));
+
+    const exportTakeOutValue = takeOutItemCount > 0 ? takeOutValue : null;
+    const exportReplaceValue = replaceItemCount > 0 ? replaceValue : null;
 
     const row: ExportRow = {
       id: entry.id,
@@ -617,6 +721,8 @@ export async function transformVorverkaufEntries(
       reason: entry.reason,
       status: entry.status === 'completed' ? 'Abgeschlossen' : 'Ausstehend',
       notes: entry.notes || '',
+      take_out_value: exportTakeOutValue,
+      replace_value: exportReplaceValue,
       products_summary: productsSummary,
       products_json: productsJson
     };
