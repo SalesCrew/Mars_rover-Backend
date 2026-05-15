@@ -71,6 +71,131 @@ async function resolveEinzelproduktMap(
   return result;
 }
 
+const WELLE_MARKETS_PAGE_SIZE = 500;
+const WELLE_MARKETS_FILTER_CHUNK_SIZE = 400;
+const WELLE_MARKETS_INSERT_CHUNK_SIZE = 400;
+
+function chunkArray<T>(items: T[], chunkSize: number): T[][] {
+  if (chunkSize <= 0) return [items];
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    chunks.push(items.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+async function fetchPagedWellenMarkets<T>(
+  buildQuery: (from: number, to: number) => any
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (let offset = 0; ; offset += WELLE_MARKETS_PAGE_SIZE) {
+    const from = offset;
+    const to = offset + WELLE_MARKETS_PAGE_SIZE - 1;
+    const { data, error } = await buildQuery(from, to);
+    if (error) throw error;
+    const page = (data || []) as T[];
+    rows.push(...page);
+    if (page.length < WELLE_MARKETS_PAGE_SIZE) break;
+  }
+  return rows;
+}
+
+async function fetchAllWelleMarketsByWelleId(
+  client: ReturnType<typeof createFreshClient>,
+  welleId: string
+): Promise<Array<{ market_id: string }>> {
+  return fetchPagedWellenMarkets<{ market_id: string }>((from, to) =>
+    client
+      .from('wellen_markets')
+      .select('market_id')
+      .eq('welle_id', welleId)
+      .order('market_id', { ascending: true })
+      .range(from, to)
+  );
+}
+
+async function fetchAllWelleMarketsByWelleIds(
+  client: ReturnType<typeof createFreshClient>,
+  welleIds: string[]
+): Promise<Array<{ welle_id: string; market_id: string }>> {
+  const uniqueWelleIds = [...new Set((welleIds || []).filter(Boolean))];
+  if (uniqueWelleIds.length === 0) return [];
+
+  const rows: Array<{ welle_id: string; market_id: string }> = [];
+  for (const welleChunk of chunkArray(uniqueWelleIds, WELLE_MARKETS_FILTER_CHUNK_SIZE)) {
+    const chunkRows = await fetchPagedWellenMarkets<{ welle_id: string; market_id: string }>((from, to) =>
+      client
+        .from('wellen_markets')
+        .select('welle_id, market_id')
+        .in('welle_id', welleChunk)
+        .order('welle_id', { ascending: true })
+        .order('market_id', { ascending: true })
+        .range(from, to)
+    );
+    rows.push(...chunkRows);
+  }
+
+  return rows;
+}
+
+async function fetchAllWelleMarketsByMarketAndWelleIds(
+  client: ReturnType<typeof createFreshClient>,
+  marketIds: string[],
+  welleIds: string[]
+): Promise<Array<{ welle_id: string; market_id: string }>> {
+  const uniqueMarketIds = [...new Set((marketIds || []).filter(Boolean))];
+  const uniqueWelleIds = [...new Set((welleIds || []).filter(Boolean))];
+  if (uniqueMarketIds.length === 0 || uniqueWelleIds.length === 0) return [];
+
+  const rows: Array<{ welle_id: string; market_id: string }> = [];
+  const seen = new Set<string>();
+  for (const marketChunk of chunkArray(uniqueMarketIds, WELLE_MARKETS_FILTER_CHUNK_SIZE)) {
+    for (const welleChunk of chunkArray(uniqueWelleIds, WELLE_MARKETS_FILTER_CHUNK_SIZE)) {
+      const chunkRows = await fetchPagedWellenMarkets<{ welle_id: string; market_id: string }>((from, to) =>
+        client
+          .from('wellen_markets')
+          .select('welle_id, market_id')
+          .in('market_id', marketChunk)
+          .in('welle_id', welleChunk)
+          .order('welle_id', { ascending: true })
+          .order('market_id', { ascending: true })
+          .range(from, to)
+      );
+      for (const row of chunkRows) {
+        const key = `${row.welle_id}:${row.market_id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rows.push(row);
+      }
+    }
+  }
+
+  return rows;
+}
+
+async function insertWelleMarketsInChunks(
+  client: ReturnType<typeof createFreshClient>,
+  welleId: string,
+  marketIds: string[]
+): Promise<number> {
+  const uniqueMarketIds = [...new Set((marketIds || []).filter(Boolean))];
+  let insertedCount = 0;
+
+  for (const marketChunk of chunkArray(uniqueMarketIds, WELLE_MARKETS_INSERT_CHUNK_SIZE)) {
+    const insertPayload = marketChunk.map((marketId) => ({
+      welle_id: welleId,
+      market_id: marketId
+    }));
+    const { error } = await client
+      .from('wellen_markets')
+      .insert(insertPayload);
+    if (error) throw error;
+    insertedCount += insertPayload.length;
+  }
+
+  return insertedCount;
+}
+
 // ============================================================================
 // KW (Calendar Week) HELPER FUNCTIONS
 // ============================================================================
@@ -261,11 +386,11 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
-        const { data: welleMarkets } = await freshClient
-          .from('wellen_markets')
-          .select('welle_id, market_id')
-          .in('market_id', marketIds)
-          .in('welle_id', filteredWellenIds);
+        const welleMarkets = await fetchAllWelleMarketsByMarketAndWelleIds(
+          freshClient,
+          marketIds,
+          filteredWellenIds
+        );
         
         const welleIds = [...new Set((welleMarkets || []).map(wm => wm.welle_id))];
         
@@ -427,11 +552,11 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
-        const { data: welleMarkets } = await freshClient
-          .from('wellen_markets')
-          .select('welle_id, market_id')
-          .in('market_id', marketIds)
-          .in('welle_id', filteredWellenIds);
+        const welleMarkets = await fetchAllWelleMarketsByMarketAndWelleIds(
+          freshClient,
+          marketIds,
+          filteredWellenIds
+        );
         
         const welleIds = [...new Set((welleMarkets || []).map(wm => wm.welle_id))];
         
@@ -565,11 +690,11 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
-        const { data: welleMarkets } = await freshClient
-          .from('wellen_markets')
-          .select('welle_id, market_id')
-          .in('market_id', marketIds)
-          .in('welle_id', filteredWellenIds);
+        const welleMarkets = await fetchAllWelleMarketsByMarketAndWelleIds(
+          freshClient,
+          marketIds,
+          filteredWellenIds
+        );
         
         const welleIds = [...new Set((welleMarkets || []).map(wm => wm.welle_id))];
         
@@ -804,11 +929,11 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
           };
         }
         
-        const { data: welleMarkets } = await freshClient
-          .from('wellen_markets')
-          .select('welle_id, market_id')
-          .in('market_id', marketIds)
-          .in('welle_id', filteredWellenIds);
+        const welleMarkets = await fetchAllWelleMarketsByMarketAndWelleIds(
+          freshClient,
+          marketIds,
+          filteredWellenIds
+        );
         
         const welleIds = [...new Set((welleMarkets || []).map(wm => wm.welle_id))];
         
@@ -1071,10 +1196,7 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
           .order('kw_order', { ascending: true });
         
         // Fetch assigned markets with gebietsleiter info - use fresh client
-        const { data: welleMarkets } = await freshClient
-          .from('wellen_markets')
-          .select('market_id')
-          .eq('welle_id', welle.id);
+        const welleMarkets = await fetchAllWelleMarketsByWelleId(freshClient, welle.id);
         
         const waveMarketIds = (welleMarkets || []).map(wm => wm.market_id);
         
@@ -1397,10 +1519,7 @@ router.get('/', async (req: Request, res: Response) => {
           .order('kw_order', { ascending: true });
 
         // Fetch assigned market IDs
-        const { data: welleMarkets } = await freshClient
-          .from('wellen_markets')
-          .select('market_id')
-          .eq('welle_id', welle.id);
+        const welleMarkets = await fetchAllWelleMarketsByWelleId(freshClient, welle.id);
         
         // Count unique GLs that have markets assigned in this wave
         let glsWithMarketsInWave = 0;
@@ -1476,7 +1595,8 @@ router.get('/', async (req: Request, res: Response) => {
               .filter(p => p.item_type === 'display' && p.item_id === d.id)
               .reduce((sum, p) => sum + p.current_number, 0),
             picture: d.picture_url,
-            itemValue: d.item_value
+            itemValue: d.item_value,
+            ve: d.ve ?? d.ve_size ?? d.vpe ?? null
           })),
           kartonwareItems: (kartonware || []).map(k => ({
             id: k.id,
@@ -1486,7 +1606,8 @@ router.get('/', async (req: Request, res: Response) => {
               .filter(p => p.item_type === 'kartonware' && p.item_id === k.id)
               .reduce((sum, p) => sum + p.current_number, 0),
             picture: k.picture_url,
-            itemValue: k.item_value
+            itemValue: k.item_value,
+            ve: k.ve ?? k.ve_size ?? k.vpe ?? null
           })),
           paletteItems: palettenWithProducts.map(p => ({
             id: p.id,
@@ -1522,13 +1643,15 @@ router.get('/', async (req: Request, res: Response) => {
               .filter(p => p.item_type === 'einzelprodukt' && p.item_id === e.id)
               .reduce((sum, p) => sum + p.current_number, 0),
             picture: e.picture_url,
-            itemValue: e.item_value
+            itemValue: e.item_value,
+            ve: e.ve ?? e.ve_size ?? e.vpe ?? null
           })),
           kwDays: (kwDays || []).map(kw => ({
             kw: kw.kw,
             days: kw.days
           })),
           assignedMarketIds: (welleMarkets || []).map(wm => wm.market_id),
+          assignedMarketCount: (welleMarkets || []).length,
           participatingGLs: uniqueGLs,
           totalGLs: glsWithMarketsInWave,
           fotoEnabled: welle.foto_enabled || false,
@@ -1754,10 +1877,7 @@ router.get('/:id', async (req: Request, res: Response) => {
       .eq('welle_id', id)
       .order('kw_order', { ascending: true });
 
-    const { data: welleMarkets } = await freshClient
-      .from('wellen_markets')
-      .select('market_id')
-      .eq('welle_id', id);
+    const welleMarkets = await fetchAllWelleMarketsByWelleId(freshClient, id);
 
     const { data: rawProgressSubs } = await freshClient
       .from('wellen_submissions')
@@ -1822,6 +1942,7 @@ router.get('/:id', async (req: Request, res: Response) => {
         days: kw.days
       })),
       assignedMarketIds: (welleMarkets || []).map(wm => wm.market_id),
+      assignedMarketCount: (welleMarkets || []).length,
       participatingGLs: uniqueGLs,
       totalGLs: 45,
       fotoEnabled: welle.foto_enabled || false,
@@ -2108,17 +2229,8 @@ router.post('/', async (req: Request, res: Response) => {
 
     // Insert market assignments
     if (assignedMarketIds && assignedMarketIds.length > 0) {
-      const marketsToInsert = assignedMarketIds.map((marketId: string) => ({
-        welle_id: welle.id,
-        market_id: marketId
-      }));
-
-      const { error: marketsError } = await freshClient
-        .from('wellen_markets')
-        .insert(marketsToInsert);
-
-      if (marketsError) throw marketsError;
-      console.log(`✅ Assigned ${assignedMarketIds.length} markets`);
+      const insertedCount = await insertWelleMarketsInChunks(freshClient, welle.id, assignedMarketIds);
+      console.log(`✅ Assigned ${insertedCount}/${assignedMarketIds.length} markets`);
     }
 
     console.log(`✅ Successfully created welle ${welle.id} with all related data`);
@@ -2540,13 +2652,14 @@ router.put('/:id', async (req: Request, res: Response) => {
     }
 
     // Delete and recreate market assignments
-    await freshClient.from('wellen_markets').delete().eq('welle_id', id);
+    const { error: deleteWelleMarketsError } = await freshClient
+      .from('wellen_markets')
+      .delete()
+      .eq('welle_id', id);
+    if (deleteWelleMarketsError) throw deleteWelleMarketsError;
     if (assignedMarketIds && assignedMarketIds.length > 0) {
-      const marketsToInsert = assignedMarketIds.map((marketId: string) => ({
-        welle_id: id,
-        market_id: marketId
-      }));
-      await freshClient.from('wellen_markets').insert(marketsToInsert);
+      const insertedCount = await insertWelleMarketsInChunks(freshClient, id, assignedMarketIds);
+      console.log(`✅ Re-assigned ${insertedCount}/${assignedMarketIds.length} markets`);
     }
 
     console.log(`✅ Updated welle ${id}`);
@@ -3248,15 +3361,15 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
     let wellen: any[] = [];
     
     if (welleIds.length > 0) {
-      const [displaysResult, kartonwareResult, welleMarketsResult, wellenResult] = await Promise.all([
+      const [displaysResult, kartonwareResult, wellenResult] = await Promise.all([
         freshClient.from('wellen_displays').select('id, target_number, welle_id').in('welle_id', welleIds),
         freshClient.from('wellen_kartonware').select('id, target_number, welle_id').in('welle_id', welleIds),
-        freshClient.from('wellen_markets').select('welle_id, market_id').in('welle_id', welleIds),
         freshClient.from('wellen').select('id, name').in('id', welleIds)
       ]);
+      const welleMarketsResult = await fetchAllWelleMarketsByWelleIds(freshClient, welleIds);
       displays = displaysResult.data || [];
       kartonware = kartonwareResult.data || [];
-      welleMarkets = welleMarketsResult.data || [];
+      welleMarkets = welleMarketsResult || [];
       wellen = wellenResult.data || [];
     }
 
@@ -3600,14 +3713,7 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
     }
 
     // Get assigned market IDs from wellen_markets table
-    const { data: wellenMarkets, error: wellenMarketsError } = await freshClient
-      .from('wellen_markets')
-      .select('market_id')
-      .eq('welle_id', welleId);
-
-    if (wellenMarketsError) {
-      return res.status(500).json({ error: wellenMarketsError.message });
-    }
+    const wellenMarkets = await fetchAllWelleMarketsByWelleId(freshClient, welleId);
 
     const assignedMarketIds = (wellenMarkets || []).map(wm => wm.market_id);
     
