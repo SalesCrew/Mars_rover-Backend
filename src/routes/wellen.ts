@@ -1779,62 +1779,23 @@ function inferPhotoExportExtension(photoUrl: string, contentType?: string | null
   return 'jpg';
 }
 
-const DEBUG_INGEST_ENDPOINT = 'http://127.0.0.1:7243/ingest/08dee0b8-b62d-4cf4-8508-81db7a759cf4';
-const DEBUG_SESSION_ID = 'bdb3ef';
-
-function postExportDebugLog(payload: {
-  runId: string;
-  hypothesisId: string;
-  location: string;
-  message: string;
-  data?: Record<string, any>;
-}) {
-  // #region agent log
-  fetch(DEBUG_INGEST_ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': DEBUG_SESSION_ID }, body: JSON.stringify({ sessionId: DEBUG_SESSION_ID, runId: payload.runId, hypothesisId: payload.hypothesisId, location: payload.location, message: payload.message, data: payload.data || {}, timestamp: Date.now() }) }).catch(() => {});
-  // #endregion
-}
-
 async function fetchPhotoForExport(
   photoUrl: string,
-  timeoutMs: number = 15000,
-  debugContext?: { runId: string; photoId?: string; chunkIndex?: number }
+  timeoutMs: number = 15000
 ): Promise<{ buffer: Buffer; contentType: string | null } | null> {
   let parsedUrl: URL;
   try {
     parsedUrl = new URL(photoUrl);
   } catch {
-    if (debugContext?.runId) {
-      // #region agent log
-      postExportDebugLog({
-        runId: debugContext.runId,
-        hypothesisId: 'H1',
-        location: 'wellen.ts:fetchPhotoForExport:new-url',
-        message: 'Rejected photo URL: invalid URL format',
-        data: { photoId: debugContext.photoId || null, chunkIndex: debugContext.chunkIndex ?? null, photoUrl: String(photoUrl || '') }
-      });
-      // #endregion
-    }
     return null;
   }
 
   if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
-    if (debugContext?.runId) {
-      // #region agent log
-      postExportDebugLog({
-        runId: debugContext.runId,
-        hypothesisId: 'H1',
-        location: 'wellen.ts:fetchPhotoForExport:protocol-check',
-        message: 'Rejected photo URL: unsupported protocol',
-        data: { photoId: debugContext.photoId || null, chunkIndex: debugContext.chunkIndex ?? null, protocol: parsedUrl.protocol, photoUrl: parsedUrl.toString() }
-      });
-      // #endregion
-    }
     return null;
   }
 
   const controller = new AbortController();
   const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
-  const startedAt = Date.now();
 
   try {
     const response = await fetch(parsedUrl.toString(), { signal: controller.signal });
@@ -1849,26 +1810,7 @@ async function fetchPhotoForExport(
     }
 
     return { buffer, contentType };
-  } catch (error: any) {
-    if (debugContext?.runId) {
-      const isAbort = String(error?.name || '').toLowerCase() === 'aborterror';
-      // #region agent log
-      postExportDebugLog({
-        runId: debugContext.runId,
-        hypothesisId: 'H1',
-        location: 'wellen.ts:fetchPhotoForExport:fetch-catch',
-        message: 'Photo download failed during export',
-        data: {
-          photoId: debugContext.photoId || null,
-          chunkIndex: debugContext.chunkIndex ?? null,
-          elapsedMs: Date.now() - startedAt,
-          isAbort,
-          errorName: error?.name || 'UnknownError',
-          errorMessage: error?.message || String(error || '')
-        }
-      });
-      // #endregion
-    }
+  } catch {
     return null;
   } finally {
     clearTimeout(timeoutHandle);
@@ -2192,30 +2134,10 @@ router.get('/photos', async (req: Request, res: Response) => {
 
 router.get('/photos/export.zip', async (req: Request, res: Response) => {
   try {
-    const debugRunId = `wellen-export-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const exportStartedAt = Date.now();
-
     const { welle_id, fragebogen_id, gl_id, market_id, tag, tags, source, start_date, end_date, zip_name } = req.query;
     const parsedSource = parseAdminPhotoSource(source);
     const selectedTags = parsePhotoTagFilter(tags, tag);
     const freshClient = createFreshClient();
-
-    // #region agent log
-    postExportDebugLog({
-      runId: debugRunId,
-      hypothesisId: 'H3',
-      location: 'wellen.ts:photos-export:request-start',
-      message: 'Photo export request received',
-      data: {
-        source: parsedSource,
-        welle_id: typeof welle_id === 'string' ? welle_id : null,
-        fragebogen_id: typeof fragebogen_id === 'string' ? fragebogen_id : null,
-        gl_id: typeof gl_id === 'string' ? gl_id : null,
-        market_id: typeof market_id === 'string' ? market_id : null,
-        hasTagFilter: selectedTags.length > 0
-      }
-    });
-    // #endregion
 
     const allRows = await fetchAdminPhotoRows(freshClient, {
       source: parsedSource,
@@ -2227,20 +2149,6 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
       startDate: typeof start_date === 'string' ? start_date : undefined,
       endDate: typeof end_date === 'string' ? end_date : undefined
     });
-
-    // #region agent log
-    postExportDebugLog({
-      runId: debugRunId,
-      hypothesisId: 'H3',
-      location: 'wellen.ts:photos-export:rows-loaded',
-      message: 'Photo rows prepared for export',
-      data: {
-        totalRows: allRows.length,
-        elapsedMs: Date.now() - exportStartedAt,
-        source: parsedSource
-      }
-    });
-    // #endregion
 
     if (allRows.length === 0) {
       return res.status(404).json({ error: 'Keine Fotos für die aktuellen Filter gefunden.' });
@@ -2271,43 +2179,19 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
     const duplicateCounts: Record<string, number> = {};
     let appendedFiles = 0;
 
-    res.once('finish', () => {
-      // #region agent log
-      postExportDebugLog({
-        runId: debugRunId,
-        hypothesisId: 'H2',
-        location: 'wellen.ts:photos-export:response-finish',
-        message: 'Export response finished successfully',
-        data: { appendedFiles, totalRows: allRows.length, totalElapsedMs: Date.now() - exportStartedAt }
-      });
-      // #endregion
-    });
-
-    res.once('close', () => {
-      // #region agent log
-      postExportDebugLog({
-        runId: debugRunId,
-        hypothesisId: 'H2',
-        location: 'wellen.ts:photos-export:response-close',
-        message: 'Export response stream closed',
-        data: { appendedFiles, totalRows: allRows.length, totalElapsedMs: Date.now() - exportStartedAt }
-      });
-      // #endregion
-    });
-
-    const PHOTO_EXPORT_CONCURRENCY = 8;
+    const PHOTO_EXPORT_CONCURRENCY = parsedSource === 'fotowelle' ? 20 : 12;
+    const PHOTO_EXPORT_TIMEOUT_MS = parsedSource === 'fotowelle' ? 8000 : 12000;
     const photoChunks = chunkArray(allRows, PHOTO_EXPORT_CONCURRENCY);
     for (let chunkIndex = 0; chunkIndex < photoChunks.length; chunkIndex += 1) {
+      if (res.writableEnded || (res as any).destroyed) {
+        archive.destroy();
+        return;
+      }
       const photoChunk = photoChunks[chunkIndex];
-      const chunkStartedAt = Date.now();
       const downloadedChunk = await Promise.all(
         photoChunk.map(async (photo) => {
           try {
-            const downloaded = await fetchPhotoForExport(photo.photoUrl, 15000, {
-              runId: debugRunId,
-              photoId: photo.id,
-              chunkIndex
-            });
+            const downloaded = await fetchPhotoForExport(photo.photoUrl, PHOTO_EXPORT_TIMEOUT_MS);
             return { photo, downloaded };
           } catch (photoError: any) {
             console.warn(`Skipping photo ${photo.id}:`, photoError?.message || photoError);
@@ -2316,26 +2200,11 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
         })
       );
 
-      const chunkSucceeded = downloadedChunk.filter(({ downloaded }) => !!downloaded).length;
-      const chunkFailed = downloadedChunk.length - chunkSucceeded;
-      // #region agent log
-      postExportDebugLog({
-        runId: debugRunId,
-        hypothesisId: 'H4',
-        location: 'wellen.ts:photos-export:chunk-processed',
-        message: 'Export chunk processed',
-        data: {
-          chunkIndex,
-          chunkSize: downloadedChunk.length,
-          chunkSucceeded,
-          chunkFailed,
-          chunkElapsedMs: Date.now() - chunkStartedAt,
-          appendedFilesSoFar: appendedFiles
-        }
-      });
-      // #endregion
-
       for (const { photo, downloaded } of downloadedChunk) {
+        if (res.writableEnded || (res as any).destroyed) {
+          archive.destroy();
+          return;
+        }
         if (!downloaded) {
           console.warn(`Skipping photo ${photo.id}: fetch failed/timeout/invalid URL`);
           continue;
@@ -2358,27 +2227,10 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
       archive.append('Keine Fotos konnten aus den hinterlegten URLs geladen werden.', {
         name: 'README.txt'
       });
-      // #region agent log
-      postExportDebugLog({
-        runId: debugRunId,
-        hypothesisId: 'H1',
-        location: 'wellen.ts:photos-export:no-files-appended',
-        message: 'No files appended to ZIP; README fallback added',
-        data: { totalRows: allRows.length, totalElapsedMs: Date.now() - exportStartedAt }
-      });
-      // #endregion
     }
 
+    if (res.writableEnded || (res as any).destroyed) return;
     await archive.finalize();
-    // #region agent log
-    postExportDebugLog({
-      runId: debugRunId,
-      hypothesisId: 'H2',
-      location: 'wellen.ts:photos-export:archive-finalized',
-      message: 'Archive finalize resolved',
-      data: { appendedFiles, totalRows: allRows.length, totalElapsedMs: Date.now() - exportStartedAt }
-    });
-    // #endregion
   } catch (error: any) {
     console.error('❌ Error exporting photos zip:', error);
     if (!res.headersSent) {
