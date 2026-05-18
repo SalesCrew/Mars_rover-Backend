@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { createFreshClient } from '../config/supabase';
 import * as XLSX from 'xlsx';
-import archiver from 'archiver';
 
 const router = Router();
 
@@ -1808,6 +1807,12 @@ function hasAllTags(photoTags: string[] | null | undefined, selectedTags: string
   return selectedTags.every(tag => normalized.has(String(tag).toLowerCase()));
 }
 
+async function createZipArchiver() {
+  const archiverModule = await import('archiver');
+  const archiverFactory = (archiverModule as any).default || (archiverModule as any);
+  return archiverFactory('zip', { zlib: { level: 9 } });
+}
+
 async function fetchWellenPhotoRowsForAdmin(
   freshClient: ReturnType<typeof createFreshClient>,
   filters: AdminPhotoFilters
@@ -2115,7 +2120,7 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${zipBaseName}.zip"`);
 
-    const archive = archiver('zip', { zlib: { level: 9 } });
+    const archive = await createZipArchiver();
     archive.on('warning', (warning: unknown) => {
       console.warn('Photo export ZIP warning:', warning);
     });

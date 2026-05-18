@@ -1,6 +1,5 @@
 import express, { Router, Request, Response } from 'express';
 import ExcelJS from 'exceljs';
-import archiver from 'archiver';
 import { createFreshClient } from '../config/supabase';
 
 const router: Router = express.Router();
@@ -292,6 +291,12 @@ async function fetchFragebogenPhotoItems(
   return rows;
 }
 
+async function createZipArchiver() {
+  const archiverModule = await import('archiver');
+  const archiverFactory = (archiverModule as any).default || (archiverModule as any);
+  return archiverFactory('zip', { zlib: { level: 9 } });
+}
+
 // ============================================================================
 // QUESTIONS API - /api/fragebogen/questions
 // ============================================================================
@@ -525,7 +530,7 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${safeZipBaseName}.zip"`);
 
-    const archive = archiver('zip', { zlib: { level: 9 } });
+    const archive = await createZipArchiver();
     archive.on('warning', (warning: unknown) => {
       console.warn('Fotofragen ZIP warning:', warning);
     });
