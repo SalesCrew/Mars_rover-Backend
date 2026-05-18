@@ -2983,6 +2983,54 @@ router.put('/responses/:id/complete', async (req: Request, res: Response) => {
 });
 
 /**
+ * DELETE /api/fragebogen/responses/:id
+ * Delete an in-progress response run (and cascading answers).
+ * Used when a market visit is explicitly aborted by the same GL.
+ */
+router.delete('/responses/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { requester_gebietsleiter_id } = req.body || {};
+    const freshClient = createFreshClient();
+
+    if (!requester_gebietsleiter_id || typeof requester_gebietsleiter_id !== 'string') {
+      return res.status(400).json({ error: 'requester_gebietsleiter_id is required' });
+    }
+
+    const { data: responseRow, error: responseFetchError } = await freshClient
+      .from('fb_responses')
+      .select('id, status, gebietsleiter_id')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (responseFetchError) throw responseFetchError;
+    if (!responseRow) {
+      return res.status(404).json({ error: 'Response not found' });
+    }
+
+    if (String(responseRow.gebietsleiter_id || '') !== requester_gebietsleiter_id) {
+      return res.status(403).json({ error: 'Forbidden: response does not belong to requester GL' });
+    }
+
+    if (responseRow.status === 'completed') {
+      return res.status(409).json({ error: 'Completed responses cannot be deleted' });
+    }
+
+    const { error: deleteError } = await freshClient
+      .from('fb_responses')
+      .delete()
+      .eq('id', id);
+    if (deleteError) throw deleteError;
+
+    console.log(`✅ Deleted in-progress response: ${id}`);
+    res.json({ message: 'Deleted successfully', id });
+  } catch (error: any) {
+    console.error('Error deleting response:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete response' });
+  }
+});
+
+/**
  * GET /api/fragebogen/responses/stats/fragebogen/:fragebogenId
  * Get detailed statistics for a fragebogen's responses
  */

@@ -868,6 +868,596 @@ router.get('/:id/history', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/markets/:id/visit-crm
+ * Get compact GL-scoped CRM context for a market visit overlay.
+ */
+router.get('/:id/visit-crm', async (req: Request, res: Response) => {
+  try {
+    const { id: marketId } = req.params;
+    const glId = String(req.query.gl_id || '').trim();
+    const SECTION_LIMIT = 20;
+
+    if (!glId) {
+      return res.status(400).json({ error: 'gl_id is required' });
+    }
+
+    const toDateKey = (value?: string | null): string | null => {
+      if (!value) return null;
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return null;
+      return date.toISOString().split('T')[0];
+    };
+
+    const toTimeLabel = (value?: string | null): string => {
+      if (!value) return '';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '';
+      return date.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+    };
+
+    const formatCurrency = (value: number): string =>
+      new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(value || 0);
+
+    const freshClient = createFreshClient();
+
+    const { data: marketRow, error: marketError } = await freshClient
+      .from('markets')
+      .select('id, name, chain, address, postal_code, city')
+      .eq('id', marketId)
+      .single();
+
+    if (marketError) throw marketError;
+    if (!marketRow) {
+      return res.status(404).json({ error: 'Market not found' });
+    }
+
+    // Latest visit context from zeiterfassung (preferred source for comment + time window).
+    const { data: latestVisitRows, error: latestVisitError } = await freshClient
+      .from('fb_zeiterfassung_submissions')
+      .select('id, created_at, besuchszeit_von, besuchszeit_bis, kommentar')
+      .eq('market_id', marketId)
+      .eq('gebietsleiter_id', glId)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (latestVisitError) throw latestVisitError;
+    const latestVisit = latestVisitRows?.[0] || null;
+
+    // -----------------------------------------------------------------------
+    // Fragebogen section
+    // -----------------------------------------------------------------------
+    const { data: fbResponses, error: fbResponsesError } = await freshClient
+      .from('fb_responses')
+      .select(`
+        id,
+        fragebogen_id,
+        status,
+        started_at,
+        completed_at,
+        zeiterfassung_submission_id,
+        fragebogen:fb_fragebogen (id, name)
+      `)
+      .eq('market_id', marketId)
+      .eq('gebietsleiter_id', glId)
+      .order('started_at', { ascending: false })
+      .limit(SECTION_LIMIT);
+    if (fbResponsesError) throw fbResponsesError;
+
+    const fbResponseIds = (fbResponses || []).map((r: any) => r.id).filter(Boolean);
+    const zeiterfassungIdsFromResponses = Array.from(
+      new Set((fbResponses || []).map((r: any) => r.zeiterfassung_submission_id).filter(Boolean))
+    );
+
+    const [fbAnswersResult, fbResponseVisitResult] = await Promise.all([
+      fbResponseIds.length > 0
+        ? freshClient
+            .from('fb_response_answers')
+            .select(`
+              id,
+              response_id,
+              question_id,
+              question_type,
+              answer_text,
+              answer_numeric,
+              answer_boolean,
+              answer_json,
+              answer_file_url,
+              answered_at,
+              question:fb_questions!question_id (id, type, question_text, options, matrix_config, likert_scale, slider_config)
+            `)
+            .in('response_id', fbResponseIds)
+            .order('answered_at', { ascending: true })
+        : Promise.resolve({ data: [], error: null } as any),
+      zeiterfassungIdsFromResponses.length > 0
+        ? freshClient
+            .from('fb_zeiterfassung_submissions')
+            .select('id, kommentar, besuchszeit_von, besuchszeit_bis, created_at')
+            .in('id', zeiterfassungIdsFromResponses)
+        : Promise.resolve({ data: [], error: null } as any)
+    ]);
+    if (fbAnswersResult.error) throw fbAnswersResult.error;
+    if (fbResponseVisitResult.error) throw fbResponseVisitResult.error;
+
+    const answersByResponseId = new Map<string, any[]>();
+    (fbAnswersResult.data || []).forEach((answer: any) => {
+      const existing = answersByResponseId.get(answer.response_id) || [];
+      existing.push(answer);
+      answersByResponseId.set(answer.response_id, existing);
+    });
+
+    const responseVisitById = new Map<string, any>(
+      (fbResponseVisitResult.data || []).map((row: any) => [row.id, row])
+    );
+
+    const mapFragebogenAnswerPreview = (answer: any): string => {
+      const qType = answer.question?.type || answer.question_type;
+
+      if (qType === 'yesno') {
+        if (answer.answer_boolean === true) return 'Ja';
+        if (answer.answer_boolean === false) return 'Nein';
+        return '—';
+      }
+
+      if (qType === 'single_choice') {
+        const options = answer.question?.options || [];
+        const selected = options.find((o: any) => o.id === answer.answer_text);
+        return selected?.label || answer.answer_text || '—';
+      }
+
+      if (qType === 'multiple_choice') {
+        const options = answer.question?.options || [];
+        const values: string[] = Array.isArray(answer.answer_json) ? answer.answer_json : [];
+        if (values.length === 0) return '—';
+        return values
+          .map((id: string) => options.find((o: any) => o.id === id)?.label || id)
+          .join(', ');
+      }
+
+      if (qType === 'matrix') {
+        const matrix = answer.answer_json && typeof answer.answer_json === 'object' ? answer.answer_json : null;
+        if (!matrix) return '—';
+        const entries = Object.entries(matrix);
+        if (entries.length === 0) return '—';
+        const first = entries[0];
+        return `${first[0]} → ${first[1]}${entries.length > 1 ? ` (+${entries.length - 1})` : ''}`;
+      }
+
+      if (qType === 'likert' || qType === 'open_numeric' || qType === 'slider') {
+        return answer.answer_numeric !== null && answer.answer_numeric !== undefined
+          ? String(answer.answer_numeric)
+          : '—';
+      }
+
+      if (qType === 'photo_upload') {
+        return answer.answer_file_url ? 'Foto hochgeladen' : '—';
+      }
+
+      if (answer.answer_text !== null && answer.answer_text !== undefined && String(answer.answer_text).trim() !== '') {
+        return String(answer.answer_text);
+      }
+      if (answer.answer_json !== null && answer.answer_json !== undefined) {
+        return JSON.stringify(answer.answer_json);
+      }
+      return '—';
+    };
+
+    const fragebogenItems = (fbResponses || []).map((response: any) => {
+      const responseAnswers = answersByResponseId.get(response.id) || [];
+      const answerPreview = responseAnswers.slice(0, 5).map((answer: any) => ({
+        question: answer.question?.question_text || 'Frage',
+        value: mapFragebogenAnswerPreview(answer)
+      }));
+      const linkedVisit = response.zeiterfassung_submission_id
+        ? responseVisitById.get(response.zeiterfassung_submission_id)
+        : null;
+
+      const timestamp = response.completed_at || response.started_at || linkedVisit?.created_at;
+
+      return {
+        id: response.id,
+        type: 'fragebogen',
+        timestamp,
+        title: response.fragebogen?.name || 'Fragebogen',
+        subtitle: response.status === 'completed' ? 'Abgeschlossen' : 'In Bearbeitung',
+        meta: [
+          `Status: ${response.status === 'completed' ? 'Abgeschlossen' : 'In Bearbeitung'}`,
+          `Antworten: ${responseAnswers.length}`
+        ],
+        comment: linkedVisit?.kommentar || null,
+        details: {
+          startedAt: response.started_at,
+          completedAt: response.completed_at,
+          answerPreview
+        }
+      };
+    });
+
+    // -----------------------------------------------------------------------
+    // Vorbesteller section
+    // -----------------------------------------------------------------------
+    const { data: vorbestellerRows, error: vorbestellerError } = await freshClient
+      .from('wellen_submissions')
+      .select('id, welle_id, item_type, item_id, quantity, value_per_unit, created_at')
+      .eq('market_id', marketId)
+      .eq('gebietsleiter_id', glId)
+      .order('created_at', { ascending: false })
+      .limit(SECTION_LIMIT * 8);
+    if (vorbestellerError) throw vorbestellerError;
+
+    const vorbestellerWelleIds = Array.from(new Set((vorbestellerRows || []).map((row: any) => row.welle_id).filter(Boolean)));
+    const displayIds = (vorbestellerRows || []).filter((row: any) => row.item_type === 'display').map((row: any) => row.item_id);
+    const kartonwareIds = (vorbestellerRows || []).filter((row: any) => row.item_type === 'kartonware').map((row: any) => row.item_id);
+    const einzelproduktIds = (vorbestellerRows || []).filter((row: any) => row.item_type === 'einzelprodukt').map((row: any) => row.item_id);
+    const paletteProductIds = (vorbestellerRows || []).filter((row: any) => row.item_type === 'palette').map((row: any) => row.item_id);
+    const schutteProductIds = (vorbestellerRows || []).filter((row: any) => row.item_type === 'schuette').map((row: any) => row.item_id);
+
+    const [wellenResult, displaysResult, kartonwareResult, paletteProductsResult, schutteProductsResult, einzelprodukteResult, vbPhotoCommentsResult] = await Promise.all([
+      vorbestellerWelleIds.length > 0
+        ? freshClient.from('wellen').select('id, name').in('id', vorbestellerWelleIds)
+        : Promise.resolve({ data: [], error: null } as any),
+      displayIds.length > 0
+        ? freshClient.from('wellen_displays').select('id, name').in('id', displayIds)
+        : Promise.resolve({ data: [], error: null } as any),
+      kartonwareIds.length > 0
+        ? freshClient.from('wellen_kartonware').select('id, name').in('id', kartonwareIds)
+        : Promise.resolve({ data: [], error: null } as any),
+      paletteProductIds.length > 0
+        ? freshClient.from('wellen_paletten_products').select('id, name').in('id', paletteProductIds)
+        : Promise.resolve({ data: [], error: null } as any),
+      schutteProductIds.length > 0
+        ? freshClient.from('wellen_schuetten_products').select('id, name').in('id', schutteProductIds)
+        : Promise.resolve({ data: [], error: null } as any),
+      einzelproduktIds.length > 0
+        ? freshClient.from('wellen_einzelprodukte').select('id, name').in('id', einzelproduktIds)
+        : Promise.resolve({ data: [], error: null } as any),
+      freshClient
+        .from('wellen_photos')
+        .select('created_at, comment')
+        .eq('market_id', marketId)
+        .eq('gebietsleiter_id', glId)
+        .not('comment', 'is', null)
+        .order('created_at', { ascending: false })
+        .limit(100)
+    ]);
+
+    if (wellenResult.error) throw wellenResult.error;
+    if (displaysResult.error) throw displaysResult.error;
+    if (kartonwareResult.error) throw kartonwareResult.error;
+    if (paletteProductsResult.error) throw paletteProductsResult.error;
+    if (schutteProductsResult.error) throw schutteProductsResult.error;
+    if (einzelprodukteResult.error) throw einzelprodukteResult.error;
+    if (vbPhotoCommentsResult.error) throw vbPhotoCommentsResult.error;
+
+    const wellenById = new Map<string, any>((wellenResult.data || []).map((row: any) => [row.id, row]));
+    const displaysById = new Map<string, any>((displaysResult.data || []).map((row: any) => [row.id, row]));
+    const kartonwareById = new Map<string, any>((kartonwareResult.data || []).map((row: any) => [row.id, row]));
+    const paletteProductsById = new Map<string, any>((paletteProductsResult.data || []).map((row: any) => [row.id, row]));
+    const schutteProductsById = new Map<string, any>((schutteProductsResult.data || []).map((row: any) => [row.id, row]));
+    const einzelprodukteById = new Map<string, any>((einzelprodukteResult.data || []).map((row: any) => [row.id, row]));
+
+    const vbCommentByDate = new Map<string, string>();
+    (vbPhotoCommentsResult.data || []).forEach((row: any) => {
+      const dateKey = toDateKey(row.created_at);
+      if (!dateKey || !row.comment || vbCommentByDate.has(dateKey)) return;
+      vbCommentByDate.set(dateKey, row.comment);
+    });
+
+    const vorbestellerItems = (vorbestellerRows || [])
+      .map((row: any) => {
+        let itemName = 'Produkt';
+        if (row.item_type === 'display') itemName = displaysById.get(row.item_id)?.name || 'Display';
+        if (row.item_type === 'kartonware') itemName = kartonwareById.get(row.item_id)?.name || 'Kartonware';
+        if (row.item_type === 'einzelprodukt') itemName = einzelprodukteById.get(row.item_id)?.name || 'Einzelprodukt';
+        if (row.item_type === 'palette') itemName = paletteProductsById.get(row.item_id)?.name || 'Palettenprodukt';
+        if (row.item_type === 'schuette') itemName = schutteProductsById.get(row.item_id)?.name || 'Schüttenprodukt';
+
+        const welleName = wellenById.get(row.welle_id)?.name || 'Vorbesteller';
+        const totalValue = (row.value_per_unit || 0) * (row.quantity || 0);
+        const dateKey = toDateKey(row.created_at);
+
+        return {
+          id: row.id,
+          type: 'vorbesteller',
+          timestamp: row.created_at,
+          title: welleName,
+          subtitle: `${itemName} · ${row.quantity}x`,
+          meta: [
+            `Typ: ${row.item_type}`,
+            row.value_per_unit ? `Wert: ${formatCurrency(totalValue)}` : ''
+          ].filter(Boolean),
+          comment: dateKey ? vbCommentByDate.get(dateKey) || null : null,
+          details: {
+            itemType: row.item_type,
+            itemName,
+            quantity: row.quantity,
+            valuePerUnit: row.value_per_unit
+          }
+        };
+      })
+      .sort((a: any, b: any) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .slice(0, SECTION_LIMIT);
+
+    // -----------------------------------------------------------------------
+    // Vorverkauf section (wave-based submissions)
+    // -----------------------------------------------------------------------
+    const { data: vorverkaufRows, error: vorverkaufError } = await freshClient
+      .from('vorverkauf_submissions')
+      .select('id, vorverkauf_welle_id, notes, created_at')
+      .eq('market_id', marketId)
+      .eq('gebietsleiter_id', glId)
+      .order('created_at', { ascending: false })
+      .limit(SECTION_LIMIT);
+    if (vorverkaufError) throw vorverkaufError;
+
+    const vorverkaufIds = (vorverkaufRows || []).map((row: any) => row.id).filter(Boolean);
+    const vorverkaufWelleIds = Array.from(
+      new Set((vorverkaufRows || []).map((row: any) => row.vorverkauf_welle_id).filter(Boolean))
+    );
+
+    const [vorverkaufWellenResult, vorverkaufProductsResult] = await Promise.all([
+      vorverkaufWelleIds.length > 0
+        ? freshClient.from('vorverkauf_wellen').select('id, name').in('id', vorverkaufWelleIds)
+        : Promise.resolve({ data: [], error: null } as any),
+      vorverkaufIds.length > 0
+        ? freshClient
+            .from('vorverkauf_submission_products')
+            .select('submission_id, product_id, quantity, reason')
+            .in('submission_id', vorverkaufIds)
+        : Promise.resolve({ data: [], error: null } as any)
+    ]);
+    if (vorverkaufWellenResult.error) throw vorverkaufWellenResult.error;
+    if (vorverkaufProductsResult.error) throw vorverkaufProductsResult.error;
+
+    const vorverkaufWelleById = new Map<string, any>((vorverkaufWellenResult.data || []).map((row: any) => [row.id, row]));
+    const vorverkaufProductIds = Array.from(
+      new Set((vorverkaufProductsResult.data || []).map((row: any) => row.product_id).filter(Boolean))
+    );
+    const { data: vorverkaufProductRows, error: vorverkaufProductRowsError } = vorverkaufProductIds.length > 0
+      ? await freshClient.from('products').select('id, name').in('id', vorverkaufProductIds)
+      : { data: [], error: null } as any;
+    if (vorverkaufProductRowsError) throw vorverkaufProductRowsError;
+    const vorverkaufProductById = new Map<string, any>((vorverkaufProductRows || []).map((row: any) => [row.id, row]));
+
+    const vorverkaufProductsBySubmissionId = new Map<string, any[]>();
+    (vorverkaufProductsResult.data || []).forEach((row: any) => {
+      const existing = vorverkaufProductsBySubmissionId.get(row.submission_id) || [];
+      existing.push(row);
+      vorverkaufProductsBySubmissionId.set(row.submission_id, existing);
+    });
+
+    const vorverkaufItems = (vorverkaufRows || []).map((row: any) => {
+      const products = vorverkaufProductsBySubmissionId.get(row.id) || [];
+      const productMeta = products.slice(0, 4).map((p: any) =>
+        `${vorverkaufProductById.get(p.product_id)?.name || 'Produkt'} (${p.quantity}x${p.reason ? ` · ${p.reason}` : ''})`
+      );
+
+      return {
+        id: row.id,
+        type: 'vorverkauf',
+        timestamp: row.created_at,
+        title: vorverkaufWelleById.get(row.vorverkauf_welle_id)?.name || 'Vorverkauf',
+        subtitle: `${products.length} Produkte`,
+        meta: productMeta,
+        comment: row.notes || null,
+        details: {
+          products: products.map((p: any) => ({
+            name: vorverkaufProductById.get(p.product_id)?.name || 'Produkt',
+            quantity: p.quantity,
+            reason: p.reason
+          }))
+        }
+      };
+    });
+
+    // -----------------------------------------------------------------------
+    // Produkttausch section (direct entries in vorverkauf_entries)
+    // -----------------------------------------------------------------------
+    const { data: produkttauschRows, error: produkttauschError } = await freshClient
+      .from('vorverkauf_entries')
+      .select('id, reason, notes, status, created_at')
+      .eq('market_id', marketId)
+      .eq('gebietsleiter_id', glId)
+      .order('created_at', { ascending: false })
+      .limit(SECTION_LIMIT);
+    if (produkttauschError) throw produkttauschError;
+
+    const produkttauschIds = (produkttauschRows || []).map((row: any) => row.id).filter(Boolean);
+    const { data: produkttauschItemsRows, error: produkttauschItemsError } = produkttauschIds.length > 0
+      ? await freshClient
+          .from('vorverkauf_items')
+          .select('vorverkauf_entry_id, product_id, quantity, item_type')
+          .in('vorverkauf_entry_id', produkttauschIds)
+      : { data: [], error: null } as any;
+    if (produkttauschItemsError) throw produkttauschItemsError;
+
+    const produkttauschProductIds = Array.from(
+      new Set((produkttauschItemsRows || []).map((row: any) => row.product_id).filter(Boolean))
+    );
+    const { data: produkttauschProductRows, error: produkttauschProductRowsError } = produkttauschProductIds.length > 0
+      ? await freshClient.from('products').select('id, name').in('id', produkttauschProductIds)
+      : { data: [], error: null } as any;
+    if (produkttauschProductRowsError) throw produkttauschProductRowsError;
+    const produkttauschProductById = new Map<string, any>((produkttauschProductRows || []).map((row: any) => [row.id, row]));
+
+    const produkttauschItemsByEntryId = new Map<string, any[]>();
+    (produkttauschItemsRows || []).forEach((row: any) => {
+      const existing = produkttauschItemsByEntryId.get(row.vorverkauf_entry_id) || [];
+      existing.push(row);
+      produkttauschItemsByEntryId.set(row.vorverkauf_entry_id, existing);
+    });
+
+    const produkttauschItems = (produkttauschRows || []).map((row: any) => {
+      const items = produkttauschItemsByEntryId.get(row.id) || [];
+      const takeOutCount = items.filter((i: any) => i.item_type === 'take_out').length;
+      const replaceCount = items.filter((i: any) => i.item_type === 'replace').length;
+
+      return {
+        id: row.id,
+        type: 'produkttausch',
+        timestamp: row.created_at,
+        title: 'Produkttausch',
+        subtitle: `Entnommen: ${takeOutCount} · Ersetzt: ${replaceCount}`,
+        meta: [`Status: ${row.status || 'completed'}`],
+        comment: row.notes || null,
+        details: {
+          reason: row.reason,
+          takeOut: items
+            .filter((i: any) => i.item_type === 'take_out')
+            .map((i: any) => ({ name: produkttauschProductById.get(i.product_id)?.name || 'Produkt', quantity: i.quantity })),
+          replace: items
+            .filter((i: any) => i.item_type === 'replace')
+            .map((i: any) => ({ name: produkttauschProductById.get(i.product_id)?.name || 'Produkt', quantity: i.quantity }))
+        }
+      };
+    });
+
+    // -----------------------------------------------------------------------
+    // NARA section
+    // -----------------------------------------------------------------------
+    const { data: naraRows, error: naraError } = await freshClient
+      .from('nara_incentive_submissions')
+      .select('id, created_at')
+      .eq('market_id', marketId)
+      .eq('gebietsleiter_id', glId)
+      .order('created_at', { ascending: false })
+      .limit(SECTION_LIMIT);
+    if (naraError) throw naraError;
+
+    const naraIds = (naraRows || []).map((row: any) => row.id).filter(Boolean);
+    const { data: naraItemRows, error: naraItemsError } = naraIds.length > 0
+      ? await freshClient
+          .from('nara_incentive_items')
+          .select('submission_id, product_id, quantity')
+          .in('submission_id', naraIds)
+      : { data: [], error: null } as any;
+    if (naraItemsError) throw naraItemsError;
+
+    const naraProductIds = Array.from(new Set((naraItemRows || []).map((row: any) => row.product_id).filter(Boolean)));
+    const { data: naraProductRows, error: naraProductRowsError } = naraProductIds.length > 0
+      ? await freshClient.from('products').select('id, name, price').in('id', naraProductIds)
+      : { data: [], error: null } as any;
+    if (naraProductRowsError) throw naraProductRowsError;
+    const naraProductById = new Map<string, any>((naraProductRows || []).map((row: any) => [row.id, row]));
+
+    const naraItemsBySubmissionId = new Map<string, any[]>();
+    (naraItemRows || []).forEach((row: any) => {
+      const existing = naraItemsBySubmissionId.get(row.submission_id) || [];
+      existing.push(row);
+      naraItemsBySubmissionId.set(row.submission_id, existing);
+    });
+
+    const naraItems = (naraRows || []).map((row: any) => {
+      const items = naraItemsBySubmissionId.get(row.id) || [];
+      const totalValue = items.reduce(
+        (sum: number, item: any) => sum + (item.quantity || 0) * (naraProductById.get(item.product_id)?.price || 0),
+        0
+      );
+
+      return {
+        id: row.id,
+        type: 'nara',
+        timestamp: row.created_at,
+        title: 'NARA-Incentive',
+        subtitle: `${items.length} Produkte`,
+        meta: [`Gesamtwert: ${formatCurrency(totalValue)}`],
+        comment: null,
+        details: {
+          totalValue,
+          products: items.map((item: any) => ({
+            name: naraProductById.get(item.product_id)?.name || 'Produkt',
+            quantity: item.quantity,
+            lineTotal: (item.quantity || 0) * (naraProductById.get(item.product_id)?.price || 0)
+          }))
+        }
+      };
+    });
+
+    const sectionEntries: Array<{ section: string; item: any }> = [
+      ...fragebogenItems.map((item: any) => ({ section: 'fragebogen', item })),
+      ...vorbestellerItems.map((item: any) => ({ section: 'vorbesteller', item })),
+      ...vorverkaufItems.map((item: any) => ({ section: 'vorverkauf', item })),
+      ...produkttauschItems.map((item: any) => ({ section: 'produkttausch', item })),
+      ...naraItems.map((item: any) => ({ section: 'nara', item }))
+    ];
+
+    const latestSectionTimestamp = sectionEntries
+      .map((entry) => entry.item?.timestamp)
+      .filter(Boolean)
+      .sort((a: string, b: string) => new Date(b).getTime() - new Date(a).getTime())[0];
+
+    const lastVisitDate = toDateKey(latestVisit?.created_at) || toDateKey(latestSectionTimestamp) || null;
+
+    const actionsOnLastVisit = lastVisitDate
+      ? sectionEntries
+          .filter((entry) => toDateKey(entry.item?.timestamp) === lastVisitDate)
+          .sort((a, b) => new Date(b.item.timestamp).getTime() - new Date(a.item.timestamp).getTime())
+          .map((entry) => ({
+            section: entry.section,
+            ...entry.item
+          }))
+      : [];
+
+    const sections = {
+      fragebogen: {
+        count: fragebogenItems.length,
+        latest: fragebogenItems[0] || null,
+        items: fragebogenItems
+      },
+      vorbesteller: {
+        count: vorbestellerItems.length,
+        latest: vorbestellerItems[0] || null,
+        items: vorbestellerItems
+      },
+      vorverkauf: {
+        count: vorverkaufItems.length,
+        latest: vorverkaufItems[0] || null,
+        items: vorverkaufItems
+      },
+      produkttausch: {
+        count: produkttauschItems.length,
+        latest: produkttauschItems[0] || null,
+        items: produkttauschItems
+      },
+      nara: {
+        count: naraItems.length,
+        latest: naraItems[0] || null,
+        items: naraItems
+      }
+    };
+
+    res.json({
+      market: {
+        id: marketRow.id,
+        name: marketRow.name,
+        chain: marketRow.chain || '',
+        addressLine: marketRow.address || '',
+        postalCode: marketRow.postal_code || '',
+        city: marketRow.city || '',
+        address: [marketRow.address, [marketRow.postal_code, marketRow.city].filter(Boolean).join(' ')]
+          .filter(Boolean)
+          .join(', ')
+      },
+      lastVisit: {
+        date: lastVisitDate,
+        visitComment: latestVisit?.kommentar || null,
+        visitWindow: latestVisit
+          ? {
+              from: latestVisit.besuchszeit_von || null,
+              to: latestVisit.besuchszeit_bis || null
+            }
+          : null,
+        timestamp: latestVisit?.created_at || latestSectionTimestamp || null,
+        label: latestVisit?.created_at ? toTimeLabel(latestVisit.created_at) : '',
+        actionsOnLastVisit
+      },
+      sections
+    });
+  } catch (error: any) {
+    console.error('Error fetching market visit CRM context:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+/**
  * DELETE /api/markets/:id
  * Delete a market
  */
