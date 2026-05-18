@@ -1903,7 +1903,8 @@ function hasAllTags(photoTags: string[] | null | undefined, selectedTags: string
 }
 
 async function createZipArchiver() {
-  const archiverModule = await import('archiver');
+  // Keep ESM dynamic import at runtime even though backend compiles to CommonJS.
+  const archiverModule = await (new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<any>)('archiver');
   const ZipArchive = (archiverModule as any).ZipArchive;
   return new ZipArchive({ zlib: { level: 9 } });
 }
