@@ -125,7 +125,7 @@ type FragebogenPhotoItem = {
   createdAt: string;
 };
 
-const FOTOFRAGEN_RESPONSE_CHUNK_SIZE = 400;
+const FOTOFRAGEN_RESPONSE_CHUNK_SIZE = 60;
 
 function chunkIds<T>(items: T[], chunkSize: number): T[][] {
   if (chunkSize <= 0) return [items];
@@ -176,12 +176,11 @@ function inferPhotoExtension(photoUrl: string, contentType?: string | null): str
 
 function buildFragebogenPhotoFileName(photo: FragebogenPhotoItem, sequence: number, extension: string): string {
   const glPart = sanitizePhotoNameSegment(photo.glName || 'Unbekannt');
-  const addressPart = sanitizePhotoNameSegment(photo.marketAddressLine || photo.marketName || 'Unbekannt');
-  const cityParts = [photo.marketPostalCode, photo.marketCity].filter(Boolean).join('_');
-  const cityPart = sanitizePhotoNameSegment(cityParts || photo.marketCity || 'Unbekannt');
+  const marketPart = sanitizePhotoNameSegment(photo.marketName || photo.marketAddressLine || 'Unbekannt');
+  const fragebogenPart = sanitizePhotoNameSegment(photo.fragebogenName || 'Fragebogen');
   const timestampPart = formatPhotoTimestamp(photo.createdAt);
   const safeExt = sanitizePhotoNameSegment(extension || 'jpg') || 'jpg';
-  return `${glPart}__${addressPart}__${cityPart}__${timestampPart}__${sequence}.${safeExt}`;
+  return `${glPart}__${marketPart}__${fragebogenPart}__${timestampPart}__${sequence}.${safeExt}`;
 }
 
 async function fetchFragebogenPhotoItems(
@@ -191,7 +190,7 @@ async function fetchFragebogenPhotoItems(
   let responsesQuery = freshClient
     .from('fb_responses')
     .select('id,fragebogen_id,gebietsleiter_id,market_id')
-    .order('created_at', { ascending: false });
+    .order('started_at', { ascending: false });
 
   if (filters.fragebogenId) responsesQuery = responsesQuery.eq('fragebogen_id', filters.fragebogenId);
   if (filters.glId) responsesQuery = responsesQuery.eq('gebietsleiter_id', filters.glId);
@@ -293,8 +292,8 @@ async function fetchFragebogenPhotoItems(
 
 async function createZipArchiver() {
   const archiverModule = await import('archiver');
-  const archiverFactory = (archiverModule as any).default || (archiverModule as any);
-  return archiverFactory('zip', { zlib: { level: 9 } });
+  const ZipArchive = (archiverModule as any).ZipArchive;
+  return new ZipArchive({ zlib: { level: 9 } });
 }
 
 // ============================================================================

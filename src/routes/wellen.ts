@@ -1723,7 +1723,7 @@ type AdminPhotoRow = {
   createdAt: string;
 };
 
-const FOTOFRAGEN_RESPONSE_CHUNK_SIZE = 400;
+const FOTOFRAGEN_RESPONSE_CHUNK_SIZE = 60;
 
 function parseAdminPhotoSource(value: unknown): 'all' | AdminPhotoSource {
   const source = String(value || '').trim().toLowerCase();
@@ -1785,10 +1785,9 @@ function buildAdminPhotoExportFileName(photo: AdminPhotoRow, sequence: number, e
 
   if (photo.source === 'fotofragen') {
     const glPart = sanitizePhotoExportSegment(photo.glName || 'Unbekannt');
-    const addressPart = sanitizePhotoExportSegment(photo.marketAddressLine || photo.marketName || 'Unbekannt');
-    const cityParts = [photo.marketPostalCode, photo.marketCity].filter(Boolean).join('_');
-    const cityPart = sanitizePhotoExportSegment(cityParts || photo.marketCity || 'Unbekannt');
-    return `${glPart}__${addressPart}__${cityPart}__${timestamp}__${sequence}.${safeExt}`;
+    const marketPart = sanitizePhotoExportSegment(photo.marketName || photo.marketAddressLine || 'Unbekannt');
+    const fragebogenPart = sanitizePhotoExportSegment(photo.fragebogenName || 'Fragebogen');
+    return `${glPart}__${marketPart}__${fragebogenPart}__${timestamp}__${sequence}.${safeExt}`;
   }
 
   const chainPart = sanitizePhotoExportSegment(photo.marketChain || '');
@@ -1809,8 +1808,8 @@ function hasAllTags(photoTags: string[] | null | undefined, selectedTags: string
 
 async function createZipArchiver() {
   const archiverModule = await import('archiver');
-  const archiverFactory = (archiverModule as any).default || (archiverModule as any);
-  return archiverFactory('zip', { zlib: { level: 9 } });
+  const ZipArchive = (archiverModule as any).ZipArchive;
+  return new ZipArchive({ zlib: { level: 9 } });
 }
 
 async function fetchWellenPhotoRowsForAdmin(
@@ -1886,13 +1885,10 @@ async function fetchFragebogenPhotoRowsForAdmin(
   freshClient: ReturnType<typeof createFreshClient>,
   filters: AdminPhotoFilters
 ): Promise<AdminPhotoRow[]> {
-  // Wellen-Filter applies only to Fotowelle source.
-  if (filters.welleId) return [];
-
   let responsesQuery = freshClient
     .from('fb_responses')
     .select('id,fragebogen_id,gebietsleiter_id,market_id')
-    .order('created_at', { ascending: false });
+    .order('started_at', { ascending: false });
 
   if (filters.fragebogenId) responsesQuery = responsesQuery.eq('fragebogen_id', filters.fragebogenId);
   if (filters.glId) responsesQuery = responsesQuery.eq('gebietsleiter_id', filters.glId);
@@ -2011,7 +2007,8 @@ async function fetchAdminPhotoRows(
       return tB - tA;
     });
 
-  return merged;
+  if (filters.source === 'all') return merged;
+  return merged.filter(row => row.source === filters.source);
 }
 
 router.post('/photos/upload', async (req: Request, res: Response) => {
