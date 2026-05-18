@@ -1,5 +1,6 @@
 import express, { Router, Request, Response } from 'express';
 import ExcelJS from 'exceljs';
+import archiver from 'archiver';
 import { createFreshClient } from '../config/supabase';
 
 const router: Router = express.Router();
@@ -95,6 +96,201 @@ const runDistributionPythonExporter = async (payload: unknown): Promise<Buffer> 
     clearTimeout(timeoutHandle);
   }
 };
+
+type FragebogenPhotoFilters = {
+  fragebogenId?: string;
+  glId?: string;
+  marketId?: string;
+  startDate?: string;
+  endDate?: string;
+};
+
+type FragebogenPhotoItem = {
+  id: string;
+  source: 'fotofragen';
+  fragebogenId: string;
+  fragebogenName: string;
+  questionId: string;
+  glId: string;
+  glName: string;
+  marketId: string;
+  marketName: string;
+  marketChain: string;
+  marketAddressLine: string;
+  marketPostalCode: string;
+  marketCity: string;
+  marketAddress: string;
+  photoUrl: string;
+  tags: string[];
+  comment: string | null;
+  createdAt: string;
+};
+
+const FOTOFRAGEN_RESPONSE_CHUNK_SIZE = 400;
+
+function chunkIds<T>(items: T[], chunkSize: number): T[][] {
+  if (chunkSize <= 0) return [items];
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    chunks.push(items.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+function sanitizePhotoNameSegment(value: string): string {
+  return String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9äöüÄÖÜß\-_. ]/g, '_')
+    .replace(/\s+/g, ' ')
+    .slice(0, 80);
+}
+
+function formatPhotoTimestamp(value: string | null | undefined): string {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) return 'unknown-time';
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mm = String(date.getMinutes()).padStart(2, '0');
+  return `${y}-${m}-${d}_${hh}-${mm}`;
+}
+
+function inferPhotoExtension(photoUrl: string, contentType?: string | null): string {
+  try {
+    const pathname = new URL(photoUrl).pathname;
+    const ext = pathname.split('.').pop()?.toLowerCase()?.replace(/[^a-z0-9]/g, '');
+    if (ext) return ext;
+  } catch {
+    // ignore malformed URLs and fallback to content-type
+  }
+
+  const ct = String(contentType || '').toLowerCase();
+  if (ct.includes('png')) return 'png';
+  if (ct.includes('webp')) return 'webp';
+  if (ct.includes('gif')) return 'gif';
+  if (ct.includes('bmp')) return 'bmp';
+  if (ct.includes('heic')) return 'heic';
+  if (ct.includes('heif')) return 'heif';
+  return 'jpg';
+}
+
+function buildFragebogenPhotoFileName(photo: FragebogenPhotoItem, sequence: number, extension: string): string {
+  const glPart = sanitizePhotoNameSegment(photo.glName || 'Unbekannt');
+  const addressPart = sanitizePhotoNameSegment(photo.marketAddressLine || photo.marketName || 'Unbekannt');
+  const cityParts = [photo.marketPostalCode, photo.marketCity].filter(Boolean).join('_');
+  const cityPart = sanitizePhotoNameSegment(cityParts || photo.marketCity || 'Unbekannt');
+  const timestampPart = formatPhotoTimestamp(photo.createdAt);
+  const safeExt = sanitizePhotoNameSegment(extension || 'jpg') || 'jpg';
+  return `${glPart}__${addressPart}__${cityPart}__${timestampPart}__${sequence}.${safeExt}`;
+}
+
+async function fetchFragebogenPhotoItems(
+  freshClient: ReturnType<typeof createFreshClient>,
+  filters: FragebogenPhotoFilters
+): Promise<FragebogenPhotoItem[]> {
+  let responsesQuery = freshClient
+    .from('fb_responses')
+    .select('id,fragebogen_id,gebietsleiter_id,market_id')
+    .order('created_at', { ascending: false });
+
+  if (filters.fragebogenId) responsesQuery = responsesQuery.eq('fragebogen_id', filters.fragebogenId);
+  if (filters.glId) responsesQuery = responsesQuery.eq('gebietsleiter_id', filters.glId);
+  if (filters.marketId) responsesQuery = responsesQuery.eq('market_id', filters.marketId);
+
+  const { data: responses, error: responsesError } = await responsesQuery;
+  if (responsesError) throw responsesError;
+  if (!responses || responses.length === 0) return [];
+
+  const responseMap = new Map((responses || []).map((r: any) => [r.id, r]));
+  const responseIds = Array.from(responseMap.keys());
+
+  const answers: any[] = [];
+  for (const responseChunk of chunkIds(responseIds, FOTOFRAGEN_RESPONSE_CHUNK_SIZE)) {
+    let answersQuery = freshClient
+      .from('fb_response_answers')
+      .select('id,response_id,question_id,answer_file_url,answered_at')
+      .eq('question_type', 'photo_upload')
+      .in('response_id', responseChunk)
+      .not('answer_file_url', 'is', null);
+
+    if (filters.startDate) answersQuery = answersQuery.gte('answered_at', `${filters.startDate}T00:00:00`);
+    if (filters.endDate) answersQuery = answersQuery.lte('answered_at', `${filters.endDate}T23:59:59`);
+
+    const { data: chunkAnswers, error: answersError } = await answersQuery.order('answered_at', { ascending: false });
+    if (answersError) throw answersError;
+
+    answers.push(
+      ...(chunkAnswers || []).filter((a: any) => typeof a.answer_file_url === 'string' && a.answer_file_url.trim() !== '')
+    );
+  }
+
+  if (answers.length === 0) return [];
+
+  const fragebogenIds = Array.from(new Set(responses.map((r: any) => r.fragebogen_id).filter(Boolean)));
+  const glIds = Array.from(new Set(responses.map((r: any) => r.gebietsleiter_id).filter(Boolean)));
+  const marketIds = Array.from(new Set(responses.map((r: any) => r.market_id).filter(Boolean)));
+
+  const [{ data: frageboegen }, { data: users }, { data: markets }] = await Promise.all([
+    fragebogenIds.length > 0
+      ? freshClient.from('fb_fragebogen').select('id,name').in('id', fragebogenIds)
+      : Promise.resolve({ data: [] as any[] }),
+    glIds.length > 0
+      ? freshClient.from('users').select('id,first_name,last_name').in('id', glIds)
+      : Promise.resolve({ data: [] as any[] }),
+    marketIds.length > 0
+      ? freshClient.from('markets').select('id,name,chain,address,postal_code,city').in('id', marketIds)
+      : Promise.resolve({ data: [] as any[] })
+  ]);
+
+  const fragebogenMap = new Map((frageboegen || []).map((f: any) => [f.id, f]));
+  const userMap = new Map((users || []).map((u: any) => [u.id, `${u.first_name || ''} ${u.last_name || ''}`.trim()]));
+  const marketMap = new Map((markets || []).map((m: any) => [m.id, m]));
+
+  const rows: FragebogenPhotoItem[] = answers
+    .map((answer: any) => {
+      const response = responseMap.get(answer.response_id);
+      if (!response) return null;
+
+      const market = marketMap.get(response.market_id) || {};
+      const glName = userMap.get(response.gebietsleiter_id) || 'Unbekannt';
+      const fragebogenName = fragebogenMap.get(response.fragebogen_id)?.name || '';
+      const marketAddressLine = String((market as any).address || '');
+      const marketPostalCode = String((market as any).postal_code || '');
+      const marketCity = String((market as any).city || '');
+      const marketAddress = [marketAddressLine, [marketPostalCode, marketCity].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+
+      return {
+        id: answer.id,
+        source: 'fotofragen',
+        fragebogenId: response.fragebogen_id,
+        fragebogenName,
+        questionId: answer.question_id,
+        glId: response.gebietsleiter_id,
+        glName,
+        marketId: response.market_id,
+        marketName: String((market as any).name || ''),
+        marketChain: String((market as any).chain || ''),
+        marketAddressLine,
+        marketPostalCode,
+        marketCity,
+        marketAddress,
+        photoUrl: String(answer.answer_file_url || ''),
+        tags: [],
+        comment: null,
+        createdAt: answer.answered_at || ''
+      } as FragebogenPhotoItem;
+    })
+    .filter(Boolean) as FragebogenPhotoItem[];
+
+  rows.sort((a, b) => {
+    const tA = new Date(a.createdAt).getTime();
+    const tB = new Date(b.createdAt).getTime();
+    return tB - tA;
+  });
+
+  return rows;
+}
 
 // ============================================================================
 // QUESTIONS API - /api/fragebogen/questions
@@ -262,6 +458,127 @@ router.post('/responses/upload-photo', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('Error in response photo upload:', error);
     res.status(500).json({ error: error.message || 'Failed to upload response photo' });
+  }
+});
+
+/**
+ * GET /api/fragebogen/photos
+ * Admin listing endpoint for Fotoantworten aus Fotofragen.
+ */
+router.get('/photos', async (req: Request, res: Response) => {
+  try {
+    const freshClient = createFreshClient();
+    const {
+      fragebogen_id,
+      gl_id,
+      market_id,
+      start_date,
+      end_date,
+      limit: limitParam,
+      offset: offsetParam
+    } = req.query;
+
+    const limit = Math.max(1, Math.min(1000, Number(limitParam) || 200));
+    const offset = Math.max(0, Number(offsetParam) || 0);
+
+    const allPhotos = await fetchFragebogenPhotoItems(freshClient, {
+      fragebogenId: typeof fragebogen_id === 'string' ? fragebogen_id : undefined,
+      glId: typeof gl_id === 'string' ? gl_id : undefined,
+      marketId: typeof market_id === 'string' ? market_id : undefined,
+      startDate: typeof start_date === 'string' ? start_date : undefined,
+      endDate: typeof end_date === 'string' ? end_date : undefined
+    });
+
+    const photos = allPhotos.slice(offset, offset + limit);
+    res.json({ photos, total: allPhotos.length });
+  } catch (error: any) {
+    console.error('Error fetching Fotofragen photos:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch Fotofragen photos' });
+  }
+});
+
+/**
+ * GET /api/fragebogen/photos/export.zip
+ * Admin ZIP export endpoint for Fotoantworten.
+ */
+router.get('/photos/export.zip', async (req: Request, res: Response) => {
+  try {
+    const freshClient = createFreshClient();
+    const { fragebogen_id, gl_id, market_id, start_date, end_date, zip_name } = req.query;
+
+    const photos = await fetchFragebogenPhotoItems(freshClient, {
+      fragebogenId: typeof fragebogen_id === 'string' ? fragebogen_id : undefined,
+      glId: typeof gl_id === 'string' ? gl_id : undefined,
+      marketId: typeof market_id === 'string' ? market_id : undefined,
+      startDate: typeof start_date === 'string' ? start_date : undefined,
+      endDate: typeof end_date === 'string' ? end_date : undefined
+    });
+
+    if (photos.length === 0) {
+      return res.status(404).json({ error: 'Keine Fotofragen-Fotos für die aktuellen Filter gefunden.' });
+    }
+
+    const defaultName = `fotofragen_photos_${new Date().toISOString().slice(0, 10)}`;
+    const requestedBaseName = typeof zip_name === 'string' ? zip_name : defaultName;
+    const safeZipBaseName = sanitizePhotoNameSegment(requestedBaseName) || defaultName;
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeZipBaseName}.zip"`);
+
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.on('warning', (warning: unknown) => {
+      console.warn('Fotofragen ZIP warning:', warning);
+    });
+    archive.on('error', (archiveError: unknown) => {
+      console.error('Fotofragen ZIP error:', archiveError);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'ZIP konnte nicht erstellt werden.' });
+      } else {
+        res.end();
+      }
+    });
+
+    archive.pipe(res);
+
+    const duplicateCounts: Record<string, number> = {};
+    let appendedFiles = 0;
+
+    for (const photo of photos) {
+      try {
+        const imageResponse = await fetch(photo.photoUrl);
+        if (!imageResponse.ok) {
+          console.warn(`Skipping Fotofragen photo ${photo.id}: fetch failed (${imageResponse.status})`);
+          continue;
+        }
+        const contentType = imageResponse.headers.get('content-type');
+        const extension = inferPhotoExtension(photo.photoUrl, contentType);
+        const fileBuffer = Buffer.from(await imageResponse.arrayBuffer());
+        if (fileBuffer.length === 0) continue;
+
+        const baseKey = `${photo.glName}|${photo.marketAddressLine}|${photo.marketPostalCode}|${photo.marketCity}|${formatPhotoTimestamp(photo.createdAt)}`;
+        const sequence = (duplicateCounts[baseKey] || 0) + 1;
+        duplicateCounts[baseKey] = sequence;
+
+        const fileName = buildFragebogenPhotoFileName(photo, sequence, extension);
+        archive.append(fileBuffer, { name: `Fotofragen/${fileName}` });
+        appendedFiles += 1;
+      } catch (photoError: any) {
+        console.warn(`Skipping Fotofragen photo ${photo.id}:`, photoError?.message || photoError);
+      }
+    }
+
+    if (appendedFiles === 0) {
+      archive.append('Keine Fotos konnten aus den hinterlegten URLs geladen werden.', {
+        name: 'README.txt'
+      });
+    }
+
+    await archive.finalize();
+  } catch (error: any) {
+    console.error('Error exporting Fotofragen photos ZIP:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message || 'Fotofragen ZIP-Export fehlgeschlagen' });
+    }
   }
 });
 

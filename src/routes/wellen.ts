@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { createFreshClient } from '../config/supabase';
 import * as XLSX from 'xlsx';
+import archiver from 'archiver';
 
 const router = Router();
 
@@ -1688,6 +1689,326 @@ router.get('/', async (req: Request, res: Response) => {
 // (Must be before /:id to avoid matching "photos" as an ID)
 // ============================================================================
 
+type AdminPhotoSource = 'fotowelle' | 'fotofragen';
+
+type AdminPhotoFilters = {
+  source: 'all' | AdminPhotoSource;
+  welleId?: string;
+  fragebogenId?: string;
+  glId?: string;
+  marketId?: string;
+  tags: string[];
+  startDate?: string;
+  endDate?: string;
+};
+
+type AdminPhotoRow = {
+  id: string;
+  source: AdminPhotoSource;
+  welleId: string;
+  welleName: string;
+  fragebogenId: string;
+  fragebogenName: string;
+  glId: string;
+  glName: string;
+  marketId: string;
+  marketName: string;
+  marketChain: string;
+  marketAddressLine: string;
+  marketPostalCode: string;
+  marketCity: string;
+  marketAddress: string;
+  photoUrl: string;
+  tags: string[];
+  comment: string | null;
+  createdAt: string;
+};
+
+const FOTOFRAGEN_RESPONSE_CHUNK_SIZE = 400;
+
+function parseAdminPhotoSource(value: unknown): 'all' | AdminPhotoSource {
+  const source = String(value || '').trim().toLowerCase();
+  if (source === 'fotowelle' || source === 'fotofragen' || source === 'all') return source;
+  return 'all';
+}
+
+function parsePhotoTagFilter(tagsValue: unknown, singleTagValue: unknown): string[] {
+  const fromTags = String(tagsValue || '')
+    .split(',')
+    .map(t => t.trim())
+    .filter(Boolean);
+  if (fromTags.length > 0) return Array.from(new Set(fromTags));
+  const single = String(singleTagValue || '').trim();
+  return single ? [single] : [];
+}
+
+function sanitizePhotoExportSegment(value: string): string {
+  return String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9äöüÄÖÜß\-_. ]/g, '_')
+    .replace(/\s+/g, ' ')
+    .slice(0, 80);
+}
+
+function formatPhotoExportTimestamp(value: string | null | undefined): string {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) return 'unknown-time';
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mm = String(date.getMinutes()).padStart(2, '0');
+  return `${y}-${m}-${d}_${hh}-${mm}`;
+}
+
+function inferPhotoExportExtension(photoUrl: string, contentType?: string | null): string {
+  try {
+    const pathname = new URL(photoUrl).pathname;
+    const ext = pathname.split('.').pop()?.toLowerCase()?.replace(/[^a-z0-9]/g, '');
+    if (ext) return ext;
+  } catch {
+    // ignore malformed URLs
+  }
+
+  const ct = String(contentType || '').toLowerCase();
+  if (ct.includes('png')) return 'png';
+  if (ct.includes('webp')) return 'webp';
+  if (ct.includes('gif')) return 'gif';
+  if (ct.includes('bmp')) return 'bmp';
+  if (ct.includes('heic')) return 'heic';
+  if (ct.includes('heif')) return 'heif';
+  return 'jpg';
+}
+
+function buildAdminPhotoExportFileName(photo: AdminPhotoRow, sequence: number, extension: string): string {
+  const timestamp = formatPhotoExportTimestamp(photo.createdAt);
+  const safeExt = sanitizePhotoExportSegment(extension || 'jpg') || 'jpg';
+
+  if (photo.source === 'fotofragen') {
+    const glPart = sanitizePhotoExportSegment(photo.glName || 'Unbekannt');
+    const addressPart = sanitizePhotoExportSegment(photo.marketAddressLine || photo.marketName || 'Unbekannt');
+    const cityParts = [photo.marketPostalCode, photo.marketCity].filter(Boolean).join('_');
+    const cityPart = sanitizePhotoExportSegment(cityParts || photo.marketCity || 'Unbekannt');
+    return `${glPart}__${addressPart}__${cityPart}__${timestamp}__${sequence}.${safeExt}`;
+  }
+
+  const chainPart = sanitizePhotoExportSegment(photo.marketChain || '');
+  const marketPart = sanitizePhotoExportSegment(photo.marketName || 'Markt');
+  const addressPart = sanitizePhotoExportSegment(photo.marketAddressLine || photo.marketAddress || '');
+  return [chainPart, marketPart, addressPart, timestamp, String(sequence)]
+    .filter(Boolean)
+    .join('__')
+    .concat(`.${safeExt}`);
+}
+
+function hasAllTags(photoTags: string[] | null | undefined, selectedTags: string[]): boolean {
+  if (selectedTags.length === 0) return true;
+  if (!photoTags || photoTags.length === 0) return false;
+  const normalized = new Set(photoTags.map(tag => String(tag).toLowerCase()));
+  return selectedTags.every(tag => normalized.has(String(tag).toLowerCase()));
+}
+
+async function fetchWellenPhotoRowsForAdmin(
+  freshClient: ReturnType<typeof createFreshClient>,
+  filters: AdminPhotoFilters
+): Promise<AdminPhotoRow[]> {
+  let query = freshClient
+    .from('wellen_photos')
+    .select('*, welle:wellen(id, name)')
+    .order('created_at', { ascending: false });
+
+  if (filters.welleId) query = query.eq('welle_id', filters.welleId);
+  if (filters.glId) query = query.eq('gebietsleiter_id', filters.glId);
+  if (filters.marketId) query = query.eq('market_id', filters.marketId);
+  if (filters.tags.length > 0) query = query.contains('tags', filters.tags);
+  if (filters.startDate) query = query.gte('created_at', `${filters.startDate}T00:00:00`);
+  if (filters.endDate) query = query.lte('created_at', `${filters.endDate}T23:59:59`);
+
+  const sixMonthsAgo = new Date();
+  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  query = query.gte('created_at', sixMonthsAgo.toISOString());
+
+  const { data, error } = await query;
+  if (error) throw error;
+
+  const glIds = Array.from(new Set((data || []).map((p: any) => p.gebietsleiter_id).filter(Boolean)));
+  const marketIds = Array.from(new Set((data || []).map((p: any) => p.market_id).filter(Boolean)));
+
+  const [glDataResult, marketDataResult] = await Promise.all([
+    glIds.length > 0
+      ? freshClient.from('gebietsleiter').select('id,name').in('id', glIds)
+      : Promise.resolve({ data: [] as any[] }),
+    marketIds.length > 0
+      ? freshClient.from('markets').select('id,name,chain,address,city,postal_code').in('id', marketIds)
+      : Promise.resolve({ data: [] as any[] })
+  ]);
+
+  const glMap = new Map((glDataResult.data || []).map((g: any) => [g.id, g.name]));
+  const marketMap = new Map((marketDataResult.data || []).map((m: any) => [m.id, m]));
+
+  return (data || []).map((photo: any) => {
+    const market = marketMap.get(photo.market_id) || {};
+    const marketAddressLine = String((market as any).address || '');
+    const marketPostalCode = String((market as any).postal_code || '');
+    const marketCity = String((market as any).city || '');
+    const marketAddress = [marketAddressLine, [marketPostalCode, marketCity].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+
+    return {
+      id: photo.id,
+      source: 'fotowelle',
+      welleId: photo.welle_id || '',
+      welleName: (photo.welle as any)?.name || '',
+      fragebogenId: '',
+      fragebogenName: '',
+      glId: photo.gebietsleiter_id || '',
+      glName: glMap.get(photo.gebietsleiter_id) || '',
+      marketId: photo.market_id || '',
+      marketName: String((market as any).name || ''),
+      marketChain: String((market as any).chain || ''),
+      marketAddressLine,
+      marketPostalCode,
+      marketCity,
+      marketAddress,
+      photoUrl: photo.photo_url,
+      tags: photo.tags || [],
+      comment: photo.comment || null,
+      createdAt: photo.created_at
+    };
+  });
+}
+
+async function fetchFragebogenPhotoRowsForAdmin(
+  freshClient: ReturnType<typeof createFreshClient>,
+  filters: AdminPhotoFilters
+): Promise<AdminPhotoRow[]> {
+  // Wellen-Filter applies only to Fotowelle source.
+  if (filters.welleId) return [];
+
+  let responsesQuery = freshClient
+    .from('fb_responses')
+    .select('id,fragebogen_id,gebietsleiter_id,market_id')
+    .order('created_at', { ascending: false });
+
+  if (filters.fragebogenId) responsesQuery = responsesQuery.eq('fragebogen_id', filters.fragebogenId);
+  if (filters.glId) responsesQuery = responsesQuery.eq('gebietsleiter_id', filters.glId);
+  if (filters.marketId) responsesQuery = responsesQuery.eq('market_id', filters.marketId);
+
+  const { data: responses, error: responsesError } = await responsesQuery;
+  if (responsesError) throw responsesError;
+  if (!responses || responses.length === 0) return [];
+
+  const responseMap = new Map((responses || []).map((r: any) => [r.id, r]));
+  const responseIds = Array.from(responseMap.keys());
+  const answerRows: any[] = [];
+
+  for (const responseChunk of chunkArray(responseIds, FOTOFRAGEN_RESPONSE_CHUNK_SIZE)) {
+    let answersQuery = freshClient
+      .from('fb_response_answers')
+      .select('id,response_id,question_id,answer_file_url,answered_at')
+      .eq('question_type', 'photo_upload')
+      .in('response_id', responseChunk)
+      .not('answer_file_url', 'is', null);
+
+    if (filters.startDate) answersQuery = answersQuery.gte('answered_at', `${filters.startDate}T00:00:00`);
+    if (filters.endDate) answersQuery = answersQuery.lte('answered_at', `${filters.endDate}T23:59:59`);
+
+    const { data: answersData, error: answersError } = await answersQuery.order('answered_at', { ascending: false });
+    if (answersError) throw answersError;
+
+    answerRows.push(
+      ...(answersData || []).filter((a: any) => typeof a.answer_file_url === 'string' && a.answer_file_url.trim() !== '')
+    );
+  }
+
+  if (answerRows.length === 0) return [];
+
+  const sixMonthsAgo = new Date();
+  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  const sixMonthsAgoMs = sixMonthsAgo.getTime();
+
+  const filteredByAge = answerRows.filter((row: any) => {
+    const ts = new Date(row.answered_at).getTime();
+    return !Number.isNaN(ts) ? ts >= sixMonthsAgoMs : true;
+  });
+  if (filteredByAge.length === 0) return [];
+
+  const fragebogenIds = Array.from(new Set(responses.map((r: any) => r.fragebogen_id).filter(Boolean)));
+  const glIds = Array.from(new Set(responses.map((r: any) => r.gebietsleiter_id).filter(Boolean)));
+  const marketIds = Array.from(new Set(responses.map((r: any) => r.market_id).filter(Boolean)));
+
+  const [fragebogenResult, usersResult, marketsResult] = await Promise.all([
+    fragebogenIds.length > 0
+      ? freshClient.from('fb_fragebogen').select('id,name').in('id', fragebogenIds)
+      : Promise.resolve({ data: [] as any[] }),
+    glIds.length > 0
+      ? freshClient.from('users').select('id,first_name,last_name').in('id', glIds)
+      : Promise.resolve({ data: [] as any[] }),
+    marketIds.length > 0
+      ? freshClient.from('markets').select('id,name,chain,address,city,postal_code').in('id', marketIds)
+      : Promise.resolve({ data: [] as any[] })
+  ]);
+
+  const fragebogenMap = new Map((fragebogenResult.data || []).map((fb: any) => [fb.id, fb.name]));
+  const userMap = new Map(
+    (usersResult.data || []).map((u: any) => [u.id, `${u.first_name || ''} ${u.last_name || ''}`.trim() || 'Unbekannt'])
+  );
+  const marketMap = new Map((marketsResult.data || []).map((m: any) => [m.id, m]));
+
+  return filteredByAge.map((answer: any) => {
+    const response = responseMap.get(answer.response_id) || {};
+    const market = marketMap.get((response as any).market_id) || {};
+    const marketAddressLine = String((market as any).address || '');
+    const marketPostalCode = String((market as any).postal_code || '');
+    const marketCity = String((market as any).city || '');
+    const marketAddress = [marketAddressLine, [marketPostalCode, marketCity].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+
+    return {
+      id: answer.id,
+      source: 'fotofragen',
+      welleId: '',
+      welleName: '',
+      fragebogenId: (response as any).fragebogen_id || '',
+      fragebogenName: fragebogenMap.get((response as any).fragebogen_id) || '',
+      glId: (response as any).gebietsleiter_id || '',
+      glName: userMap.get((response as any).gebietsleiter_id) || 'Unbekannt',
+      marketId: (response as any).market_id || '',
+      marketName: String((market as any).name || ''),
+      marketChain: String((market as any).chain || ''),
+      marketAddressLine,
+      marketPostalCode,
+      marketCity,
+      marketAddress,
+      photoUrl: String(answer.answer_file_url || ''),
+      tags: [],
+      comment: null,
+      createdAt: answer.answered_at || ''
+    } as AdminPhotoRow;
+  });
+}
+
+async function fetchAdminPhotoRows(
+  freshClient: ReturnType<typeof createFreshClient>,
+  filters: AdminPhotoFilters
+): Promise<AdminPhotoRow[]> {
+  const loadWellen = filters.source === 'all' || filters.source === 'fotowelle';
+  const loadFragebogen = filters.source === 'all' || filters.source === 'fotofragen';
+
+  const [wellenRows, fragebogenRows] = await Promise.all([
+    loadWellen ? fetchWellenPhotoRowsForAdmin(freshClient, filters) : Promise.resolve([] as AdminPhotoRow[]),
+    loadFragebogen ? fetchFragebogenPhotoRowsForAdmin(freshClient, filters) : Promise.resolve([] as AdminPhotoRow[])
+  ]);
+
+  const merged = [...wellenRows, ...fragebogenRows]
+    .filter(row => hasAllTags(row.tags, filters.tags))
+    .sort((a, b) => {
+      const tA = new Date(a.createdAt).getTime();
+      const tB = new Date(b.createdAt).getTime();
+      return tB - tA;
+    });
+
+  return merged;
+}
+
 router.post('/photos/upload', async (req: Request, res: Response) => {
   try {
     const { welle_id, gebietsleiter_id, market_id, photos, submission_batch_id } = req.body;
@@ -1739,77 +2060,117 @@ router.post('/photos/upload', async (req: Request, res: Response) => {
 
 router.get('/photos', async (req: Request, res: Response) => {
   try {
-    
-    const { welle_id, gl_id, market_id, tag, tags, start_date, end_date, limit: limitParam, offset: offsetParam } = req.query;
+    const { welle_id, fragebogen_id, gl_id, market_id, tag, tags, source, start_date, end_date, limit: limitParam, offset: offsetParam } = req.query;
+    const parsedSource = parseAdminPhotoSource(source);
+    const selectedTags = parsePhotoTagFilter(tags, tag);
+    const limit = Math.max(1, Math.min(1000, Number(limitParam) || 200));
+    const offset = Math.max(0, Number(offsetParam) || 0);
     const freshClient = createFreshClient();
 
-    // Query photos with only the wellen join (has FK), skip gl/market joins (no FK)
-    let query = freshClient
-      .from('wellen_photos')
-      .select('*, welle:wellen(id, name)')
-      .order('created_at', { ascending: false });
-
-    if (welle_id) query = query.eq('welle_id', welle_id);
-    if (gl_id) query = query.eq('gebietsleiter_id', gl_id);
-    if (market_id) query = query.eq('market_id', market_id);
-    if (tags) {
-      // Multi-tag filter: photo must contain ALL selected tags
-      const tagList = (tags as string).split(',').map(t => t.trim()).filter(Boolean);
-      if (tagList.length > 0) query = query.contains('tags', tagList);
-    } else if (tag) {
-      query = query.contains('tags', [tag as string]);
-    }
-    if (start_date) query = query.gte('created_at', `${start_date}T00:00:00`);
-    if (end_date) query = query.lte('created_at', `${end_date}T23:59:59`);
-
-    // Hide photos older than 6 months from the UI (data stays in DB)
-    const sixMonthsAgo = new Date();
-    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-    query = query.gte('created_at', sixMonthsAgo.toISOString());
-    
-    const lim = parseInt(limitParam as string) || 50;
-    const off = parseInt(offsetParam as string) || 0;
-    query = query.range(off, off + lim - 1);
-
-    const { data, error, count } = await query;
-    if (error) throw error;
-
-    // Collect unique GL IDs and market IDs to enrich data (filter nulls to avoid breaking .in() queries)
-    const glIds = [...new Set((data || []).map(p => p.gebietsleiter_id).filter(Boolean))];
-    const marketIds = [...new Set((data || []).map(p => p.market_id).filter(Boolean))];
-
-    // Fetch GL names
-    const glMap = new Map<string, string>();
-    if (glIds.length > 0) {
-      const { data: glData } = await freshClient.from('gebietsleiter').select('id, name').in('id', glIds);
-      (glData || []).forEach(g => glMap.set(g.id, g.name));
-    }
-
-    // Fetch market info
-    const marketMap = new Map<string, { name: string; chain: string; address: string; city: string; postalCode: string }>();
-    if (marketIds.length > 0) {
-      const { data: marketData, error: marketError } = await freshClient.from('markets').select('id, name, chain, address, city, postal_code').in('id', marketIds);
-      if (marketError) {
-        console.error('⚠️ Error fetching market data for photos:', marketError.message);
-      }
-      (marketData || []).forEach(m => marketMap.set(m.id, { name: m.name, chain: m.chain, address: m.address || '', city: m.city || '', postalCode: m.postal_code || '' }));
-    }
-
-    const photos = (data || []).map(p => {
-      const market = marketMap.get(p.market_id);
-      return {
-        id: p.id, welleId: p.welle_id, welleName: (p.welle as any)?.name || '',
-        glId: p.gebietsleiter_id, glName: glMap.get(p.gebietsleiter_id) || '',
-        marketId: p.market_id, marketName: market?.name || '', marketChain: market?.chain || '',
-        marketAddress: [market?.address, [market?.postalCode, market?.city].filter(Boolean).join(' ')].filter(Boolean).join(', '),
-        photoUrl: p.photo_url, tags: p.tags || [], comment: p.comment || null, createdAt: p.created_at
-      };
+    const allRows = await fetchAdminPhotoRows(freshClient, {
+      source: parsedSource,
+      welleId: typeof welle_id === 'string' ? welle_id : undefined,
+      fragebogenId: typeof fragebogen_id === 'string' ? fragebogen_id : undefined,
+      glId: typeof gl_id === 'string' ? gl_id : undefined,
+      marketId: typeof market_id === 'string' ? market_id : undefined,
+      tags: selectedTags,
+      startDate: typeof start_date === 'string' ? start_date : undefined,
+      endDate: typeof end_date === 'string' ? end_date : undefined
     });
 
-    res.json({ photos, total: count || photos.length });
+    const pagedRows = allRows.slice(offset, offset + limit);
+    res.json({ photos: pagedRows, total: allRows.length });
   } catch (error: any) {
     console.error('❌ Error fetching photos:', error);
     res.status(500).json({ error: error.message || 'Failed to fetch photos' });
+  }
+});
+
+router.get('/photos/export.zip', async (req: Request, res: Response) => {
+  try {
+    const { welle_id, fragebogen_id, gl_id, market_id, tag, tags, source, start_date, end_date, zip_name } = req.query;
+    const parsedSource = parseAdminPhotoSource(source);
+    const selectedTags = parsePhotoTagFilter(tags, tag);
+    const freshClient = createFreshClient();
+
+    const allRows = await fetchAdminPhotoRows(freshClient, {
+      source: parsedSource,
+      welleId: typeof welle_id === 'string' ? welle_id : undefined,
+      fragebogenId: typeof fragebogen_id === 'string' ? fragebogen_id : undefined,
+      glId: typeof gl_id === 'string' ? gl_id : undefined,
+      marketId: typeof market_id === 'string' ? market_id : undefined,
+      tags: selectedTags,
+      startDate: typeof start_date === 'string' ? start_date : undefined,
+      endDate: typeof end_date === 'string' ? end_date : undefined
+    });
+
+    if (allRows.length === 0) {
+      return res.status(404).json({ error: 'Keine Fotos für die aktuellen Filter gefunden.' });
+    }
+
+    const defaultName = `Fotos_${new Date().toISOString().slice(0, 10)}`;
+    const requestedName = typeof zip_name === 'string' ? zip_name : defaultName;
+    const zipBaseName = sanitizePhotoExportSegment(requestedName) || defaultName;
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipBaseName}.zip"`);
+
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.on('warning', (warning: unknown) => {
+      console.warn('Photo export ZIP warning:', warning);
+    });
+    archive.on('error', (archiveError: unknown) => {
+      console.error('Photo export ZIP error:', archiveError);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'ZIP konnte nicht erstellt werden.' });
+      } else {
+        res.end();
+      }
+    });
+
+    archive.pipe(res);
+
+    const duplicateCounts: Record<string, number> = {};
+    let appendedFiles = 0;
+
+    for (const photo of allRows) {
+      try {
+        const imageResponse = await fetch(photo.photoUrl);
+        if (!imageResponse.ok) {
+          console.warn(`Skipping photo ${photo.id}: fetch failed (${imageResponse.status})`);
+          continue;
+        }
+
+        const contentType = imageResponse.headers.get('content-type');
+        const extension = inferPhotoExportExtension(photo.photoUrl, contentType);
+        const fileBuffer = Buffer.from(await imageResponse.arrayBuffer());
+        if (fileBuffer.length === 0) continue;
+
+        const duplicateKey = `${photo.source}|${photo.glName}|${photo.marketAddressLine}|${photo.marketPostalCode}|${photo.marketCity}|${formatPhotoExportTimestamp(photo.createdAt)}`;
+        const sequence = (duplicateCounts[duplicateKey] || 0) + 1;
+        duplicateCounts[duplicateKey] = sequence;
+
+        const fileName = buildAdminPhotoExportFileName(photo, sequence, extension);
+        const folderName = photo.source === 'fotofragen' ? 'Fotofragen' : 'Fotowelle';
+        archive.append(fileBuffer, { name: `${folderName}/${fileName}` });
+        appendedFiles += 1;
+      } catch (photoError: any) {
+        console.warn(`Skipping photo ${photo.id}:`, photoError?.message || photoError);
+      }
+    }
+
+    if (appendedFiles === 0) {
+      archive.append('Keine Fotos konnten aus den hinterlegten URLs geladen werden.', {
+        name: 'README.txt'
+      });
+    }
+
+    await archive.finalize();
+  } catch (error: any) {
+    console.error('❌ Error exporting photos zip:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message || 'Failed to export photos zip' });
+    }
   }
 });
 
