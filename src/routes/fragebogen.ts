@@ -4584,21 +4584,34 @@ router.get('/fragebogen/:id/export.xlsx', async (req: Request, res: Response) =>
 
     const responseIds = responses.map((r: any) => r.id);
 
-    // 3) Load all answers with question metadata
-    const { data: allAnswers, error: aError } = await freshClient
-      .from('fb_response_answers')
-      .select(`
-        id, response_id, question_id, module_id, question_type,
-        answer_kind, answer_text, answer_numeric, answer_boolean,
-        answer_json, answer_file_url, answered_at,
-        question:fb_questions!question_id (
-          id, type, question_text, options, matrix_config, likert_scale,
-          numeric_constraints, slider_config
-        )
-      `)
-      .in('response_id', responseIds)
-      .order('answered_at', { ascending: true });
-    if (aError) throw aError;
+    // 3) Load all answers with question metadata (paginated to avoid row-limit truncation)
+    const allAnswers: any[] = [];
+    const ANSWER_PAGE_SIZE = 1000;
+    let answerOffset = 0;
+
+    while (true) {
+      const { data: answerPage, error: aError } = await freshClient
+        .from('fb_response_answers')
+        .select(`
+          id, response_id, question_id, module_id, question_type,
+          answer_kind, answer_text, answer_numeric, answer_boolean,
+          answer_json, answer_file_url, answered_at,
+          question:fb_questions!question_id (
+            id, type, question_text, options, matrix_config, likert_scale,
+            numeric_constraints, slider_config
+          )
+        `)
+        .in('response_id', responseIds)
+        .order('answered_at', { ascending: true })
+        .range(answerOffset, answerOffset + ANSWER_PAGE_SIZE - 1);
+      if (aError) throw aError;
+
+      const pageRows = answerPage ?? [];
+      allAnswers.push(...pageRows);
+
+      if (pageRows.length < ANSWER_PAGE_SIZE) break;
+      answerOffset += ANSWER_PAGE_SIZE;
+    }
 
     // 4) Load Fragebogen module/question order for consistent column ordering
     const { data: fbModules } = await freshClient
