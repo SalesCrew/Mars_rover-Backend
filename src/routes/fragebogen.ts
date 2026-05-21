@@ -3656,24 +3656,35 @@ router.get('/zusatz-zeiterfassung/:glId', async (req: Request, res: Response) =>
     const freshClient = createFreshClient();
     const { glId } = req.params;
     const { date, start_date, end_date } = req.query;
-    
-    let query = freshClient
-      .from('fb_zusatz_zeiterfassung')
-      .select('*')
-      .eq('gebietsleiter_id', glId)
-      .order('created_at', { ascending: false });
-    
-    if (date) {
-      query = query.eq('entry_date', date);
-    } else if (start_date && end_date) {
-      query = query.gte('entry_date', start_date).lte('entry_date', end_date);
+
+    // Supabase/PostgREST can cap rows per request (commonly 1000),
+    // so fetch in pages to avoid silent truncation.
+    const PAGE_SIZE = 1000;
+    const entries: any[] = [];
+    let offset = 0;
+
+    while (true) {
+      let pageQuery = freshClient
+        .from('fb_zusatz_zeiterfassung')
+        .select('*')
+        .eq('gebietsleiter_id', glId)
+        .order('created_at', { ascending: false });
+
+      if (date) {
+        pageQuery = pageQuery.eq('entry_date', date);
+      } else if (start_date && end_date) {
+        pageQuery = pageQuery.gte('entry_date', start_date).lte('entry_date', end_date);
+      }
+
+      const { data: pageRows, error } = await pageQuery.range(offset, offset + PAGE_SIZE - 1);
+      if (error) throw error;
+
+      const rows = pageRows || [];
+      entries.push(...rows);
+      if (rows.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
     }
-    
-    const { data, error } = await query;
-    
-    if (error) throw error;
-    
-    const entries = data || [];
+
     const marketIds = [...new Set(entries.filter(e => e.market_id).map(e => e.market_id))];
     let marketsMap: Record<string, any> = {};
     if (marketIds.length > 0) {
@@ -3701,24 +3712,35 @@ router.get('/zusatz-zeiterfassung-all', async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { start_date, end_date } = req.query;
-    
-    let query = freshClient
-      .from('fb_zusatz_zeiterfassung')
-      .select('*')
-      .order('created_at', { ascending: false });
-    
-    if (start_date) {
-      query = query.gte('entry_date', start_date);
+
+    // Supabase/PostgREST can cap rows per request (commonly 1000),
+    // so fetch in pages to avoid silent truncation.
+    const PAGE_SIZE = 1000;
+    const entries: any[] = [];
+    let offset = 0;
+
+    while (true) {
+      let pageQuery = freshClient
+        .from('fb_zusatz_zeiterfassung')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (start_date) {
+        pageQuery = pageQuery.gte('entry_date', start_date);
+      }
+      if (end_date) {
+        pageQuery = pageQuery.lte('entry_date', end_date);
+      }
+
+      const { data: pageRows, error } = await pageQuery.range(offset, offset + PAGE_SIZE - 1);
+      if (error) throw error;
+
+      const rows = pageRows || [];
+      entries.push(...rows);
+      if (rows.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
     }
-    if (end_date) {
-      query = query.lte('entry_date', end_date);
-    }
-    
-    const { data, error } = await query;
-    
-    if (error) throw error;
-    
-    const entries = data || [];
+
     const marketIds = [...new Set(entries.filter(e => e.market_id).map(e => e.market_id))];
     let marketsMap: Record<string, any> = {};
     if (marketIds.length > 0) {
