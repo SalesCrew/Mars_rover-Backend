@@ -296,7 +296,6 @@ router.post('/custom', async (req: Request, res: Response) => {
         console.warn(`⚠️ No columns selected for ${datasetId}, skipping`);
         continue;
       }
-
       console.log(`📝 Processing dataset: ${datasetDef.label} (${datasetColumns.length} columns)`);
 
       // Transform data

@@ -18,6 +18,22 @@ const normalizeNameStrict = (name: string): string =>
 const normalizeNameLoose = (name: string): string =>
   normalizeNameStrict(name).replace(/[^a-z0-9]/g, '');
 
+const normalizeNameCanonical = (name: string): string => {
+  const normalized = normalizeNameStrict(name)
+    // Common wording variant observed in wave item names.
+    .replace(/\bfrischebeutel\b/g, 'frischbeutel')
+    // Normalize "40x85g" style to "85g 40 pack" style.
+    .replace(/(\d+)\s*[x×]\s*(\d+)\s*g\b/g, '$2g $1 pack')
+    .replace(/(\d+)\s*[x×]\s*(\d+)\s*kg\b/g, '$2kg $1 pack');
+
+  const tokens = normalized
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .sort();
+
+  return tokens.join('|');
+};
+
 const parseVe = (value: any): number | null => {
   if (value === null || value === undefined || value === '') return null;
   const parsed = parseInt(String(value), 10);
@@ -83,10 +99,14 @@ const setBestVe = (map: Map<string, number | null>, key: string, ve: number | nu
 
 async function buildProductVeLookup(client: SupabaseClient): Promise<{
   strictMap: Map<string, number | null>;
+  strictNameWithWeightMap: Map<string, number | null>;
   looseMap: Map<string, number | null>;
+  canonicalMap: Map<string, number | null>;
 }> {
   const strictMap = new Map<string, number | null>();
+  const strictNameWithWeightMap = new Map<string, number | null>();
   const looseMap = new Map<string, number | null>();
+  const canonicalMap = new Map<string, number | null>();
 
   let from = 0;
   const pageSize = 1000;
@@ -95,7 +115,7 @@ async function buildProductVeLookup(client: SupabaseClient): Promise<{
   while (hasMore) {
     const { data, error } = await client
       .from('products')
-      .select('name, content')
+      .select('name, content, weight')
       .range(from, from + pageSize - 1);
 
     if (error) throw error;
@@ -104,17 +124,23 @@ async function buildProductVeLookup(client: SupabaseClient): Promise<{
     rows.forEach((row: any) => {
       if (!row?.name) return;
       const strictKey = normalizeNameStrict(String(row.name));
+      const strictNameWithWeightKey = normalizeNameStrict(
+        `${String(row.name)} ${row?.weight ? String(row.weight) : ''}`.trim()
+      );
       const looseKey = normalizeNameLoose(String(row.name));
+      const canonicalKey = normalizeNameCanonical(String(row.name));
       const ve = parseVe(row.content);
       setBestVe(strictMap, strictKey, ve);
+      setBestVe(strictNameWithWeightMap, strictNameWithWeightKey, ve);
       setBestVe(looseMap, looseKey, ve);
+      setBestVe(canonicalMap, canonicalKey, ve);
     });
 
     from += pageSize;
     hasMore = rows.length === pageSize;
   }
 
-  return { strictMap, looseMap };
+  return { strictMap, strictNameWithWeightMap, looseMap, canonicalMap };
 }
 
 async function fetchRowsByIdsInChunks(
@@ -256,18 +282,62 @@ export async function transformWellenSubmissions(
     schutteProducts: schutteProductIds.length
   });
 
-  const [displaysData, kartonwareData, einzelprodukteData, paletteProductsData, schutteProductsData, masterProductsData] = await Promise.all([
+  const [displaysData, kartonwareData, paletteProductsData, schutteProductsData] = await Promise.all([
     fetchRowsByIdsInChunks(client, 'wellen_displays', 'id, name, item_value', displayIds),
     fetchRowsByIdsInChunks(client, 'wellen_kartonware', 'id, name, item_value', kartonwareIds),
-    fetchRowsByIdsInChunks(client, 'wellen_einzelprodukte', 'id, name, item_value', einzelproduktIds),
     fetchRowsByIdsInChunks(client, 'wellen_paletten_products', 'id, name, palette_id', paletteProductIds),
-    fetchRowsByIdsInChunks(client, 'wellen_schuetten_products', 'id, name, schuette_id', schutteProductIds),
-    // Dual-source: also fetch from master products table (no is_deleted filter — preserve archived product names in history)
-    fetchRowsByIdsInChunks(client, 'products', 'id, name, price', einzelproduktIds)
+    fetchRowsByIdsInChunks(client, 'wellen_schuetten_products', 'id, name, schuette_id', schutteProductIds)
   ]);
 
-  // Build VE lookup from products table and match by robust normalized keys.
-  const { strictMap: productVeMap, looseMap: productVeLooseMap } = await buildProductVeLookup(client);
+  // Try exact bridge via wellen_einzelprodukte.product_id when present.
+  let einzelprodukteData = await fetchRowsByIdsInChunks(
+    client,
+    'wellen_einzelprodukte',
+    'id, name, item_value, product_id',
+    einzelproduktIds
+  );
+  if (einzelprodukteData.error) {
+    einzelprodukteData = await fetchRowsByIdsInChunks(
+      client,
+      'wellen_einzelprodukte',
+      'id, name, item_value',
+      einzelproduktIds
+    );
+  }
+
+  const mappedProductIdsFromEinzelprodukte = [
+    ...new Set(
+      (einzelprodukteData.data || [])
+        .map((row: any) => row?.product_id)
+        .filter(Boolean)
+        .map((id: any) => String(id))
+    )
+  ];
+
+  const productLookupIds = [...new Set([
+    ...einzelproduktIds.filter(Boolean).map((id: any) => String(id)),
+    ...mappedProductIdsFromEinzelprodukte
+  ])];
+  const masterProductsData = await fetchRowsByIdsInChunks(client, 'products', 'id, name, price, content', productLookupIds);
+  const {
+    strictMap: productVeStrictMap,
+    strictNameWithWeightMap: productVeStrictNameWithWeightMap,
+    canonicalMap: productVeCanonicalMap
+  } = await buildProductVeLookup(client);
+  const masterProductVeById = new Map<string, number | null>();
+  const mappedProductIdByEinzelproduktId = new Map<string, string>();
+
+  (einzelprodukteData.data || []).forEach((row: any) => {
+    const einzelproduktId = row?.id ? String(row.id) : '';
+    const mappedProductId = row?.product_id ? String(row.product_id) : '';
+    if (einzelproduktId && mappedProductId) {
+      mappedProductIdByEinzelproduktId.set(einzelproduktId, mappedProductId);
+    }
+  });
+  (masterProductsData.data || []).forEach((row: any) => {
+    const ve = parseVe(row?.content);
+    masterProductVeById.set(String(row.id), ve);
+  });
 
   console.log(`✅ Fetched items:`, {
     displays: displaysData.data?.length || 0,
@@ -463,13 +533,34 @@ export async function transformWellenSubmissions(
         // VE enrichment for Einzelprodukte only
         let einzelproduktVe: number | null = null;
         let quantityInVe: number | null = null;
-        if (sub.item_type === 'einzelprodukt' && item?.name) {
-          const strictKey = normalizeNameStrict(item.name);
-          const looseKey = normalizeNameLoose(item.name);
-          const ve = productVeMap.get(strictKey) ?? productVeLooseMap.get(looseKey);
-          if (ve != null && ve > 0) {
-            einzelproduktVe = ve;
-            quantityInVe = sub.quantity / ve;
+        if (sub.item_type === 'einzelprodukt') {
+          if (item?.name) {
+            const subItemId = String(sub.item_id || '');
+            const mappedProductId = mappedProductIdByEinzelproduktId.get(subItemId) || null;
+            const hasDirectProductRow = masterProductVeById.has(subItemId);
+            const hasMappedProductRow = mappedProductId ? masterProductVeById.has(mappedProductId) : false;
+            const strictNameKey = normalizeNameStrict(item.name);
+            const hasStrictNameRow = productVeStrictMap.has(strictNameKey);
+            const hasStrictNameWithWeightRow = productVeStrictNameWithWeightMap.has(strictNameKey);
+            const canonicalKey = normalizeNameCanonical(item.name);
+            const hasCanonicalRow = productVeCanonicalMap.has(canonicalKey);
+
+            const ve = hasDirectProductRow
+              ? (masterProductVeById.get(subItemId) ?? null)
+              : hasMappedProductRow
+                ? (masterProductVeById.get(mappedProductId as string) ?? null)
+                : hasStrictNameRow
+                  ? (productVeStrictMap.get(strictNameKey) ?? null)
+                  : hasStrictNameWithWeightRow
+                    ? (productVeStrictNameWithWeightMap.get(strictNameKey) ?? null)
+                    : hasCanonicalRow
+                      ? (productVeCanonicalMap.get(canonicalKey) ?? null)
+                  : null;
+
+            if (ve != null && ve > 0) {
+              einzelproduktVe = ve;
+              quantityInVe = sub.quantity / ve;
+            }
           }
         }
         
@@ -1286,13 +1377,14 @@ export async function transformSingleWaveExport(
   const einzelproduktItemNames = einzelprodukte.map(ep => ep.name).filter(Boolean);
   const einzelproduktVeMap: Record<string, number | null> = {};
   if (einzelproduktItemNames.length > 0) {
-    const { strictMap: nameToVe, looseMap: looseNameToVe } = await buildProductVeLookup(client);
+  const { strictMap: nameToVe, looseMap: looseNameToVe, canonicalMap: canonicalNameToVe } = await buildProductVeLookup(client);
     // Apply VE to each einzelprodukt item
     items.forEach(item => {
       if (item.type === 'einzelprodukt') {
         const strictKey = normalizeNameStrict(item.name);
         const looseKey = normalizeNameLoose(item.name);
-        const ve = nameToVe.get(strictKey) ?? looseNameToVe.get(looseKey) ?? null;
+        const canonicalKey = normalizeNameCanonical(item.name);
+        const ve = nameToVe.get(strictKey) ?? looseNameToVe.get(looseKey) ?? canonicalNameToVe.get(canonicalKey) ?? null;
         item.ve = ve;
         einzelproduktVeMap[item.id] = ve;
       }
