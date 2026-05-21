@@ -117,6 +117,33 @@ async function buildProductVeLookup(client: SupabaseClient): Promise<{
   return { strictMap, looseMap };
 }
 
+async function fetchRowsByIdsInChunks(
+  client: SupabaseClient,
+  table: string,
+  selectCols: string,
+  ids: string[],
+  idColumn: string = 'id',
+  chunkSize: number = 120
+): Promise<{ data: any[]; error: any | null }> {
+  if (!ids.length) return { data: [], error: null };
+
+  const allRows: any[] = [];
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    const { data, error } = await client
+      .from(table)
+      .select(selectCols)
+      .in(idColumn, chunk);
+
+    if (error) {
+      return { data: allRows, error };
+    }
+    allRows.push(...(data || []));
+  }
+
+  return { data: allRows, error: null };
+}
+
 export interface ExportRow {
   [key: string]: any;
 }
@@ -230,13 +257,13 @@ export async function transformWellenSubmissions(
   });
 
   const [displaysData, kartonwareData, einzelprodukteData, paletteProductsData, schutteProductsData, masterProductsData] = await Promise.all([
-    displayIds.length > 0 ? client.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
-    kartonwareIds.length > 0 ? client.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] },
-    einzelproduktIds.length > 0 ? client.from('wellen_einzelprodukte').select('id, name, item_value').in('id', einzelproduktIds) : { data: [] },
-    paletteProductIds.length > 0 ? client.from('wellen_paletten_products').select('id, name, palette_id').in('id', paletteProductIds) : { data: [] },
-    schutteProductIds.length > 0 ? client.from('wellen_schuetten_products').select('id, name, schuette_id').in('id', schutteProductIds) : { data: [] },
+    fetchRowsByIdsInChunks(client, 'wellen_displays', 'id, name, item_value', displayIds),
+    fetchRowsByIdsInChunks(client, 'wellen_kartonware', 'id, name, item_value', kartonwareIds),
+    fetchRowsByIdsInChunks(client, 'wellen_einzelprodukte', 'id, name, item_value', einzelproduktIds),
+    fetchRowsByIdsInChunks(client, 'wellen_paletten_products', 'id, name, palette_id', paletteProductIds),
+    fetchRowsByIdsInChunks(client, 'wellen_schuetten_products', 'id, name, schuette_id', schutteProductIds),
     // Dual-source: also fetch from master products table (no is_deleted filter — preserve archived product names in history)
-    einzelproduktIds.length > 0 ? client.from('products').select('id, name, price').in('id', einzelproduktIds) : { data: [] }
+    fetchRowsByIdsInChunks(client, 'products', 'id, name, price', einzelproduktIds)
   ]);
 
   // Build VE lookup from products table and match by robust normalized keys.
