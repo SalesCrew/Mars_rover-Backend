@@ -4589,50 +4589,73 @@ router.get('/fragebogen/:id/export.xlsx', async (req: Request, res: Response) =>
       .single();
     if (fbError || !fragebogen) return res.status(404).json({ error: 'Fragebogen not found' });
 
-    // 2) Load all responses for this Fragebogen
-    const { data: responses, error: rError } = await freshClient
-      .from('fb_responses')
-      .select(`
-        id, status, started_at, completed_at, gebietsleiter_id, market_id,
-        user:users!gebietsleiter_id (id, first_name, last_name),
-        market:markets!market_id (id, name, chain, address, postal_code, city)
-      `)
-      .eq('fragebogen_id', id)
-      .order('started_at', { ascending: true });
-    if (rError) throw rError;
+    // 2) Load all responses for this Fragebogen (paginated to avoid row-limit truncation)
+    const responses: any[] = [];
+    const RESPONSE_PAGE_SIZE = 1000;
+    let responseOffset = 0;
+
+    while (true) {
+      const { data: responsePage, error: rError } = await freshClient
+        .from('fb_responses')
+        .select(`
+          id, status, started_at, completed_at, gebietsleiter_id, market_id,
+          user:users!gebietsleiter_id (id, first_name, last_name),
+          market:markets!market_id (id, name, chain, address, postal_code, city)
+        `)
+        .eq('fragebogen_id', id)
+        .order('started_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(responseOffset, responseOffset + RESPONSE_PAGE_SIZE - 1);
+      if (rError) throw rError;
+
+      const pageRows = responsePage ?? [];
+      responses.push(...pageRows);
+
+      if (pageRows.length < RESPONSE_PAGE_SIZE) break;
+      responseOffset += RESPONSE_PAGE_SIZE;
+    }
+
     if (!responses || responses.length === 0) {
       return res.status(404).json({ error: 'No responses found for this Fragebogen' });
     }
 
     const responseIds = responses.map((r: any) => r.id);
 
-    // 3) Load all answers with question metadata (paginated to avoid row-limit truncation)
+    // 3) Load all answers with question metadata
+    // Paginate both by response-id chunks and row ranges for stability on large datasets.
     const allAnswers: any[] = [];
     const ANSWER_PAGE_SIZE = 1000;
-    let answerOffset = 0;
+    const ANSWER_RESPONSE_CHUNK_SIZE = 200;
 
-    while (true) {
-      const { data: answerPage, error: aError } = await freshClient
-        .from('fb_response_answers')
-        .select(`
-          id, response_id, question_id, module_id, question_type,
-          answer_kind, answer_text, answer_numeric, answer_boolean,
-          answer_json, answer_file_url, answered_at,
-          question:fb_questions!question_id (
-            id, type, question_text, options, matrix_config, likert_scale,
-            numeric_constraints, slider_config
-          )
-        `)
-        .in('response_id', responseIds)
-        .order('answered_at', { ascending: true })
-        .range(answerOffset, answerOffset + ANSWER_PAGE_SIZE - 1);
-      if (aError) throw aError;
+    for (let chunkStart = 0; chunkStart < responseIds.length; chunkStart += ANSWER_RESPONSE_CHUNK_SIZE) {
+      const responseIdChunk = responseIds.slice(chunkStart, chunkStart + ANSWER_RESPONSE_CHUNK_SIZE);
+      if (responseIdChunk.length === 0) continue;
 
-      const pageRows = answerPage ?? [];
-      allAnswers.push(...pageRows);
+      let answerOffset = 0;
+      while (true) {
+        const { data: answerPage, error: aError } = await freshClient
+          .from('fb_response_answers')
+          .select(`
+            id, response_id, question_id, module_id, question_type,
+            answer_kind, answer_text, answer_numeric, answer_boolean,
+            answer_json, answer_file_url, answered_at,
+            question:fb_questions!question_id (
+              id, type, question_text, options, matrix_config, likert_scale,
+              numeric_constraints, slider_config
+            )
+          `)
+          .in('response_id', responseIdChunk)
+          .order('answered_at', { ascending: true })
+          .order('id', { ascending: true })
+          .range(answerOffset, answerOffset + ANSWER_PAGE_SIZE - 1);
+        if (aError) throw aError;
 
-      if (pageRows.length < ANSWER_PAGE_SIZE) break;
-      answerOffset += ANSWER_PAGE_SIZE;
+        const pageRows = answerPage ?? [];
+        allAnswers.push(...pageRows);
+
+        if (pageRows.length < ANSWER_PAGE_SIZE) break;
+        answerOffset += ANSWER_PAGE_SIZE;
+      }
     }
 
     // 4) Load Fragebogen module/question order for consistent column ordering
