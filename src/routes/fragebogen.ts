@@ -3339,34 +3339,45 @@ router.get('/zeiterfassung/admin', async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { start_date, end_date, gl_id } = req.query;
-    
-    let query = freshClient
-      .from('fb_zeiterfassung_submissions')
-      .select(`
-        *,
-        gebietsleiter:users!gebietsleiter_id (id, first_name, last_name),
-        market:markets (id, name, chain, address, postal_code, city)
-      `)
-      .order('created_at', { ascending: false });
-    
-    // Filter by date range if provided
-    if (start_date) {
-      query = query.gte('created_at', start_date);
+
+    const PAGE_SIZE = 1000;
+    let offset = 0;
+    const allRows: any[] = [];
+
+    while (true) {
+      let pageQuery = freshClient
+        .from('fb_zeiterfassung_submissions')
+        .select(`
+          *,
+          gebietsleiter:users!gebietsleiter_id (id, first_name, last_name),
+          market:markets (id, name, chain, address, postal_code, city)
+        `)
+        .order('created_at', { ascending: false });
+
+      // Filter by date range if provided
+      if (start_date) {
+        pageQuery = pageQuery.gte('created_at', start_date);
+      }
+      if (end_date) {
+        pageQuery = pageQuery.lte('created_at', end_date);
+      }
+
+      // Filter by GL if provided
+      if (gl_id) {
+        pageQuery = pageQuery.eq('gebietsleiter_id', gl_id);
+      }
+
+      const { data: pageRows, error } = await pageQuery.range(offset, offset + PAGE_SIZE - 1);
+      if (error) throw error;
+
+      const rows = pageRows || [];
+      allRows.push(...rows);
+
+      if (rows.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
     }
-    if (end_date) {
-      query = query.lte('created_at', end_date);
-    }
-    
-    // Filter by GL if provided
-    if (gl_id) {
-      query = query.eq('gebietsleiter_id', gl_id);
-    }
-    
-    const { data, error } = await query;
-    
-    if (error) throw error;
-    
-    res.json(data);
+
+    res.json(allRows);
   } catch (error: any) {
     console.error('Error fetching admin zeiterfassung:', error);
     res.status(500).json({ error: error.message || 'Failed to fetch zeiterfassung' });
