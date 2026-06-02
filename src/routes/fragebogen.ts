@@ -174,6 +174,23 @@ function inferPhotoExtension(photoUrl: string, contentType?: string | null): str
   return 'jpg';
 }
 
+function extractPhotoUrlsFromAnswer(answer: any): string[] {
+  const urlsFromJson = Array.isArray(answer?.answer_json)
+    ? answer.answer_json
+        .filter((entry: unknown) => typeof entry === 'string')
+        .map((entry: string) => entry.trim())
+        .filter(Boolean)
+    : [];
+
+  if (urlsFromJson.length > 0) return urlsFromJson;
+
+  if (typeof answer?.answer_file_url === 'string' && answer.answer_file_url.trim().length > 0) {
+    return [answer.answer_file_url.trim()];
+  }
+
+  return [];
+}
+
 function buildFragebogenPhotoFileName(photo: FragebogenPhotoItem, sequence: number, extension: string): string {
   const glPart = sanitizePhotoNameSegment(photo.glName || 'Unbekannt');
   const marketPart = sanitizePhotoNameSegment(photo.marketName || photo.marketAddressLine || 'Unbekannt');
@@ -207,10 +224,9 @@ async function fetchFragebogenPhotoItems(
   for (const responseChunk of chunkIds(responseIds, FOTOFRAGEN_RESPONSE_CHUNK_SIZE)) {
     let answersQuery = freshClient
       .from('fb_response_answers')
-      .select('id,response_id,question_id,answer_file_url,answered_at')
+      .select('id,response_id,question_id,answer_file_url,answer_json,answered_at')
       .eq('question_type', 'photo_upload')
-      .in('response_id', responseChunk)
-      .not('answer_file_url', 'is', null);
+      .in('response_id', responseChunk);
 
     if (filters.startDate) answersQuery = answersQuery.gte('answered_at', `${filters.startDate}T00:00:00`);
     if (filters.endDate) answersQuery = answersQuery.lte('answered_at', `${filters.endDate}T23:59:59`);
@@ -218,9 +234,7 @@ async function fetchFragebogenPhotoItems(
     const { data: chunkAnswers, error: answersError } = await answersQuery.order('answered_at', { ascending: false });
     if (answersError) throw answersError;
 
-    answers.push(
-      ...(chunkAnswers || []).filter((a: any) => typeof a.answer_file_url === 'string' && a.answer_file_url.trim() !== '')
-    );
+    answers.push(...((chunkAnswers || []).filter((a: any) => extractPhotoUrlsFromAnswer(a).length > 0)));
   }
 
   if (answers.length === 0) return [];
@@ -246,9 +260,12 @@ async function fetchFragebogenPhotoItems(
   const marketMap = new Map((markets || []).map((m: any) => [m.id, m]));
 
   const rows: FragebogenPhotoItem[] = answers
-    .map((answer: any) => {
+    .flatMap((answer: any) => {
       const response = responseMap.get(answer.response_id);
-      if (!response) return null;
+      if (!response) return [];
+
+      const photoUrls = extractPhotoUrlsFromAnswer(answer);
+      if (photoUrls.length === 0) return [];
 
       const market = marketMap.get(response.market_id) || {};
       const glName = userMap.get(response.gebietsleiter_id) || 'Unbekannt';
@@ -258,8 +275,8 @@ async function fetchFragebogenPhotoItems(
       const marketCity = String((market as any).city || '');
       const marketAddress = [marketAddressLine, [marketPostalCode, marketCity].filter(Boolean).join(' ')].filter(Boolean).join(', ');
 
-      return {
-        id: answer.id,
+      return photoUrls.map((photoUrl: string, index: number) => ({
+        id: `${answer.id}:${index}`,
         source: 'fotofragen',
         fragebogenId: response.fragebogen_id,
         fragebogenName,
@@ -273,13 +290,13 @@ async function fetchFragebogenPhotoItems(
         marketPostalCode,
         marketCity,
         marketAddress,
-        photoUrl: String(answer.answer_file_url || ''),
+        photoUrl,
         tags: [],
         comment: null,
         createdAt: answer.answered_at || ''
-      } as FragebogenPhotoItem;
+      } as FragebogenPhotoItem));
     })
-    .filter(Boolean) as FragebogenPhotoItem[];
+    .filter((row) => typeof row.photoUrl === 'string' && row.photoUrl.trim().length > 0) as FragebogenPhotoItem[];
 
   rows.sort((a, b) => {
     const tA = new Date(a.createdAt).getTime();
@@ -2559,7 +2576,7 @@ router.get('/responses/:id', async (req: Request, res: Response) => {
           displayValue = a.answer_text;
           break;
         case 'photo_upload':
-          displayValue = a.answer_file_url;
+          displayValue = extractPhotoUrlsFromAnswer(a);
           break;
         default:
           displayValue = a.answer_text ?? a.answer_numeric ?? a.answer_json;
@@ -2871,12 +2888,31 @@ router.put('/responses/:id', async (req: Request, res: Response) => {
         json = val;
 
       } else if (dbType === 'photo_upload') {
-        const val = answer.answer_file_url;
-        if (!val || typeof val !== 'string') {
-          return res.status(400).json({ error: `Question ${question_id} (photo_upload) requires a string answer_file_url` });
+        const providedJson = answer.answer_json;
+        const providedFile = answer.answer_file_url;
+
+        if (providedJson !== undefined && providedJson !== null && !Array.isArray(providedJson)) {
+          return res.status(400).json({ error: `Question ${question_id} (photo_upload) answer_json must be an array when provided` });
+        }
+        if (Array.isArray(providedJson) && providedJson.some((entry: unknown) => typeof entry !== 'string' || entry.trim().length === 0)) {
+          return res.status(400).json({ error: `Question ${question_id} (photo_upload) answer_json must contain only non-empty strings` });
+        }
+
+        const urlsFromJson = Array.isArray(providedJson)
+          ? providedJson
+              .map((entry: string) => entry.trim())
+          : [];
+        const urlsFromFile = typeof providedFile === 'string' && providedFile.trim().length > 0
+          ? [providedFile.trim()]
+          : [];
+        const normalizedUrls = urlsFromJson.length > 0 ? urlsFromJson : urlsFromFile;
+
+        if (normalizedUrls.length === 0) {
+          return res.status(400).json({ error: `Question ${question_id} (photo_upload) requires answer_json string[] or answer_file_url` });
         }
         kind = 'file';
-        file = val;
+        json = normalizedUrls;
+        file = normalizedUrls[0];
 
       } else {
         // open_text, barcode_scanner, fallback
@@ -4496,7 +4532,10 @@ function resolveAnswerDisplay(answer: any, question: any): string {
       return answer.answer_text || '—';
 
     case 'photo_upload':
-      return answer.answer_file_url ? answer.answer_file_url : '—';
+      {
+        const urls = extractPhotoUrlsFromAnswer(answer);
+        return urls.length > 0 ? urls.join('\n') : '—';
+      }
 
     case 'matrix': {
       const val = answer.answer_json;
@@ -5021,7 +5060,11 @@ router.get('/fragebogen/:id/export.xlsx', async (req: Request, res: Response) =>
       } else {
         // open_text, barcode_scanner, photo_upload
         const textSamples = questionAnswers
-          .map((a: any) => a.answer_text ?? a.answer_file_url ?? '')
+          .map((a: any) => {
+            const photoUrls = extractPhotoUrlsFromAnswer(a);
+            if (photoUrls.length > 0) return photoUrls.join(', ');
+            return a.answer_text ?? '';
+          })
           .filter(Boolean)
           .slice(0, 3)
           .join(' | ');
