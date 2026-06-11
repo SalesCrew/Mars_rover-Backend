@@ -125,7 +125,9 @@ type FragebogenPhotoItem = {
   createdAt: string;
 };
 
+const FOTOFRAGEN_RESPONSE_PAGE_SIZE = 1000;
 const FOTOFRAGEN_RESPONSE_CHUNK_SIZE = 60;
+const FOTOFRAGEN_LOOKUP_CHUNK_SIZE = 250;
 
 function chunkIds<T>(items: T[], chunkSize: number): T[][] {
   if (chunkSize <= 0) return [items];
@@ -134,6 +136,55 @@ function chunkIds<T>(items: T[], chunkSize: number): T[][] {
     chunks.push(items.slice(i, i + chunkSize));
   }
   return chunks;
+}
+
+async function fetchPagedFragebogenResponses(
+  freshClient: ReturnType<typeof createFreshClient>,
+  filters: FragebogenPhotoFilters
+): Promise<Array<{ id: string; fragebogen_id: string; gebietsleiter_id: string; market_id: string }>> {
+  const rows: Array<{ id: string; fragebogen_id: string; gebietsleiter_id: string; market_id: string }> = [];
+
+  for (let offset = 0; ; offset += FOTOFRAGEN_RESPONSE_PAGE_SIZE) {
+    let responsesQuery = freshClient
+      .from('fb_responses')
+      .select('id,fragebogen_id,gebietsleiter_id,market_id')
+      .order('started_at', { ascending: false })
+      .range(offset, offset + FOTOFRAGEN_RESPONSE_PAGE_SIZE - 1);
+
+    if (filters.fragebogenId) responsesQuery = responsesQuery.eq('fragebogen_id', filters.fragebogenId);
+    if (filters.glId) responsesQuery = responsesQuery.eq('gebietsleiter_id', filters.glId);
+    if (filters.marketId) responsesQuery = responsesQuery.eq('market_id', filters.marketId);
+
+    const { data, error } = await responsesQuery;
+    if (error) throw error;
+
+    const pageRows = (data || []) as Array<{ id: string; fragebogen_id: string; gebietsleiter_id: string; market_id: string }>;
+    rows.push(...pageRows);
+    if (pageRows.length < FOTOFRAGEN_RESPONSE_PAGE_SIZE) break;
+  }
+
+  return rows;
+}
+
+async function fetchRowsByIdChunks(
+  freshClient: ReturnType<typeof createFreshClient>,
+  table: string,
+  selectCols: string,
+  ids: string[]
+): Promise<any[]> {
+  const rows: any[] = [];
+  const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
+
+  for (const idChunk of chunkIds(uniqueIds, FOTOFRAGEN_LOOKUP_CHUNK_SIZE)) {
+    const { data, error } = await freshClient
+      .from(table)
+      .select(selectCols)
+      .in('id', idChunk);
+    if (error) throw error;
+    rows.push(...(data || []));
+  }
+
+  return rows;
 }
 
 function sanitizePhotoNameSegment(value: string): string {
@@ -204,17 +255,7 @@ async function fetchFragebogenPhotoItems(
   freshClient: ReturnType<typeof createFreshClient>,
   filters: FragebogenPhotoFilters
 ): Promise<FragebogenPhotoItem[]> {
-  let responsesQuery = freshClient
-    .from('fb_responses')
-    .select('id,fragebogen_id,gebietsleiter_id,market_id')
-    .order('started_at', { ascending: false });
-
-  if (filters.fragebogenId) responsesQuery = responsesQuery.eq('fragebogen_id', filters.fragebogenId);
-  if (filters.glId) responsesQuery = responsesQuery.eq('gebietsleiter_id', filters.glId);
-  if (filters.marketId) responsesQuery = responsesQuery.eq('market_id', filters.marketId);
-
-  const { data: responses, error: responsesError } = await responsesQuery;
-  if (responsesError) throw responsesError;
+  const responses = await fetchPagedFragebogenResponses(freshClient, filters);
   if (!responses || responses.length === 0) return [];
 
   const responseMap = new Map((responses || []).map((r: any) => [r.id, r]));
@@ -243,16 +284,16 @@ async function fetchFragebogenPhotoItems(
   const glIds = Array.from(new Set(responses.map((r: any) => r.gebietsleiter_id).filter(Boolean)));
   const marketIds = Array.from(new Set(responses.map((r: any) => r.market_id).filter(Boolean)));
 
-  const [{ data: frageboegen }, { data: users }, { data: markets }] = await Promise.all([
+  const [frageboegen, users, markets] = await Promise.all([
     fragebogenIds.length > 0
-      ? freshClient.from('fb_fragebogen').select('id,name').in('id', fragebogenIds)
-      : Promise.resolve({ data: [] as any[] }),
+      ? fetchRowsByIdChunks(freshClient, 'fb_fragebogen', 'id,name', fragebogenIds)
+      : Promise.resolve([] as any[]),
     glIds.length > 0
-      ? freshClient.from('users').select('id,first_name,last_name').in('id', glIds)
-      : Promise.resolve({ data: [] as any[] }),
+      ? fetchRowsByIdChunks(freshClient, 'users', 'id,first_name,last_name', glIds)
+      : Promise.resolve([] as any[]),
     marketIds.length > 0
-      ? freshClient.from('markets').select('id,name,chain,address,postal_code,city').in('id', marketIds)
-      : Promise.resolve({ data: [] as any[] })
+      ? fetchRowsByIdChunks(freshClient, 'markets', 'id,name,chain,address,postal_code,city', marketIds)
+      : Promise.resolve([] as any[])
   ]);
 
   const fragebogenMap = new Map((frageboegen || []).map((f: any) => [f.id, f]));
@@ -308,7 +349,8 @@ async function fetchFragebogenPhotoItems(
 }
 
 async function createZipArchiver() {
-  const archiverModule = await import('archiver');
+  // Keep ESM dynamic import at runtime even though backend compiles to CommonJS.
+  const archiverModule = await (new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<any>)('archiver');
   const ZipArchive = (archiverModule as any).ZipArchive;
   return new ZipArchive({ zlib: { level: 9 } });
 }
