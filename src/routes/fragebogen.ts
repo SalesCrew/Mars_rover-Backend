@@ -128,6 +128,9 @@ type FragebogenPhotoItem = {
 const FOTOFRAGEN_RESPONSE_PAGE_SIZE = 1000;
 const FOTOFRAGEN_RESPONSE_CHUNK_SIZE = 60;
 const FOTOFRAGEN_LOOKUP_CHUNK_SIZE = 250;
+const DISTRIBUTION_RESPONSE_PAGE_SIZE = 1000;
+const DISTRIBUTION_ANSWER_PAGE_SIZE = 1000;
+const DISTRIBUTION_LOOKUP_CHUNK_SIZE = 250;
 
 function chunkIds<T>(items: T[], chunkSize: number): T[][] {
   if (chunkSize <= 0) return [items];
@@ -182,6 +185,76 @@ async function fetchRowsByIdChunks(
       .in('id', idChunk);
     if (error) throw error;
     rows.push(...(data || []));
+  }
+
+  return rows;
+}
+
+type DistributionResponseRow = {
+  id: string;
+  fragebogen_id: string;
+  market_id: string;
+  gebietsleiter_id: string;
+  status: string;
+  completed_at: string | null;
+};
+
+type DistributionAnswerRow = {
+  response_id: string;
+  question_id: string;
+  answer_boolean: boolean | null;
+  answered_at: string | null;
+};
+
+async function fetchPagedDistributionResponses(
+  freshClient: ReturnType<typeof createFreshClient>,
+  fragebogenIds: string[]
+): Promise<DistributionResponseRow[]> {
+  const rows: DistributionResponseRow[] = [];
+
+  for (const fragebogenChunk of chunkIds(fragebogenIds, DISTRIBUTION_LOOKUP_CHUNK_SIZE)) {
+    for (let offset = 0; ; offset += DISTRIBUTION_RESPONSE_PAGE_SIZE) {
+      const { data, error } = await freshClient
+        .from('fb_responses')
+        .select('id,fragebogen_id,market_id,gebietsleiter_id,status,completed_at')
+        .in('fragebogen_id', fragebogenChunk)
+        .eq('status', 'completed')
+        .order('completed_at', { ascending: false })
+        .range(offset, offset + DISTRIBUTION_RESPONSE_PAGE_SIZE - 1);
+      if (error) throw error;
+
+      const pageRows = (data || []) as DistributionResponseRow[];
+      rows.push(...pageRows);
+      if (pageRows.length < DISTRIBUTION_RESPONSE_PAGE_SIZE) break;
+    }
+  }
+
+  return rows;
+}
+
+async function fetchPagedDistributionAnswers(
+  freshClient: ReturnType<typeof createFreshClient>,
+  responseIds: string[],
+  questionIds: string[]
+): Promise<DistributionAnswerRow[]> {
+  const rows: DistributionAnswerRow[] = [];
+
+  for (const responseChunk of chunkIds(responseIds, DISTRIBUTION_LOOKUP_CHUNK_SIZE)) {
+    for (const questionChunk of chunkIds(questionIds, DISTRIBUTION_LOOKUP_CHUNK_SIZE)) {
+      for (let offset = 0; ; offset += DISTRIBUTION_ANSWER_PAGE_SIZE) {
+        const { data, error } = await freshClient
+          .from('fb_response_answers')
+          .select('response_id,question_id,answer_boolean,answered_at')
+          .in('response_id', responseChunk)
+          .in('question_id', questionChunk)
+          .range(offset, offset + DISTRIBUTION_ANSWER_PAGE_SIZE - 1);
+        if (error) throw error;
+
+        const pageRows = (data || []) as DistributionAnswerRow[];
+        rows.push(...pageRows.filter((a) => a.answer_boolean !== null));
+        if (pageRows.length < DISTRIBUTION_ANSWER_PAGE_SIZE) break;
+      }
+    }
   }
 
   return rows;
@@ -5160,20 +5233,12 @@ router.post('/fragebogen/distribution-export.xlsx', async (req: Request, res: Re
 
     const freshClient = createFreshClient();
 
-    const { data: fragebogenRows, error: fbError } = await freshClient
-      .from('fb_fragebogen')
-      .select('id,name')
-      .in('id', fragebogenIds);
-    if (fbError) throw fbError;
+    const fragebogenRows = await fetchRowsByIdChunks(freshClient, 'fb_fragebogen', 'id,name', fragebogenIds);
     if (!fragebogenRows || fragebogenRows.length === 0) {
       return res.status(400).json({ error: 'Keine gültigen Fragebögen gefunden.' });
     }
 
-    const { data: questionRows, error: qError } = await freshClient
-      .from('fb_questions')
-      .select('id,question_text,type')
-      .in('id', questionIds);
-    if (qError) throw qError;
+    const questionRows = await fetchRowsByIdChunks(freshClient, 'fb_questions', 'id,question_text,type', questionIds);
     if (!questionRows || questionRows.length !== questionIds.length) {
       return res.status(400).json({ error: 'Mindestens eine ausgewählte Frage wurde nicht gefunden.' });
     }
@@ -5183,27 +5248,20 @@ router.post('/fragebogen/distribution-export.xlsx', async (req: Request, res: Re
       return res.status(400).json({ error: `Nur Ja/Nein-Fragen erlaubt: ${invalidQuestion.question_text}` });
     }
 
-    const { data: responses, error: rError } = await freshClient
-      .from('fb_responses')
-      .select('id,fragebogen_id,market_id,gebietsleiter_id,status,completed_at')
-      .in('fragebogen_id', fragebogenIds)
-      .eq('status', 'completed');
-    if (rError) throw rError;
+    const responses = await fetchPagedDistributionResponses(freshClient, fragebogenIds);
 
     const completedResponses = (responses || []).filter((r: any) => r.market_id && r.completed_at);
-    const responseIds = completedResponses.map((r: any) => r.id);
     const marketIds = Array.from(new Set(completedResponses.map((r: any) => r.market_id).filter(Boolean)));
     const glIds = Array.from(new Set(completedResponses.map((r: any) => r.gebietsleiter_id).filter(Boolean)));
 
-    const { data: marketRows, error: mError } = marketIds.length > 0
-      ? await freshClient.from('markets').select('id,name,chain').in('id', marketIds)
-      : { data: [], error: null as any };
-    if (mError) throw mError;
-
-    const { data: glRows, error: glError } = glIds.length > 0
-      ? await freshClient.from('users').select('id,first_name,last_name').in('id', glIds)
-      : { data: [], error: null as any };
-    if (glError) throw glError;
+    const [marketRows, glRows] = await Promise.all([
+      marketIds.length > 0
+        ? fetchRowsByIdChunks(freshClient, 'markets', 'id,name,chain', marketIds)
+        : Promise.resolve([] as any[]),
+      glIds.length > 0
+        ? fetchRowsByIdChunks(freshClient, 'users', 'id,first_name,last_name', glIds)
+        : Promise.resolve([] as any[])
+    ]);
 
     const marketById = new Map((marketRows || []).map((m: any) => [m.id, m]));
     const glById = new Map((glRows || []).map((u: any) => [u.id, `${u.first_name || ''} ${u.last_name || ''}`.trim() || 'Unbekannt']));
@@ -5218,23 +5276,12 @@ router.post('/fragebogen/distribution-export.xlsx', async (req: Request, res: Re
       })
       .map((r: any) => r.id);
 
-    const answers: any[] = [];
-    const BATCH = 500;
-    for (let i = 0; i < allowedResponseIds.length; i += BATCH) {
-      const chunkIds = allowedResponseIds.slice(i, i + BATCH);
-      if (chunkIds.length === 0) continue;
-      const { data: answerRows, error: aError } = await freshClient
-        .from('fb_response_answers')
-        .select('response_id,question_id,answer_boolean,answered_at')
-        .in('response_id', chunkIds)
-        .in('question_id', questionIds);
-      if (aError) throw aError;
-      answers.push(...(answerRows || []).filter((a: any) => a.answer_boolean !== null));
-    }
+    const answers = await fetchPagedDistributionAnswers(freshClient, allowedResponseIds, questionIds);
+    const allowedResponseIdSet = new Set(allowedResponseIds);
 
     const responseById = new Map(
       completedResponses
-        .filter((r: any) => allowedResponseIds.includes(r.id))
+        .filter((r: any) => allowedResponseIdSet.has(r.id))
         .map((r: any) => [r.id, r])
     );
 
