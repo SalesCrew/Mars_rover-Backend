@@ -260,23 +260,12 @@ async function fetchPagedDistributionAnswers(
   return rows;
 }
 
-function sanitizePhotoNameSegment(value: string): string {
+function sanitizePhotoNameSegment(value: string, maxLength: number = 80): string {
   return String(value || '')
     .trim()
     .replace(/[^a-zA-Z0-9äöüÄÖÜß\-_. ]/g, '_')
     .replace(/\s+/g, ' ')
-    .slice(0, 80);
-}
-
-function formatPhotoTimestamp(value: string | null | undefined): string {
-  const date = value ? new Date(value) : new Date();
-  if (Number.isNaN(date.getTime())) return 'unknown-time';
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  const hh = String(date.getHours()).padStart(2, '0');
-  const mm = String(date.getMinutes()).padStart(2, '0');
-  return `${y}-${m}-${d}_${hh}-${mm}`;
+    .slice(0, maxLength);
 }
 
 function inferPhotoExtension(photoUrl: string, contentType?: string | null): string {
@@ -316,12 +305,27 @@ function extractPhotoUrlsFromAnswer(answer: any): string[] {
 }
 
 function buildFragebogenPhotoFileName(photo: FragebogenPhotoItem, sequence: number, extension: string): string {
-  const glPart = sanitizePhotoNameSegment(photo.glName || 'Unbekannt');
-  const marketPart = sanitizePhotoNameSegment(photo.marketName || photo.marketAddressLine || 'Unbekannt');
-  const fragebogenPart = sanitizePhotoNameSegment(photo.fragebogenName || 'Fragebogen');
-  const timestampPart = formatPhotoTimestamp(photo.createdAt);
   const safeExt = sanitizePhotoNameSegment(extension || 'jpg') || 'jpg';
-  return `${glPart}__${marketPart}__${fragebogenPart}__${timestampPart}__${sequence}.${safeExt}`;
+  const baseName = buildFragebogenPhotoBaseName(photo);
+  const sequencePart = sequence > 1 ? `_${sequence}` : '';
+  return `${baseName}${sequencePart}.${safeExt}`;
+}
+
+function buildFragebogenPhotoBaseName(photo: FragebogenPhotoItem): string {
+  const glPart = getPhotoGlNameSegment(photo.glName);
+  const marketPart = sanitizePhotoNameSegment(photo.marketName || photo.marketAddressLine || 'Unbekannt', 45);
+  const postalCodePart = sanitizePhotoNameSegment(photo.marketPostalCode || '', 12);
+  const streetPart = sanitizePhotoNameSegment(photo.marketAddressLine || photo.marketAddress || '', 45);
+
+  return [glPart, marketPart, postalCodePart, streetPart]
+    .filter(Boolean)
+    .join('_') || 'Foto';
+}
+
+function getPhotoGlNameSegment(glName: string): string {
+  const parts = String(glName || '').trim().split(/\s+/).filter(Boolean);
+  const lastName = parts.length > 1 ? parts[parts.length - 1] : parts[0];
+  return sanitizePhotoNameSegment(lastName || 'Unbekannt', 32);
 }
 
 async function fetchFragebogenPhotoItems(
@@ -691,7 +695,7 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
         const fileBuffer = Buffer.from(await imageResponse.arrayBuffer());
         if (fileBuffer.length === 0) continue;
 
-        const baseKey = `${photo.glName}|${photo.marketAddressLine}|${photo.marketPostalCode}|${photo.marketCity}|${formatPhotoTimestamp(photo.createdAt)}`;
+        const baseKey = buildFragebogenPhotoBaseName(photo);
         const sequence = (duplicateCounts[baseKey] || 0) + 1;
         duplicateCounts[baseKey] = sequence;
 

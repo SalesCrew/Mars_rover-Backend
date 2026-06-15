@@ -1741,23 +1741,12 @@ function parsePhotoTagFilter(tagsValue: unknown, singleTagValue: unknown): strin
   return single ? [single] : [];
 }
 
-function sanitizePhotoExportSegment(value: string): string {
+function sanitizePhotoExportSegment(value: string, maxLength: number = 80): string {
   return String(value || '')
     .trim()
     .replace(/[^a-zA-Z0-9äöüÄÖÜß\-_. ]/g, '_')
     .replace(/\s+/g, ' ')
-    .slice(0, 80);
-}
-
-function formatPhotoExportTimestamp(value: string | null | undefined): string {
-  const date = value ? new Date(value) : new Date();
-  if (Number.isNaN(date.getTime())) return 'unknown-time';
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  const hh = String(date.getHours()).padStart(2, '0');
-  const mm = String(date.getMinutes()).padStart(2, '0');
-  return `${y}-${m}-${d}_${hh}-${mm}`;
+    .slice(0, maxLength);
 }
 
 function inferPhotoExportExtension(photoUrl: string, contentType?: string | null): string {
@@ -1818,23 +1807,27 @@ async function fetchPhotoForExport(
 }
 
 function buildAdminPhotoExportFileName(photo: AdminPhotoRow, sequence: number, extension: string): string {
-  const timestamp = formatPhotoExportTimestamp(photo.createdAt);
   const safeExt = sanitizePhotoExportSegment(extension || 'jpg') || 'jpg';
+  const baseName = buildAdminPhotoExportBaseName(photo);
+  const sequencePart = sequence > 1 ? `_${sequence}` : '';
+  return `${baseName}${sequencePart}.${safeExt}`;
+}
 
-  if (photo.source === 'fotofragen') {
-    const glPart = sanitizePhotoExportSegment(photo.glName || 'Unbekannt');
-    const marketPart = sanitizePhotoExportSegment(photo.marketName || photo.marketAddressLine || 'Unbekannt');
-    const fragebogenPart = sanitizePhotoExportSegment(photo.fragebogenName || 'Fragebogen');
-    return `${glPart}__${marketPart}__${fragebogenPart}__${timestamp}__${sequence}.${safeExt}`;
-  }
+function buildAdminPhotoExportBaseName(photo: AdminPhotoRow): string {
+  const glPart = getAdminPhotoGlNameSegment(photo.glName);
+  const marketPart = sanitizePhotoExportSegment(photo.marketName || photo.marketAddressLine || 'Unbekannt', 45);
+  const postalCodePart = sanitizePhotoExportSegment(photo.marketPostalCode || '', 12);
+  const streetPart = sanitizePhotoExportSegment(photo.marketAddressLine || photo.marketAddress || '', 45);
 
-  const chainPart = sanitizePhotoExportSegment(photo.marketChain || '');
-  const marketPart = sanitizePhotoExportSegment(photo.marketName || 'Markt');
-  const addressPart = sanitizePhotoExportSegment(photo.marketAddressLine || photo.marketAddress || '');
-  return [chainPart, marketPart, addressPart, timestamp, String(sequence)]
+  return [glPart, marketPart, postalCodePart, streetPart]
     .filter(Boolean)
-    .join('__')
-    .concat(`.${safeExt}`);
+    .join('_') || 'Foto';
+}
+
+function getAdminPhotoGlNameSegment(glName: string): string {
+  const parts = String(glName || '').trim().split(/\s+/).filter(Boolean);
+  const lastName = parts.length > 1 ? parts[parts.length - 1] : parts[0];
+  return sanitizePhotoExportSegment(lastName || 'Unbekannt', 32);
 }
 
 function hasAllTags(photoTags: string[] | null | undefined, selectedTags: string[]): boolean {
@@ -2212,7 +2205,7 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
 
         const extension = inferPhotoExportExtension(photo.photoUrl, downloaded.contentType);
 
-        const duplicateKey = `${photo.source}|${photo.glName}|${photo.marketAddressLine}|${photo.marketPostalCode}|${photo.marketCity}|${formatPhotoExportTimestamp(photo.createdAt)}`;
+        const duplicateKey = `${photo.source}|${buildAdminPhotoExportBaseName(photo)}`;
         const sequence = (duplicateCounts[duplicateKey] || 0) + 1;
         duplicateCounts[duplicateKey] = sequence;
 
