@@ -1724,6 +1724,8 @@ type AdminPhotoRow = {
 };
 
 const FOTOFRAGEN_RESPONSE_CHUNK_SIZE = 60;
+const ADMIN_PHOTO_PAGE_SIZE = 1000;
+const ADMIN_PHOTO_LOOKUP_CHUNK_SIZE = 250;
 
 function parseAdminPhotoSource(value: unknown): 'all' | AdminPhotoSource {
   const source = String(value || '').trim().toLowerCase();
@@ -1841,51 +1843,92 @@ async function createZipArchiver() {
   // Keep ESM dynamic import at runtime even though backend compiles to CommonJS.
   const archiverModule = await (new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<any>)('archiver');
   const ZipArchive = (archiverModule as any).ZipArchive;
-  return new ZipArchive({ zlib: { level: 9 } });
+  return new ZipArchive({ zlib: { level: 0 } });
+}
+
+async function fetchAdminRowsByIdChunks(
+  freshClient: ReturnType<typeof createFreshClient>,
+  table: string,
+  selectCols: string,
+  ids: string[]
+): Promise<any[]> {
+  const rows: any[] = [];
+  const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
+
+  for (const idChunk of chunkArray(uniqueIds, ADMIN_PHOTO_LOOKUP_CHUNK_SIZE)) {
+    const { data, error } = await freshClient
+      .from(table)
+      .select(selectCols)
+      .in('id', idChunk);
+    if (error) throw error;
+    rows.push(...(data || []));
+  }
+
+  return rows;
+}
+
+async function fetchPagedWellenPhotoRows(
+  freshClient: ReturnType<typeof createFreshClient>,
+  filters: AdminPhotoFilters
+): Promise<any[]> {
+  const rows: any[] = [];
+
+  for (let offset = 0; ; offset += ADMIN_PHOTO_PAGE_SIZE) {
+    let query = freshClient
+      .from('wellen_photos')
+      .select('id, welle_id, gebietsleiter_id, market_id, photo_url, tags, comment, created_at')
+      .order('created_at', { ascending: false })
+      .range(offset, offset + ADMIN_PHOTO_PAGE_SIZE - 1);
+
+    if (filters.welleId) query = query.eq('welle_id', filters.welleId);
+    if (filters.glId) query = query.eq('gebietsleiter_id', filters.glId);
+    if (filters.marketId) query = query.eq('market_id', filters.marketId);
+    if (filters.tags.length > 0) query = query.contains('tags', filters.tags);
+    if (filters.startDate) query = query.gte('created_at', `${filters.startDate}T00:00:00`);
+    if (filters.endDate) query = query.lte('created_at', `${filters.endDate}T23:59:59`);
+
+    if (!filters.welleId && !filters.startDate && !filters.endDate) {
+      const sixMonthsAgo = new Date();
+      sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+      query = query.gte('created_at', sixMonthsAgo.toISOString());
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const pageRows = data || [];
+    rows.push(...pageRows);
+    if (pageRows.length < ADMIN_PHOTO_PAGE_SIZE) break;
+  }
+
+  return rows;
 }
 
 async function fetchWellenPhotoRowsForAdmin(
   freshClient: ReturnType<typeof createFreshClient>,
   filters: AdminPhotoFilters
 ): Promise<AdminPhotoRow[]> {
-  let query = freshClient
-    .from('wellen_photos')
-    .select('id, welle_id, gebietsleiter_id, market_id, photo_url, tags, comment, created_at')
-    .order('created_at', { ascending: false });
-
-  if (filters.welleId) query = query.eq('welle_id', filters.welleId);
-  if (filters.glId) query = query.eq('gebietsleiter_id', filters.glId);
-  if (filters.marketId) query = query.eq('market_id', filters.marketId);
-  if (filters.tags.length > 0) query = query.contains('tags', filters.tags);
-  if (filters.startDate) query = query.gte('created_at', `${filters.startDate}T00:00:00`);
-  if (filters.endDate) query = query.lte('created_at', `${filters.endDate}T23:59:59`);
-
-  const sixMonthsAgo = new Date();
-  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-  query = query.gte('created_at', sixMonthsAgo.toISOString());
-
-  const { data, error } = await query;
-  if (error) throw error;
+  const data = await fetchPagedWellenPhotoRows(freshClient, filters);
 
   const welleIds = Array.from(new Set((data || []).map((p: any) => p.welle_id).filter(Boolean)));
   const glIds = Array.from(new Set((data || []).map((p: any) => p.gebietsleiter_id).filter(Boolean)));
   const marketIds = Array.from(new Set((data || []).map((p: any) => p.market_id).filter(Boolean)));
 
-  const [wellenDataResult, glDataResult, marketDataResult] = await Promise.all([
+  const [wellenData, glData, marketData] = await Promise.all([
     welleIds.length > 0
-      ? freshClient.from('wellen').select('id,name').in('id', welleIds)
-      : Promise.resolve({ data: [] as any[] }),
+      ? fetchAdminRowsByIdChunks(freshClient, 'wellen', 'id,name', welleIds)
+      : Promise.resolve([] as any[]),
     glIds.length > 0
-      ? freshClient.from('gebietsleiter').select('id,name').in('id', glIds)
-      : Promise.resolve({ data: [] as any[] }),
+      ? fetchAdminRowsByIdChunks(freshClient, 'gebietsleiter', 'id,name', glIds)
+      : Promise.resolve([] as any[]),
     marketIds.length > 0
-      ? freshClient.from('markets').select('id,name,chain,address,city,postal_code').in('id', marketIds)
-      : Promise.resolve({ data: [] as any[] })
+      ? fetchAdminRowsByIdChunks(freshClient, 'markets', 'id,name,chain,address,city,postal_code', marketIds)
+      : Promise.resolve([] as any[])
   ]);
 
-  const welleMap = new Map((wellenDataResult.data || []).map((w: any) => [w.id, w.name]));
-  const glMap = new Map((glDataResult.data || []).map((g: any) => [g.id, g.name]));
-  const marketMap = new Map((marketDataResult.data || []).map((m: any) => [m.id, m]));
+  const welleMap = new Map((wellenData || []).map((w: any) => [w.id, w.name]));
+  const glMap = new Map((glData || []).map((g: any) => [g.id, g.name]));
+  const marketMap = new Map((marketData || []).map((m: any) => [m.id, m]));
 
   return (data || []).map((photo: any) => {
     const market = marketMap.get(photo.market_id) || {};
