@@ -3354,6 +3354,18 @@ router.patch('/zeiterfassung/:id', async (req: Request, res: Response) => {
     } = req.body;
 
     const updateData: Record<string, any> = {};
+    const timeFields = [
+      ['besuchszeit_von', besuchszeit_von],
+      ['besuchszeit_bis', besuchszeit_bis],
+      ['fahrzeit_von', fahrzeit_von],
+      ['fahrzeit_bis', fahrzeit_bis]
+    ] as const;
+
+    for (const [fieldName, fieldValue] of timeFields) {
+      if (fieldValue !== undefined && fieldValue !== null && fieldValue !== '' && !isValidTimeInput(fieldValue)) {
+        return res.status(400).json({ error: `Invalid time format for ${fieldName}` });
+      }
+    }
 
     if (besuchszeit_von !== undefined) updateData.besuchszeit_von = besuchszeit_von || null;
     if (besuchszeit_bis !== undefined) updateData.besuchszeit_bis = besuchszeit_bis || null;
@@ -4036,6 +4048,29 @@ const calculateTimeDiff = (startTime: string, endTime: string): { interval: stri
     interval: `${hours}:${minutes.toString().padStart(2, '0')}:00`,
     minutes: diffMinutes
   };
+};
+
+const isValidTimeInput = (value: unknown): boolean => {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  const match = trimmed.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return false;
+
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const seconds = match[3] !== undefined ? Number(match[3]) : 0;
+
+  return (
+    Number.isInteger(hours) &&
+    Number.isInteger(minutes) &&
+    Number.isInteger(seconds) &&
+    hours >= 0 &&
+    hours <= 23 &&
+    minutes >= 0 &&
+    minutes <= 59 &&
+    seconds >= 0 &&
+    seconds <= 59
+  );
 };
 
 // Helper: Get current time as HH:MM string
