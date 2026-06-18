@@ -5,6 +5,176 @@ import { aggregateSubmissions } from './wellen';
 
 const router = Router();
 
+const DASHBOARD_SUBMISSIONS_PAGE_SIZE = 1000;
+const DASHBOARD_ID_CHUNK_SIZE = 400;
+
+type DashboardSubmissionRow = {
+  id: string;
+  welle_id: string;
+  gebietsleiter_id: string;
+  item_type: string;
+  item_id: string;
+  quantity: number | null;
+  value_per_unit: number | null;
+};
+
+type AggregatedDashboardSubmission = ReturnType<typeof aggregateSubmissions>[number];
+
+const toNumber = (value: any): number => {
+  const parsed = typeof value === 'number' ? value : parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const chunkArray = <T,>(items: T[], chunkSize: number): T[][] => {
+  if (chunkSize <= 0) return [items];
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    chunks.push(items.slice(i, i + chunkSize));
+  }
+  return chunks;
+};
+
+async function fetchDashboardSubmissions(
+  client: ReturnType<typeof createFreshClient>,
+  valueWelleIds: string[],
+  yearStart: string,
+  gebietsleiterId?: string
+): Promise<DashboardSubmissionRow[]> {
+  const rows: DashboardSubmissionRow[] = [];
+  const uniqueWelleIds = [...new Set(valueWelleIds.filter(Boolean))];
+  if (uniqueWelleIds.length === 0) return rows;
+
+  for (const welleChunk of chunkArray(uniqueWelleIds, DASHBOARD_ID_CHUNK_SIZE)) {
+    for (let from = 0; ; from += DASHBOARD_SUBMISSIONS_PAGE_SIZE) {
+      let query = client
+        .from('wellen_submissions')
+        .select('id, welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
+        .in('welle_id', welleChunk)
+        .gte('created_at', yearStart)
+        .order('id', { ascending: true })
+        .range(from, from + DASHBOARD_SUBMISSIONS_PAGE_SIZE - 1);
+
+      if (gebietsleiterId) {
+        query = query.eq('gebietsleiter_id', gebietsleiterId);
+      }
+
+      const { data, error } = await query;
+      if (error) throw error;
+
+      const page = (data || []) as DashboardSubmissionRow[];
+      rows.push(...page);
+      if (page.length < DASHBOARD_SUBMISSIONS_PAGE_SIZE) break;
+    }
+  }
+
+  return rows;
+}
+
+async function fetchValueWelleIds(client: ReturnType<typeof createFreshClient>): Promise<string[]> {
+  const ids: string[] = [];
+
+  for (let from = 0; ; from += DASHBOARD_SUBMISSIONS_PAGE_SIZE) {
+    const { data, error } = await client
+      .from('wellen')
+      .select('id')
+      .eq('goal_type', 'value')
+      .order('id', { ascending: true })
+      .range(from, from + DASHBOARD_SUBMISSIONS_PAGE_SIZE - 1);
+
+    if (error) throw error;
+
+    const page = (data || []) as Array<{ id: string }>;
+    ids.push(...page.map(w => w.id).filter(Boolean));
+    if (page.length < DASHBOARD_SUBMISSIONS_PAGE_SIZE) break;
+  }
+
+  return ids;
+}
+
+async function fetchValueMap(
+  client: ReturnType<typeof createFreshClient>,
+  table: string,
+  ids: string[],
+  valueColumn: string
+): Promise<Map<string, number>> {
+  const valueMap = new Map<string, number>();
+  const uniqueIds = [...new Set(ids.filter(Boolean))];
+  if (uniqueIds.length === 0) return valueMap;
+
+  for (const idChunk of chunkArray(uniqueIds, DASHBOARD_ID_CHUNK_SIZE)) {
+    const { data, error } = await client
+      .from(table)
+      .select(`id, ${valueColumn}`)
+      .in('id', idChunk);
+
+    if (error) throw error;
+
+    for (const row of ((data || []) as Array<Record<string, any>>)) {
+      valueMap.set(row.id, toNumber(row[valueColumn]));
+    }
+  }
+
+  return valueMap;
+}
+
+async function calculateDashboardRevenue(
+  client: ReturnType<typeof createFreshClient>,
+  progress: AggregatedDashboardSubmission[]
+): Promise<number> {
+  if (progress.length === 0) return 0;
+
+  const idsByType = new Map<string, string[]>();
+  for (const item of progress) {
+    if (!item.item_id) continue;
+    const ids = idsByType.get(item.item_type) || [];
+    ids.push(item.item_id);
+    idsByType.set(item.item_type, ids);
+  }
+
+  const [
+    displayValues,
+    kartonwareValues,
+    waveEinzelproduktValues,
+    masterProductValues,
+    paletteProductValues,
+    schuetteProductValues
+  ] = await Promise.all([
+    fetchValueMap(client, 'wellen_displays', idsByType.get('display') || [], 'item_value'),
+    fetchValueMap(client, 'wellen_kartonware', idsByType.get('kartonware') || [], 'item_value'),
+    fetchValueMap(client, 'wellen_einzelprodukte', idsByType.get('einzelprodukt') || [], 'item_value'),
+    fetchValueMap(client, 'products', idsByType.get('einzelprodukt') || [], 'price'),
+    fetchValueMap(client, 'wellen_paletten_products', idsByType.get('palette') || [], 'value_per_ve'),
+    fetchValueMap(client, 'wellen_schuetten_products', idsByType.get('schuette') || [], 'value_per_ve')
+  ]);
+
+  const valueForSubmission = (item: AggregatedDashboardSubmission): number => {
+    if (item.item_type === 'display') {
+      return displayValues.get(item.item_id) ?? toNumber(item.value_per_unit);
+    }
+    if (item.item_type === 'kartonware') {
+      return kartonwareValues.get(item.item_id) ?? toNumber(item.value_per_unit);
+    }
+    if (item.item_type === 'einzelprodukt') {
+      return waveEinzelproduktValues.get(item.item_id)
+        ?? masterProductValues.get(item.item_id)
+        ?? toNumber(item.value_per_unit);
+    }
+    if (item.item_type === 'palette') {
+      return toNumber(item.value_per_unit) || paletteProductValues.get(item.item_id) || 0;
+    }
+    if (item.item_type === 'schuette') {
+      return toNumber(item.value_per_unit) || schuetteProductValues.get(item.item_id) || 0;
+    }
+
+    // Future value-bearing submission types should still count when they store a unit value.
+    return toNumber(item.value_per_unit);
+  };
+
+  return progress.reduce((sum, item) => {
+    return sum + valueForSubmission(item) * (item.current_number || 0);
+  }, 0);
+}
+
 /**
  * GET /api/gebietsleiter
  * Get all active gebietsleiter
@@ -393,107 +563,22 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
     const yearStart = new Date(currentYear, 0, 1).toISOString();
 
     // 1. Get value-based wellen IDs only
-    const { data: valueBasedWellen } = await freshClient
-      .from('wellen')
-      .select('id')
-      .eq('goal_type', 'value');
-    const valueWelleIds = valueBasedWellen?.map(w => w.id) || [];
+    const valueWelleIds = await fetchValueWelleIds(freshClient);
 
     // 2. Get GL's total vorbesteller value YTD (only from value-based waves)
-    let glYearTotal = 0;
-    
-    if (valueWelleIds.length > 0) {
-      const { data: rawGlSubs } = await freshClient
-        .from('wellen_submissions')
-        .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
-        .eq('gebietsleiter_id', id)
-        .in('welle_id', valueWelleIds)
-        .gte('created_at', yearStart);
-
-      const glProgress = aggregateSubmissions(rawGlSubs || []);
-      if (glProgress.length > 0) {
-        // Get item values for each type
-        const displayIds = [...new Set(glProgress.filter(p => p.item_type === 'display').map(p => p.item_id))];
-        const kartonwareIds = [...new Set(glProgress.filter(p => p.item_type === 'kartonware').map(p => p.item_id))];
-        const einzelproduktIds = [...new Set(glProgress.filter(p => p.item_type === 'einzelprodukt').map(p => p.item_id))];
-
-        const [displaysResult, kartonwareResult, einzelprodukteResult] = await Promise.all([
-          displayIds.length > 0 ? freshClient.from('wellen_displays').select('id, item_value').in('id', displayIds) : { data: [] },
-          kartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, item_value').in('id', kartonwareIds) : { data: [] },
-          einzelproduktIds.length > 0 ? freshClient.from('wellen_einzelprodukte').select('id, item_value').in('id', einzelproduktIds) : { data: [] }
-        ]);
-
-        const displays = displaysResult.data || [];
-        const kartonware = kartonwareResult.data || [];
-        const einzelprodukte = einzelprodukteResult.data || [];
-
-        glProgress.forEach(p => {
-          if (p.item_type === 'display') {
-            const item = displays.find(d => d.id === p.item_id);
-            if (item) glYearTotal += (item.item_value || 0) * (p.current_number || 0);
-          } else if (p.item_type === 'kartonware') {
-            const item = kartonware.find(k => k.id === p.item_id);
-            if (item) glYearTotal += (item.item_value || 0) * (p.current_number || 0);
-          } else if (p.item_type === 'einzelprodukt') {
-            const item = einzelprodukte.find(e => e.id === p.item_id);
-            if (item) glYearTotal += (item.item_value || 0) * (p.current_number || 0);
-          } else if (p.item_type === 'palette' || p.item_type === 'schuette') {
-            // For palette/schuette, use stored value_per_unit
-            glYearTotal += (p.value_per_unit || 0) * (p.current_number || 0);
-          }
-        });
-      }
-    }
+    const rawGlSubs = await fetchDashboardSubmissions(freshClient, valueWelleIds, yearStart, id);
+    const glProgress = aggregateSubmissions(rawGlSubs);
+    const glYearTotal = await calculateDashboardRevenue(freshClient, glProgress);
 
     // 3. Get agency average (all real GLs' total from value-based waves only - exclude test GLs)
     const { data: allGLs } = await freshClient.from('gebietsleiter').select('id').neq('is_active', false).neq('is_test', true);
     const glCount = allGLs?.length || 1;
     const realGLIds = new Set((allGLs || []).map((g: any) => g.id));
 
-    let agencyTotal = 0;
-    
-    if (valueWelleIds.length > 0) {
-      const { data: rawAllSubs } = await freshClient
-        .from('wellen_submissions')
-        .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
-        .in('welle_id', valueWelleIds)
-        .gte('created_at', yearStart);
-
-      const allProgress = aggregateSubmissions(rawAllSubs || []);
-      if (allProgress.length > 0) {
-        // Filter out test GL contributions from agency total
-        const realProgress = allProgress.filter(p => realGLIds.has(p.gebietsleiter_id));
-        
-        const allDisplayIds = [...new Set(realProgress.filter(p => p.item_type === 'display').map(p => p.item_id))];
-        const allKartonwareIds = [...new Set(realProgress.filter(p => p.item_type === 'kartonware').map(p => p.item_id))];
-        const allEinzelproduktIds = [...new Set(realProgress.filter(p => p.item_type === 'einzelprodukt').map(p => p.item_id))];
-
-        const [displaysResult, kartonwareResult, einzelprodukteResult] = await Promise.all([
-          allDisplayIds.length > 0 ? freshClient.from('wellen_displays').select('id, item_value').in('id', allDisplayIds) : { data: [] },
-          allKartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, item_value').in('id', allKartonwareIds) : { data: [] },
-          allEinzelproduktIds.length > 0 ? freshClient.from('wellen_einzelprodukte').select('id, item_value').in('id', allEinzelproduktIds) : { data: [] }
-        ]);
-
-        const displays = displaysResult.data || [];
-        const kartonware = kartonwareResult.data || [];
-        const einzelprodukte = einzelprodukteResult.data || [];
-
-        realProgress.forEach(p => {
-          if (p.item_type === 'display') {
-            const item = displays.find(d => d.id === p.item_id);
-            if (item) agencyTotal += (item.item_value || 0) * (p.current_number || 0);
-          } else if (p.item_type === 'kartonware') {
-            const item = kartonware.find(k => k.id === p.item_id);
-            if (item) agencyTotal += (item.item_value || 0) * (p.current_number || 0);
-          } else if (p.item_type === 'einzelprodukt') {
-            const item = einzelprodukte.find(e => e.id === p.item_id);
-            if (item) agencyTotal += (item.item_value || 0) * (p.current_number || 0);
-          } else if (p.item_type === 'palette' || p.item_type === 'schuette') {
-            agencyTotal += (p.value_per_unit || 0) * (p.current_number || 0);
-          }
-        });
-      }
-    }
+    const rawAllSubs = await fetchDashboardSubmissions(freshClient, valueWelleIds, yearStart);
+    const allProgress = aggregateSubmissions(rawAllSubs);
+    const realProgress = allProgress.filter(p => realGLIds.has(p.gebietsleiter_id));
+    const agencyTotal = await calculateDashboardRevenue(freshClient, realProgress);
 
     const agencyAverage = glCount > 0 ? agencyTotal / glCount : 0;
     const percentageChange = agencyAverage > 0 ? ((glYearTotal - agencyAverage) / agencyAverage) * 100 : 0;
