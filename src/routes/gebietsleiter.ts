@@ -6,7 +6,7 @@ import { aggregateSubmissions } from './wellen';
 const router = Router();
 
 const DASHBOARD_SUBMISSIONS_PAGE_SIZE = 1000;
-const DASHBOARD_ID_CHUNK_SIZE = 400;
+const DASHBOARD_ID_CHUNK_SIZE = 50;
 
 type DashboardSubmissionRow = {
   id: string;
@@ -41,30 +41,27 @@ async function fetchDashboardSubmissions(
   gebietsleiterId?: string
 ): Promise<DashboardSubmissionRow[]> {
   const rows: DashboardSubmissionRow[] = [];
-  const uniqueWelleIds = [...new Set(valueWelleIds.filter(Boolean))];
-  if (uniqueWelleIds.length === 0) return rows;
+  const valueWelleIdSet = new Set(valueWelleIds.filter(Boolean));
+  if (valueWelleIdSet.size === 0) return rows;
 
-  for (const welleChunk of chunkArray(uniqueWelleIds, DASHBOARD_ID_CHUNK_SIZE)) {
-    for (let from = 0; ; from += DASHBOARD_SUBMISSIONS_PAGE_SIZE) {
-      let query = client
-        .from('wellen_submissions')
-        .select('id, welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
-        .in('welle_id', welleChunk)
-        .gte('created_at', yearStart)
-        .order('id', { ascending: true })
-        .range(from, from + DASHBOARD_SUBMISSIONS_PAGE_SIZE - 1);
+  for (let from = 0; ; from += DASHBOARD_SUBMISSIONS_PAGE_SIZE) {
+    let query = client
+      .from('wellen_submissions')
+      .select('id, welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
+      .gte('created_at', yearStart)
+      .order('id', { ascending: true })
+      .range(from, from + DASHBOARD_SUBMISSIONS_PAGE_SIZE - 1);
 
-      if (gebietsleiterId) {
-        query = query.eq('gebietsleiter_id', gebietsleiterId);
-      }
-
-      const { data, error } = await query;
-      if (error) throw error;
-
-      const page = (data || []) as DashboardSubmissionRow[];
-      rows.push(...page);
-      if (page.length < DASHBOARD_SUBMISSIONS_PAGE_SIZE) break;
+    if (gebietsleiterId) {
+      query = query.eq('gebietsleiter_id', gebietsleiterId);
     }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const page = (data || []) as DashboardSubmissionRow[];
+    rows.push(...page.filter(row => valueWelleIdSet.has(row.welle_id)));
+    if (page.length < DASHBOARD_SUBMISSIONS_PAGE_SIZE) break;
   }
 
   return rows;
