@@ -1469,7 +1469,10 @@ router.get('/', async (req: Request, res: Response) => {
           .select('*')
           .eq('welle_id', welle.id)
           .order('palette_order', { ascending: true });
-        console.log(`🎨 Fetched palettes for welle ${welle.id}:`, paletten?.length || 0, 'error:', palError?.message || 'none');
+        console.log(`Fetched palettes for welle ${welle.id}:`, paletten?.length || 0);
+        if (palError) {
+          console.error(`Palette fetch failed for welle ${welle.id}:`, palError.message);
+        }
 
         // Fetch palette products for each palette
         const palettenWithProducts = await Promise.all(
@@ -1493,7 +1496,10 @@ router.get('/', async (req: Request, res: Response) => {
           .select('*')
           .eq('welle_id', welle.id)
           .order('schuette_order', { ascending: true });
-        console.log(`📦 Fetched schuetten for welle ${welle.id}:`, schuetten?.length || 0, 'error:', schError?.message || 'none');
+        console.log(`Fetched schuetten for welle ${welle.id}:`, schuetten?.length || 0);
+        if (schError) {
+          console.error(`Schuetten fetch failed for welle ${welle.id}:`, schError.message);
+        }
 
         // Fetch schütte products for each schütte
         const schuettenWithProducts = await Promise.all(
