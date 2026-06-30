@@ -954,6 +954,7 @@ function Assert-SupabaseObjectCoverage {
     'gl-profile-pictures',
     'question-images',
     'vorbesteller-lieferung',
+    'vorverkauf-wellen',
     'wellen-images',
     'wellen-photos'
   )
@@ -1470,6 +1471,7 @@ function Assert-SignedStorageUrlsUseReviewedBuckets {
     'fragebogen-response-images',
     'gl-profile-pictures',
     'vorbesteller-lieferung',
+    'vorverkauf-wellen',
     'wellen-images',
     'wellen-photos'
   )
@@ -1593,6 +1595,7 @@ function Assert-StorageMutationsUseReviewedBuckets {
     'gl-profile-pictures',
     'question-images',
     'vorbesteller-lieferung',
+    'vorverkauf-wellen',
     'wellen-images',
     'wellen-photos'
   )
@@ -1702,7 +1705,7 @@ function Assert-DocsCoverReviewedStorageBuckets {
     [string]$VerifierSqlPath
   )
 
-  $bucketRegex = "'(bug-screenshots|fragebogen-response-images|gl-profile-pictures|question-images|vorbesteller-lieferung|wellen-images|wellen-photos)'"
+  $bucketRegex = "'(bug-screenshots|fragebogen-response-images|gl-profile-pictures|question-images|vorbesteller-lieferung|vorverkauf-wellen|wellen-images|wellen-photos)'"
   $readmeText = Get-Content -Raw $ReadmePath
   $hardeningText = Get-Content -Raw $HardeningSqlPath
   $verifierText = Get-Content -Raw $VerifierSqlPath
@@ -1944,7 +1947,7 @@ function Assert-RlsVerifierCoversHardeningViewsFunctionsAndBuckets {
     }
   }
 
-  $bucketRegex = "'(bug-screenshots|fragebogen-response-images|gl-profile-pictures|question-images|vorbesteller-lieferung|wellen-images|wellen-photos)'"
+  $bucketRegex = "'(bug-screenshots|fragebogen-response-images|gl-profile-pictures|question-images|vorbesteller-lieferung|vorverkauf-wellen|wellen-images|wellen-photos)'"
   $hardeningBuckets = [regex]::Matches($hardeningText, $bucketRegex, 'IgnoreCase') |
     ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
   $verifierBuckets = [regex]::Matches($verifierText, $bucketRegex, 'IgnoreCase') |
@@ -2394,6 +2397,7 @@ function Assert-HardeningSqlDmlIsReviewedStorageBucketMetadataOnly {
     'fragebogen-response-images' = 'false'
     'gl-profile-pictures' = 'false'
     'vorbesteller-lieferung' = 'false'
+    'vorverkauf-wellen' = 'false'
     'wellen-photos' = 'false'
     'question-images' = 'true'
     'wellen-images' = 'true'
@@ -2901,6 +2905,7 @@ try {
       "'fragebogen-response-images'",
       "'gl-profile-pictures'",
       "'vorbesteller-lieferung'",
+      "'vorverkauf-wellen'",
       "'wellen-photos'",
       "'question-images'",
       "'wellen-images'"

@@ -934,6 +934,7 @@ with expected_reviewed_storage_buckets(bucket_id) as (
     ('fragebogen-response-images'),
     ('gl-profile-pictures'),
     ('vorbesteller-lieferung'),
+    ('vorverkauf-wellen'),
     ('wellen-photos'),
     ('question-images'),
     ('wellen-images')
@@ -957,7 +958,7 @@ select
   case
     when bool_and(
       case
-        when id in ('bug-screenshots', 'fragebogen-response-images', 'gl-profile-pictures', 'vorbesteller-lieferung', 'wellen-photos') then public is false
+        when id in ('bug-screenshots', 'fragebogen-response-images', 'gl-profile-pictures', 'vorbesteller-lieferung', 'vorverkauf-wellen', 'wellen-photos') then public is false
         when id in ('question-images', 'wellen-images') then public is true
         else true
       end
@@ -969,7 +970,7 @@ select
     '[]'::json
   ) as bucket_flags
 from storage.buckets
-where id in ('bug-screenshots', 'fragebogen-response-images', 'gl-profile-pictures', 'vorbesteller-lieferung', 'wellen-photos', 'question-images', 'wellen-images');
+where id in ('bug-screenshots', 'fragebogen-response-images', 'gl-profile-pictures', 'vorbesteller-lieferung', 'vorverkauf-wellen', 'wellen-photos', 'question-images', 'wellen-images');
 
 select
   'storage_objects_rls_enabled' as check_name,

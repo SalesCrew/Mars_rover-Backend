@@ -32,6 +32,7 @@ Current Supabase changelog review for this hardening pass: checked on 2026-06-30
   - `fragebogen-response-images`
   - `gl-profile-pictures`
   - `vorbesteller-lieferung`
+  - `vorverkauf-wellen`
   - `wellen-photos`
 - Intentionally leaves `wellen-images` public because current UI paths still use public URLs for wave/admin image assets, and leaves `question-images` public because Fragebogen question images are admin-managed UI assets returned as public URLs. New Wellen/Fotowelle evidence photo uploads use the private `wellen-photos` bucket and backend signed URLs; legacy evidence photo paths in `wellen-images` are still signed/read for backward compatibility. New GL profile-picture uploads use the private `gl-profile-pictures` bucket and backend signed URLs. The upload route can create that bucket as private if it is missing; this SQL still verifies and locks the bucket privacy flag during the controlled database hardening step.
 - Redacts private image storage fields from custom Excel exports. Evidence/profile images should be viewed through authenticated backend signed URLs, not distributed as raw Storage object paths in spreadsheets.
@@ -154,7 +155,7 @@ order by tablename, policyname;
 
 select id, public
 from storage.buckets
-where id in ('bug-screenshots', 'fragebogen-response-images', 'gl-profile-pictures', 'vorbesteller-lieferung', 'wellen-photos', 'question-images', 'wellen-images')
+where id in ('bug-screenshots', 'fragebogen-response-images', 'gl-profile-pictures', 'vorbesteller-lieferung', 'vorverkauf-wellen', 'wellen-photos', 'question-images', 'wellen-images')
 order by id;
 ```
 
@@ -183,7 +184,7 @@ order by tablename, policyname;
 
 select id, public
 from storage.buckets
-where id in ('bug-screenshots', 'fragebogen-response-images', 'gl-profile-pictures', 'vorbesteller-lieferung', 'wellen-photos', 'question-images', 'wellen-images')
+where id in ('bug-screenshots', 'fragebogen-response-images', 'gl-profile-pictures', 'vorbesteller-lieferung', 'vorverkauf-wellen', 'wellen-photos', 'question-images', 'wellen-images')
 order by id;
 ```
 

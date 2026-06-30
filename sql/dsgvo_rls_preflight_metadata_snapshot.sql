@@ -98,6 +98,7 @@ with expected_reviewed_storage_buckets(bucket_id, expected_public) as (
     ('fragebogen-response-images', false),
     ('gl-profile-pictures', false),
     ('vorbesteller-lieferung', false),
+    ('vorverkauf-wellen', false),
     ('wellen-photos', false),
     ('question-images', true),
     ('wellen-images', true)

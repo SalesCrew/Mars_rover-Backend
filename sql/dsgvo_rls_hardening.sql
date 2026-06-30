@@ -8,7 +8,7 @@
 --   intended row model and provide defense-in-depth if direct grants are reintroduced.
 -- - Through the Express API/UI, GL users intentionally retain read access to all markets;
 --   market master data is treated as non-sensitive for this app.
--- - bug-screenshots, fragebogen-response-images, gl-profile-pictures, vorbesteller-lieferung, and wellen-photos are made
+-- - bug-screenshots, fragebogen-response-images, gl-profile-pictures, vorbesteller-lieferung, vorverkauf-wellen, and wellen-photos are made
 --   private here. Do not flip wellen-images to private until those UI/API paths are also
 --   migrated to signed URLs.
 
@@ -536,6 +536,7 @@ values
   ('fragebogen-response-images', 'fragebogen-response-images', false),
   ('gl-profile-pictures', 'gl-profile-pictures', false),
   ('vorbesteller-lieferung', 'vorbesteller-lieferung', false),
+  ('vorverkauf-wellen', 'vorverkauf-wellen', false),
   ('wellen-photos', 'wellen-photos', false),
   ('question-images', 'question-images', true),
   ('wellen-images', 'wellen-images', true)
