@@ -1,12 +1,18 @@
 import express, { Router, Request, Response } from 'express';
 import ExcelJS from 'exceljs';
 import { createFreshClient } from '../config/supabase';
+import { AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
+import { sendInternalError } from '../utils/httpErrors';
 
 const router: Router = express.Router();
+const sanitizeLoggedPath = (value: string): string =>
+  value
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi, ':uuid')
+    .replace(/\/\d{6,}(?=\/|$)/g, '/:number');
 
 // Request logging
 router.use((req, res, next) => {
-  console.log(`📋 Fragebogen Route: ${req.method} ${req.path}`);
+  console.log(`📋 Fragebogen Route: ${req.method} ${sanitizeLoggedPath(req.path)}`);
   next();
 });
 
@@ -120,17 +126,35 @@ type FragebogenPhotoItem = {
   marketCity: string;
   marketAddress: string;
   photoUrl: string;
+  photoPath?: string;
   tags: string[];
   comment: string | null;
   createdAt: string;
 };
 
+const FRAGEBOGEN_RESPONSE_IMAGES_BUCKET = 'fragebogen-response-images';
+const FRAGEBOGEN_RESPONSE_PHOTO_SIGNED_URL_SECONDS = 60 * 60;
+const FRAGEBOGEN_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const FRAGEBOGEN_ALLOWED_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const FOTOFRAGEN_RESPONSE_PAGE_SIZE = 1000;
 const FOTOFRAGEN_RESPONSE_CHUNK_SIZE = 60;
 const FOTOFRAGEN_LOOKUP_CHUNK_SIZE = 250;
 const DISTRIBUTION_RESPONSE_PAGE_SIZE = 1000;
 const DISTRIBUTION_ANSWER_PAGE_SIZE = 1000;
 const DISTRIBUTION_LOOKUP_CHUNK_SIZE = 250;
+const FB_QUESTION_SELECT = 'id, type, question_text, instruction, is_template, options, likert_scale, matrix_config, numeric_constraints, slider_config, images, archived, is_deleted, deleted_at, created_by, created_at, updated_at';
+const FB_MODULE_SELECT = 'id, name, description, archived, is_deleted, deleted_at, created_by, created_at, updated_at';
+const FB_MODULE_RULE_SELECT = 'id, module_id, trigger_local_id, trigger_answer, operator, trigger_answer_max, action, target_local_ids, created_at, updated_at';
+const FB_FRAGEBOGEN_SELECT = 'id, name, description, start_date, end_date, status, archived, is_deleted, deleted_at, created_by, created_at, updated_at';
+const FB_RESPONSE_SELECT = 'id, fragebogen_id, gebietsleiter_id, market_id, zeiterfassung_submission_id, status, started_at, completed_at, created_at, updated_at';
+const FB_DAY_TRACKING_SELECT = 'id, gebietsleiter_id, tracking_date, day_start_time, day_end_time, skipped_first_fahrzeit, km_stand_start, km_stand_end, total_fahrzeit, total_besuchszeit, total_unterbrechung, total_arbeitszeit, markets_visited, status, created_at, updated_at';
+const FB_ZEITERFASSUNG_SELECT = 'id, gebietsleiter_id, market_id, market_start_time, market_end_time, besuchszeit_von, besuchszeit_bis, besuchszeit_diff, fahrzeit_von, fahrzeit_bis, fahrzeit_diff, calculated_fahrzeit, visit_order, kommentar, created_at, updated_at';
+const FB_ZUSATZ_ZEITERFASSUNG_SELECT = 'id, gebietsleiter_id, market_id, entry_date, reason, reason_label, zeit_von, zeit_bis, zeit_diff, kommentar, schulung_ort, is_work_time_deduction, created_at, updated_at';
+const WELLEN_SUBMISSION_FRAGEBOGEN_SELECT = 'id, welle_id, gebietsleiter_id, market_id, item_type, item_id, quantity, value_per_unit, photo_url, created_at, wellen:welle_id ( goal_type )';
+const VORVERKAUF_ENTRY_FRAGEBOGEN_SELECT = 'id, gebietsleiter_id, market_id, reason, notes, status, created_at';
+const FB_QUESTIONS_USAGE_SELECT = 'id, type, question_text, is_template, archived, created_at, module_usage_count, answer_count';
+const FB_MODULES_OVERVIEW_SELECT = 'id, name, description, archived, created_at, updated_at, question_count, rules_count, fragebogen_usage_count';
+const FB_FRAGEBOGEN_OVERVIEW_SELECT = 'id, name, description, start_date, end_date, status, archived, created_at, updated_at, module_count, market_count, response_count, completed_response_count';
 
 function chunkIds<T>(items: T[], chunkSize: number): T[][] {
   if (chunkSize <= 0) return [items];
@@ -287,6 +311,53 @@ function inferPhotoExtension(photoUrl: string, contentType?: string | null): str
   return 'jpg';
 }
 
+function extractStoragePathFromValue(value: string, bucketName: string): string | null {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return null;
+
+  const marker = `/${bucketName}/`;
+  const markerIndex = trimmed.indexOf(marker);
+  if (markerIndex >= 0) {
+    return decodeURIComponent(trimmed.slice(markerIndex + marker.length).split('?')[0]);
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return null;
+  }
+
+  return trimmed.replace(/^\/+/, '');
+}
+
+async function createSignedFragebogenPhotoUrl(
+  freshClient: ReturnType<typeof createFreshClient>,
+  value: string
+): Promise<{ url: string; path?: string }> {
+  const photoPath = extractStoragePathFromValue(value, FRAGEBOGEN_RESPONSE_IMAGES_BUCKET);
+  if (!photoPath) {
+    return { url: value };
+  }
+
+  const { data, error } = await freshClient.storage
+    .from(FRAGEBOGEN_RESPONSE_IMAGES_BUCKET)
+    .createSignedUrl(photoPath, FRAGEBOGEN_RESPONSE_PHOTO_SIGNED_URL_SECONDS);
+
+  if (error || !data?.signedUrl) {
+    console.warn('Could not sign Fragebogen response photo URL');
+    return { url: value, path: photoPath };
+  }
+
+  return { url: data.signedUrl, path: photoPath };
+}
+
+function extractFragebogenPhotoResponseId(photoPath: string): string | null {
+  const parts = String(photoPath || '').split('/').filter(Boolean);
+  const responseIndex = parts.findIndex((part) => part === 'response');
+  if (responseIndex < 0 || responseIndex + 1 >= parts.length) {
+    return null;
+  }
+  return parts[responseIndex + 1] || null;
+}
+
 function extractPhotoUrlsFromAnswer(answer: any): string[] {
   const urlsFromJson = Array.isArray(answer?.answer_json)
     ? answer.answer_json
@@ -409,6 +480,7 @@ async function fetchFragebogenPhotoItems(
         marketCity,
         marketAddress,
         photoUrl,
+        photoPath: extractStoragePathFromValue(photoUrl, FRAGEBOGEN_RESPONSE_IMAGES_BUCKET) || undefined,
         tags: [],
         comment: null,
         createdAt: answer.answered_at || ''
@@ -422,7 +494,14 @@ async function fetchFragebogenPhotoItems(
     return tB - tA;
   });
 
-  return rows;
+  return Promise.all(rows.map(async (row) => {
+    const signed = await createSignedFragebogenPhotoUrl(freshClient, row.photoUrl);
+    return {
+      ...row,
+      photoUrl: signed.url,
+      photoPath: signed.path || row.photoPath
+    };
+  }));
 }
 
 async function createZipArchiver() {
@@ -440,7 +519,7 @@ async function createZipArchiver() {
  * POST /api/fragebogen/questions/upload-image
  * Upload an image for a question to Supabase storage
  */
-router.post('/questions/upload-image', async (req: Request, res: Response) => {
+router.post('/questions/upload-image', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { image, filename } = req.body;
     if (!image) return res.status(400).json({ error: 'No image provided' });
@@ -451,8 +530,15 @@ router.post('/questions/upload-image', async (req: Request, res: Response) => {
       const matches = image.match(/^data:([^;]+);base64,(.+)$/);
       if (matches) { contentType = matches[1]; base64Data = matches[2]; }
     }
+    contentType = String(contentType || '').toLowerCase().trim();
+    if (!FRAGEBOGEN_ALLOWED_IMAGE_MIME_TYPES.has(contentType)) {
+      return res.status(400).json({ error: 'Unsupported image type' });
+    }
 
     const buffer = Buffer.from(base64Data, 'base64');
+    if (!buffer.length || buffer.length > FRAGEBOGEN_IMAGE_MAX_BYTES) {
+      return res.status(400).json({ error: 'Image is empty or too large' });
+    }
     const ext = contentType.split('/')[1] || 'jpg';
     const finalFilename = filename || `${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
     const filePath = `questions/${finalFilename}`;
@@ -462,14 +548,14 @@ router.post('/questions/upload-image', async (req: Request, res: Response) => {
       .from('question-images')
       .upload(filePath, buffer, { contentType, upsert: true });
 
-    if (error) { console.error('❌ Question image upload error:', error); return res.status(500).json({ error: error.message }); }
+    if (error) { console.error('Question image upload error'); return sendInternalError(res); }
 
     const { data: urlData } = storageClient.storage.from('question-images').getPublicUrl(data.path);
-    console.log('✅ Question image uploaded:', urlData.publicUrl);
+    console.log('Question image uploaded');
     res.json({ success: true, url: urlData.publicUrl });
   } catch (error: any) {
-    console.error('Error uploading question image:', error);
-    res.status(500).json({ error: error.message || 'Failed to upload image' });
+    console.error('Error uploading question image');
+    sendInternalError(res);
   }
 });
 
@@ -477,7 +563,7 @@ router.post('/questions/upload-image', async (req: Request, res: Response) => {
  * POST /api/fragebogen/responses/upload-photo
  * Upload a GL response photo for a photo_upload question
  */
-router.post('/responses/upload-photo', async (req: Request, res: Response) => {
+router.post('/responses/upload-photo', async (req: AuthRequest, res: Response) => {
   try {
     const {
       image,
@@ -488,11 +574,12 @@ router.post('/responses/upload-photo', async (req: Request, res: Response) => {
       question_id,
       filename
     } = req.body || {};
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
 
     if (!image || typeof image !== 'string') {
       return res.status(400).json({ error: 'image (base64) is required' });
     }
-    if (!fragebogen_id || !market_id || !gebietsleiter_id || !response_id || !question_id) {
+    if (!fragebogen_id || !market_id || !effectiveGlId || !response_id || !question_id) {
       return res.status(400).json({
         error: 'fragebogen_id, market_id, gebietsleiter_id, response_id, and question_id are required'
       });
@@ -512,7 +599,7 @@ router.post('/responses/upload-photo', async (req: Request, res: Response) => {
     }
     if (
       responseRow.fragebogen_id !== fragebogen_id ||
-      responseRow.gebietsleiter_id !== gebietsleiter_id ||
+      responseRow.gebietsleiter_id !== effectiveGlId ||
       responseRow.market_id !== market_id
     ) {
       return res.status(400).json({ error: 'response_id does not match provided fragebogen/market/gebietsleiter context' });
@@ -542,8 +629,9 @@ router.post('/responses/upload-photo', async (req: Request, res: Response) => {
       contentType = matches[1] || contentType;
       base64Data = matches[2];
     }
+    contentType = String(contentType || '').toLowerCase().trim();
 
-    if (!contentType.startsWith('image/')) {
+    if (!FRAGEBOGEN_ALLOWED_IMAGE_MIME_TYPES.has(contentType)) {
       return res.status(400).json({ error: 'Only image uploads are allowed' });
     }
 
@@ -560,7 +648,7 @@ router.post('/responses/upload-photo', async (req: Request, res: Response) => {
     const rand = Math.random().toString(36).slice(2, 8);
     const safeFragebogenId = sanitizeSegment(fragebogen_id);
     const safeMarketId = sanitizeSegment(market_id);
-    const safeGebietsleiterId = sanitizeSegment(gebietsleiter_id);
+    const safeGebietsleiterId = sanitizeSegment(effectiveGlId);
     const safeResponseId = sanitizeSegment(response_id);
     const safeQuestionId = sanitizeSegment(question_id);
 
@@ -569,35 +657,80 @@ router.post('/responses/upload-photo', async (req: Request, res: Response) => {
       `/response/${safeResponseId}/question/${safeQuestionId}/${now}_${rand}.${ext}`;
 
     const buffer = Buffer.from(base64Data, 'base64');
-    if (!buffer || buffer.length === 0) {
+    if (!buffer || buffer.length === 0 || buffer.length > FRAGEBOGEN_IMAGE_MAX_BYTES) {
       return res.status(400).json({ error: 'Invalid image payload' });
     }
 
     const { error: uploadError } = await freshClient.storage
-      .from('fragebogen-response-images')
+      .from(FRAGEBOGEN_RESPONSE_IMAGES_BUCKET)
       .upload(filePath, buffer, {
         contentType,
         cacheControl: '3600',
         upsert: false
       });
     if (uploadError) {
-      console.error('Error uploading response photo:', uploadError);
-      return res.status(500).json({ error: uploadError.message || 'Failed to upload response photo' });
+      console.error('Error uploading response photo');
+      return sendInternalError(res);
     }
 
-    const { data: urlData } = freshClient.storage
-      .from('fragebogen-response-images')
-      .getPublicUrl(filePath);
+    const signedPhoto = await createSignedFragebogenPhotoUrl(freshClient, filePath);
 
     res.status(201).json({
-      url: urlData.publicUrl,
+      url: filePath,
       path: filePath,
+      preview_url: signedPhoto.url,
       content_type: contentType,
       size: buffer.length
     });
   } catch (error: any) {
-    console.error('Error in response photo upload:', error);
-    res.status(500).json({ error: error.message || 'Failed to upload response photo' });
+    console.error('Error in response photo upload');
+    sendInternalError(res);
+  }
+});
+
+/**
+ * POST /api/fragebogen/responses/photo-url
+ * Resolve a stored response photo path to a short-lived signed URL.
+ */
+router.post('/responses/photo-url', async (req: AuthRequest, res: Response) => {
+  try {
+    const { value } = req.body || {};
+    if (!value || typeof value !== 'string') {
+      return res.status(400).json({ error: 'value is required' });
+    }
+
+    const photoPath = extractStoragePathFromValue(value, FRAGEBOGEN_RESPONSE_IMAGES_BUCKET);
+    if (!photoPath) {
+      return res.json({ url: value });
+    }
+
+    const responseId = extractFragebogenPhotoResponseId(photoPath);
+    if (!responseId) {
+      return res.status(400).json({ error: 'Invalid photo path' });
+    }
+
+    const freshClient = createFreshClient();
+    if (req.user?.role !== 'admin') {
+      const { data: responseRow, error: responseError } = await freshClient
+        .from('fb_responses')
+        .select('id, gebietsleiter_id')
+        .eq('id', responseId)
+        .maybeSingle();
+
+      if (responseError) throw responseError;
+      if (!responseRow) {
+        return res.status(404).json({ error: 'Response not found' });
+      }
+      if (String(responseRow.gebietsleiter_id || '') !== getAuthenticatedGlId(req.user)) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+    }
+
+    const signed = await createSignedFragebogenPhotoUrl(freshClient, photoPath);
+    res.json({ url: signed.url, path: signed.path || photoPath });
+  } catch (error: any) {
+    console.error('Error signing response photo URL');
+    sendInternalError(res);
   }
 });
 
@@ -605,7 +738,7 @@ router.post('/responses/upload-photo', async (req: Request, res: Response) => {
  * GET /api/fragebogen/photos
  * Admin listing endpoint for Fotoantworten aus Fotofragen.
  */
-router.get('/photos', async (req: Request, res: Response) => {
+router.get('/photos', requireAdmin, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const {
@@ -632,8 +765,8 @@ router.get('/photos', async (req: Request, res: Response) => {
     const photos = allPhotos.slice(offset, offset + limit);
     res.json({ photos, total: allPhotos.length });
   } catch (error: any) {
-    console.error('Error fetching Fotofragen photos:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch Fotofragen photos' });
+    console.error('Error fetching Fotofragen photos');
+    sendInternalError(res);
   }
 });
 
@@ -641,7 +774,7 @@ router.get('/photos', async (req: Request, res: Response) => {
  * GET /api/fragebogen/photos/export.zip
  * Admin ZIP export endpoint for Fotoantworten.
  */
-router.get('/photos/export.zip', async (req: Request, res: Response) => {
+router.get('/photos/export.zip', requireAdmin, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { fragebogen_id, gl_id, market_id, start_date, end_date, zip_name } = req.query;
@@ -667,10 +800,10 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
 
     const archive = await createZipArchiver();
     archive.on('warning', (warning: unknown) => {
-      console.warn('Fotofragen ZIP warning:', warning);
+      console.warn('Fotofragen ZIP warning');
     });
     archive.on('error', (archiveError: unknown) => {
-      console.error('Fotofragen ZIP error:', archiveError);
+      console.error('Fotofragen ZIP error');
       if (!res.headersSent) {
         res.status(500).json({ error: 'ZIP konnte nicht erstellt werden.' });
       } else {
@@ -703,7 +836,7 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
         archive.append(fileBuffer, { name: `Fotofragen/${fileName}` });
         appendedFiles += 1;
       } catch (photoError: any) {
-        console.warn(`Skipping Fotofragen photo ${photo.id}:`, photoError?.message || photoError);
+        console.warn('Skipping Fotofragen photo during export');
       }
     }
 
@@ -715,9 +848,9 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
 
     await archive.finalize();
   } catch (error: any) {
-    console.error('Error exporting Fotofragen photos ZIP:', error);
+    console.error('Error exporting Fotofragen photos ZIP');
     if (!res.headersSent) {
-      res.status(500).json({ error: error.message || 'Fotofragen ZIP-Export fehlgeschlagen' });
+      sendInternalError(res);
     }
   }
 });
@@ -733,7 +866,7 @@ router.get('/questions', async (req: Request, res: Response) => {
     
     let query = freshClient
       .from('fb_questions')
-      .select('*')
+      .select(FB_QUESTION_SELECT)
       .order('created_at', { ascending: false });
     
     // Apply filters
@@ -762,8 +895,8 @@ router.get('/questions', async (req: Request, res: Response) => {
     
     res.json(data);
   } catch (error: any) {
-    console.error('Error fetching questions:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch questions' });
+    console.error('Error fetching questions:');
+    sendInternalError(res);
   }
 });
 
@@ -778,7 +911,7 @@ router.get('/questions/:id', async (req: Request, res: Response) => {
     
     const { data, error } = await freshClient
       .from('fb_questions')
-      .select('*')
+      .select(FB_QUESTION_SELECT)
       .eq('id', id)
       .single();
     
@@ -790,8 +923,8 @@ router.get('/questions/:id', async (req: Request, res: Response) => {
     
     res.json(data);
   } catch (error: any) {
-    console.error('Error fetching question:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch question' });
+    console.error('Error fetching question:');
+    sendInternalError(res);
   }
 });
 
@@ -799,7 +932,7 @@ router.get('/questions/:id', async (req: Request, res: Response) => {
  * POST /api/fragebogen/questions
  * Create a new question. Ensures options and matrix entries have stable IDs.
  */
-router.post('/questions', async (req: Request, res: Response) => {
+router.post('/questions', requireAdmin, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const {
@@ -875,7 +1008,7 @@ router.post('/questions', async (req: Request, res: Response) => {
         images: req.body.images || [],
         created_by: created_by || null
       })
-      .select()
+      .select(FB_QUESTION_SELECT)
       .single();
     
     if (error) throw error;
@@ -883,8 +1016,8 @@ router.post('/questions', async (req: Request, res: Response) => {
     console.log(`✅ Created question: ${data.id}`);
     res.status(201).json(data);
   } catch (error: any) {
-    console.error('Error creating question:', error);
-    res.status(500).json({ error: error.message || 'Failed to create question' });
+    console.error('Error creating question:');
+    sendInternalError(res);
   }
 });
 
@@ -893,7 +1026,7 @@ router.post('/questions', async (req: Request, res: Response) => {
  * Update an existing question. Preserves existing option/matrix IDs; assigns new
  * stable IDs to any item that arrives without one.
  */
-router.put('/questions/:id', async (req: Request, res: Response) => {
+router.put('/questions/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -932,7 +1065,7 @@ router.put('/questions/:id', async (req: Request, res: Response) => {
       .from('fb_questions')
       .update(updates)
       .eq('id', id)
-      .select()
+      .select(FB_QUESTION_SELECT)
       .single();
     
     if (error) throw error;
@@ -944,8 +1077,8 @@ router.put('/questions/:id', async (req: Request, res: Response) => {
     console.log(`✅ Updated question: ${id}`);
     res.json(data);
   } catch (error: any) {
-    console.error('Error updating question:', error);
-    res.status(500).json({ error: error.message || 'Failed to update question' });
+    console.error('Error updating question:');
+    sendInternalError(res);
   }
 });
 
@@ -953,7 +1086,7 @@ router.put('/questions/:id', async (req: Request, res: Response) => {
  * DELETE /api/fragebogen/questions/:id
  * Soft delete (archive) a question
  */
-router.delete('/questions/:id', async (req: Request, res: Response) => {
+router.delete('/questions/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -963,7 +1096,7 @@ router.delete('/questions/:id', async (req: Request, res: Response) => {
       .from('fb_questions')
       .update({ archived: true, is_deleted: true, deleted_at: nowIso })
       .eq('id', id)
-      .select()
+      .select(FB_QUESTION_SELECT)
       .single();
     
     if (error) throw error;
@@ -975,8 +1108,8 @@ router.delete('/questions/:id', async (req: Request, res: Response) => {
     console.log(`✅ Archived question: ${id}`);
     res.json({ success: true, data });
   } catch (error: any) {
-    console.error('Error archiving question:', error);
-    res.status(500).json({ error: error.message || 'Failed to archive question' });
+    console.error('Error archiving question:');
+    sendInternalError(res);
   }
 });
 
@@ -984,7 +1117,7 @@ router.delete('/questions/:id', async (req: Request, res: Response) => {
  * GET /api/fragebogen/questions/stats/:id
  * Get usage statistics for a question
  */
-router.get('/questions/stats/:id', async (req: Request, res: Response) => {
+router.get('/questions/stats/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -992,7 +1125,7 @@ router.get('/questions/stats/:id', async (req: Request, res: Response) => {
     // Get question with usage stats from view
     const { data, error } = await freshClient
       .from('fb_questions_usage')
-      .select('*')
+      .select(FB_QUESTIONS_USAGE_SELECT)
       .eq('id', id)
       .single();
     
@@ -1004,8 +1137,8 @@ router.get('/questions/stats/:id', async (req: Request, res: Response) => {
     
     res.json(data);
   } catch (error: any) {
-    console.error('Error fetching question stats:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch question stats' });
+    console.error('Error fetching question stats:');
+    sendInternalError(res);
   }
 });
 
@@ -1015,7 +1148,7 @@ router.get('/questions/stats/:id', async (req: Request, res: Response) => {
  * Used for copy-on-write logic - if a question is used by multiple modules,
  * editing it should create a new question instead of modifying the shared one
  */
-router.get('/questions/:id/module-count', async (req: Request, res: Response) => {
+router.get('/questions/:id/module-count', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -1023,15 +1156,15 @@ router.get('/questions/:id/module-count', async (req: Request, res: Response) =>
     // Count how many modules use this question
     const { count, error } = await freshClient
       .from('fb_module_questions')
-      .select('*', { count: 'exact', head: true })
+      .select('id', { count: 'exact', head: true })
       .eq('question_id', id);
     
     if (error) throw error;
     
     res.json({ questionId: id, moduleCount: count || 0 });
   } catch (error: any) {
-    console.error('Error fetching question module count:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch question module count' });
+    console.error('Error fetching question module count:');
+    sendInternalError(res);
   }
 });
 
@@ -1050,7 +1183,7 @@ router.get('/modules', async (req: Request, res: Response) => {
     
     let query = freshClient
       .from('fb_modules_overview')
-      .select('*')
+      .select(FB_MODULES_OVERVIEW_SELECT)
       .order('created_at', { ascending: false });
     
     if (archived !== undefined) {
@@ -1069,8 +1202,8 @@ router.get('/modules', async (req: Request, res: Response) => {
     
     res.json(data);
   } catch (error: any) {
-    console.error('Error fetching modules:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch modules' });
+    console.error('Error fetching modules:');
+    sendInternalError(res);
   }
 });
 
@@ -1086,7 +1219,7 @@ router.get('/modules/:id', async (req: Request, res: Response) => {
     // Get module
     const { data: module, error: moduleError } = await freshClient
       .from('fb_modules')
-      .select('*')
+      .select(FB_MODULE_SELECT)
       .eq('id', id)
       .single();
     
@@ -1104,7 +1237,7 @@ router.get('/modules/:id', async (req: Request, res: Response) => {
         order_index,
         required,
         local_id,
-        question:fb_questions (*)
+        question:fb_questions (${FB_QUESTION_SELECT})
       `)
       .eq('module_id', id)
       .order('order_index', { ascending: true });
@@ -1114,7 +1247,7 @@ router.get('/modules/:id', async (req: Request, res: Response) => {
     // Get rules
     const { data: rules, error: rulesError } = await freshClient
       .from('fb_module_rules')
-      .select('*')
+      .select(FB_MODULE_RULE_SELECT)
       .eq('module_id', id);
     
     if (rulesError) throw rulesError;
@@ -1125,8 +1258,8 @@ router.get('/modules/:id', async (req: Request, res: Response) => {
       rules: rules || []
     });
   } catch (error: any) {
-    console.error('Error fetching module:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch module' });
+    console.error('Error fetching module:');
+    sendInternalError(res);
   }
 });
 
@@ -1255,7 +1388,7 @@ const detectRuleConflict = (rules: any[]): string | null => {
   return null;
 };
 
-router.post('/modules', async (req: Request, res: Response) => {
+router.post('/modules', requireAdmin, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { name, description, questions, rules, created_by } = req.body;
@@ -1277,7 +1410,7 @@ router.post('/modules', async (req: Request, res: Response) => {
         description: description || null,
         created_by: created_by || null
       })
-      .select()
+      .select(FB_MODULE_SELECT)
       .single();
     
     if (moduleError) throw moduleError;
@@ -1321,8 +1454,8 @@ router.post('/modules', async (req: Request, res: Response) => {
     console.log(`✅ Created module: ${module.id}`);
     res.status(201).json(module);
   } catch (error: any) {
-    console.error('Error creating module:', error);
-    res.status(500).json({ error: error.message || 'Failed to create module' });
+    console.error('Error creating module:');
+    sendInternalError(res);
   }
 });
 
@@ -1330,7 +1463,7 @@ router.post('/modules', async (req: Request, res: Response) => {
  * PUT /api/fragebogen/modules/:id
  * Update a module, its questions, and rules
  */
-router.put('/modules/:id', async (req: Request, res: Response) => {
+router.put('/modules/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -1416,7 +1549,7 @@ router.put('/modules/:id', async (req: Request, res: Response) => {
     // Fetch updated module
     const { data: updatedModule, error: fetchError } = await freshClient
       .from('fb_modules')
-      .select('*')
+      .select(FB_MODULE_SELECT)
       .eq('id', id)
       .single();
     
@@ -1425,8 +1558,8 @@ router.put('/modules/:id', async (req: Request, res: Response) => {
     console.log(`✅ Updated module: ${id}`);
     res.json(updatedModule);
   } catch (error: any) {
-    console.error('Error updating module:', error);
-    res.status(500).json({ error: error.message || 'Failed to update module' });
+    console.error('Error updating module:');
+    sendInternalError(res);
   }
 });
 
@@ -1434,7 +1567,7 @@ router.put('/modules/:id', async (req: Request, res: Response) => {
  * POST /api/fragebogen/modules/:id/duplicate
  * Duplicate a module
  */
-router.post('/modules/:id/duplicate', async (req: Request, res: Response) => {
+router.post('/modules/:id/duplicate', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -1443,7 +1576,7 @@ router.post('/modules/:id/duplicate', async (req: Request, res: Response) => {
     // Get original module
     const { data: original, error: fetchError } = await freshClient
       .from('fb_modules')
-      .select('*')
+      .select(FB_MODULE_SELECT)
       .eq('id', id)
       .single();
     
@@ -1461,7 +1594,7 @@ router.post('/modules/:id/duplicate', async (req: Request, res: Response) => {
         description: original.description,
         created_by: original.created_by
       })
-      .select()
+      .select(FB_MODULE_SELECT)
       .single();
     
     if (createError) throw createError;
@@ -1469,7 +1602,7 @@ router.post('/modules/:id/duplicate', async (req: Request, res: Response) => {
     // Get original questions
     const { data: originalQuestions, error: questionsError } = await freshClient
       .from('fb_module_questions')
-      .select('*')
+      .select('id, module_id, question_id, order_index, required, local_id')
       .eq('module_id', id);
     
     if (questionsError) throw questionsError;
@@ -1494,7 +1627,7 @@ router.post('/modules/:id/duplicate', async (req: Request, res: Response) => {
     // Get original rules
     const { data: originalRules, error: rulesError } = await freshClient
       .from('fb_module_rules')
-      .select('*')
+      .select(FB_MODULE_RULE_SELECT)
       .eq('module_id', id);
     
     if (rulesError) throw rulesError;
@@ -1521,8 +1654,8 @@ router.post('/modules/:id/duplicate', async (req: Request, res: Response) => {
     console.log(`✅ Duplicated module ${id} -> ${newModule.id}`);
     res.status(201).json(newModule);
   } catch (error: any) {
-    console.error('Error duplicating module:', error);
-    res.status(500).json({ error: error.message || 'Failed to duplicate module' });
+    console.error('Error duplicating module:');
+    sendInternalError(res);
   }
 });
 
@@ -1530,7 +1663,7 @@ router.post('/modules/:id/duplicate', async (req: Request, res: Response) => {
  * PUT /api/fragebogen/modules/:id/archive
  * Archive or unarchive a module
  */
-router.put('/modules/:id/archive', async (req: Request, res: Response) => {
+router.put('/modules/:id/archive', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -1546,7 +1679,7 @@ router.put('/modules/:id/archive', async (req: Request, res: Response) => {
         deleted_at: shouldArchive ? nowIso : null
       })
       .eq('id', id)
-      .select()
+      .select(FB_MODULE_SELECT)
       .single();
     
     if (error) throw error;
@@ -1558,8 +1691,8 @@ router.put('/modules/:id/archive', async (req: Request, res: Response) => {
     console.log(`✅ ${shouldArchive ? 'Archived' : 'Unarchived'} module: ${id}`);
     res.json(data);
   } catch (error: any) {
-    console.error('Error archiving module:', error);
-    res.status(500).json({ error: error.message || 'Failed to archive module' });
+    console.error('Error archiving module:');
+    sendInternalError(res);
   }
 });
 
@@ -1567,7 +1700,7 @@ router.put('/modules/:id/archive', async (req: Request, res: Response) => {
  * DELETE /api/fragebogen/modules/:id
  * Soft delete (archive) a module
  */
-router.delete('/modules/:id', async (req: Request, res: Response) => {
+router.delete('/modules/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -1577,7 +1710,7 @@ router.delete('/modules/:id', async (req: Request, res: Response) => {
       .from('fb_modules')
       .update({ archived: true, is_deleted: true, deleted_at: nowIso })
       .eq('id', id)
-      .select()
+      .select(FB_MODULE_SELECT)
       .single();
     
     if (error) throw error;
@@ -1589,8 +1722,8 @@ router.delete('/modules/:id', async (req: Request, res: Response) => {
     console.log(`✅ Deleted (archived) module: ${id}`);
     res.json({ success: true, data });
   } catch (error: any) {
-    console.error('Error deleting module:', error);
-    res.status(500).json({ error: error.message || 'Failed to delete module' });
+    console.error('Error deleting module:');
+    sendInternalError(res);
   }
 });
 
@@ -1598,7 +1731,7 @@ router.delete('/modules/:id', async (req: Request, res: Response) => {
  * GET /api/fragebogen/modules/:id/usage
  * Get detailed usage information for a module (which fragebögen use it)
  */
-router.get('/modules/:id/usage', async (req: Request, res: Response) => {
+router.get('/modules/:id/usage', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -1635,8 +1768,8 @@ router.get('/modules/:id/usage', async (req: Request, res: Response) => {
       totalUsage: fragebogenList?.length || 0
     });
   } catch (error: any) {
-    console.error('Error fetching module usage:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch module usage' });
+    console.error('Error fetching module usage:');
+    sendInternalError(res);
   }
 });
 
@@ -1645,7 +1778,7 @@ router.get('/modules/:id/usage', async (req: Request, res: Response) => {
  * Permanently delete a module and optionally its questions.
  * Blocked if any question in this module has existing answers.
  */
-router.delete('/modules/:id/permanent', async (req: Request, res: Response) => {
+router.delete('/modules/:id/permanent', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { deleteQuestions } = req.query;
@@ -1665,7 +1798,7 @@ router.delete('/modules/:id/permanent', async (req: Request, res: Response) => {
     if (questionIds.length > 0) {
       const { count: answerCount, error: acError } = await freshClient
         .from('fb_response_answers')
-        .select('*', { count: 'exact', head: true })
+        .select('id', { count: 'exact', head: true })
         .in('question_id', questionIds);
       if (acError) throw acError;
       if ((answerCount ?? 0) > 0) {
@@ -1714,7 +1847,7 @@ router.delete('/modules/:id/permanent', async (req: Request, res: Response) => {
         // Check if question is used by other modules
         const { count, error: countError } = await freshClient
           .from('fb_module_questions')
-          .select('*', { count: 'exact', head: true })
+          .select('question_id', { count: 'exact', head: true })
           .eq('question_id', questionId);
         
         if (countError) throw countError;
@@ -1732,8 +1865,8 @@ router.delete('/modules/:id/permanent', async (req: Request, res: Response) => {
     console.log(`✅ Permanently deleted module: ${id}${deleteQuestions === 'true' ? ' (with questions)' : ''}`);
     res.json({ success: true });
   } catch (error: any) {
-    console.error('Error permanently deleting module:', error);
-    res.status(500).json({ error: error.message || 'Failed to permanently delete module' });
+    console.error('Error permanently deleting module:');
+    sendInternalError(res);
   }
 });
 
@@ -1741,14 +1874,14 @@ router.delete('/modules/:id/permanent', async (req: Request, res: Response) => {
  * GET /api/fragebogen/modules/stats/:id
  * Get usage statistics for a module
  */
-router.get('/modules/stats/:id', async (req: Request, res: Response) => {
+router.get('/modules/stats/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
     
     const { data, error } = await freshClient
       .from('fb_modules_overview')
-      .select('*')
+      .select(FB_MODULES_OVERVIEW_SELECT)
       .eq('id', id)
       .single();
     
@@ -1760,8 +1893,8 @@ router.get('/modules/stats/:id', async (req: Request, res: Response) => {
     
     res.json(data);
   } catch (error: any) {
-    console.error('Error fetching module stats:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch module stats' });
+    console.error('Error fetching module stats:');
+    sendInternalError(res);
   }
 });
 
@@ -1782,7 +1915,7 @@ router.get('/fragebogen', async (req: Request, res: Response) => {
     // Get basic fragebogen data from overview
     let query = freshClient
       .from('fb_fragebogen_overview')
-      .select('*')
+      .select(FB_FRAGEBOGEN_OVERVIEW_SELECT)
       .order('created_at', { ascending: false });
     
     if (status) {
@@ -1874,8 +2007,8 @@ router.get('/fragebogen', async (req: Request, res: Response) => {
 
     res.json(enrichedFragebogen);
   } catch (error: any) {
-    console.error('Error fetching fragebogen:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch fragebogen' });
+    console.error('Error fetching fragebogen:');
+    sendInternalError(res);
   }
 });
 
@@ -1892,7 +2025,7 @@ router.get('/fragebogen/:id', async (req: Request, res: Response) => {
     // Get fragebogen
     const { data: fragebogen, error: fragebogenError } = await freshClient
       .from('fb_fragebogen')
-      .select('*')
+      .select(FB_FRAGEBOGEN_SELECT)
       .eq('id', id)
       .single();
     
@@ -1941,7 +2074,7 @@ router.get('/fragebogen/:id', async (req: Request, res: Response) => {
             order_index,
             required,
             local_id,
-            question:fb_questions (*)
+            question:fb_questions (${FB_QUESTION_SELECT})
           `)
           .eq('module_id', moduleId)
           .order('order_index', { ascending: true });
@@ -1949,7 +2082,7 @@ router.get('/fragebogen/:id', async (req: Request, res: Response) => {
         // Get rules
         const { data: rules } = await freshClient
           .from('fb_module_rules')
-          .select('*')
+          .select(FB_MODULE_RULE_SELECT)
           .eq('module_id', moduleId);
         
         // Normalise question.images to always be a safe array
@@ -1977,8 +2110,8 @@ router.get('/fragebogen/:id', async (req: Request, res: Response) => {
       market_ids: (fragebogenMarkets || []).map((fm: any) => fm.market_id)
     });
   } catch (error: any) {
-    console.error('Error fetching fragebogen:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch fragebogen' });
+    console.error('Error fetching fragebogen:');
+    sendInternalError(res);
   }
 });
 
@@ -1986,7 +2119,7 @@ router.get('/fragebogen/:id', async (req: Request, res: Response) => {
  * POST /api/fragebogen/fragebogen
  * Create a new fragebogen
  */
-router.post('/fragebogen', async (req: Request, res: Response) => {
+router.post('/fragebogen', requireAdmin, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { 
@@ -2026,7 +2159,7 @@ router.post('/fragebogen', async (req: Request, res: Response) => {
         status,
         created_by: created_by || null
       })
-      .select()
+      .select(FB_FRAGEBOGEN_SELECT)
       .single();
     
     if (fragebogenError) throw fragebogenError;
@@ -2063,8 +2196,8 @@ router.post('/fragebogen', async (req: Request, res: Response) => {
     console.log(`✅ Created fragebogen: ${fragebogen.id}`);
     res.status(201).json(fragebogen);
   } catch (error: any) {
-    console.error('Error creating fragebogen:', error);
-    res.status(500).json({ error: error.message || 'Failed to create fragebogen' });
+    console.error('Error creating fragebogen:');
+    sendInternalError(res);
   }
 });
 
@@ -2072,7 +2205,7 @@ router.post('/fragebogen', async (req: Request, res: Response) => {
  * PUT /api/fragebogen/fragebogen/:id
  * Update a fragebogen
  */
-router.put('/fragebogen/:id', async (req: Request, res: Response) => {
+router.put('/fragebogen/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -2149,7 +2282,7 @@ router.put('/fragebogen/:id', async (req: Request, res: Response) => {
     // Fetch updated fragebogen
     const { data: updatedFragebogen, error: fetchError } = await freshClient
       .from('fb_fragebogen')
-      .select('*')
+      .select(FB_FRAGEBOGEN_SELECT)
       .eq('id', id)
       .single();
     
@@ -2158,8 +2291,8 @@ router.put('/fragebogen/:id', async (req: Request, res: Response) => {
     console.log(`✅ Updated fragebogen: ${id}`);
     res.json(updatedFragebogen);
   } catch (error: any) {
-    console.error('Error updating fragebogen:', error);
-    res.status(500).json({ error: error.message || 'Failed to update fragebogen' });
+    console.error('Error updating fragebogen:');
+    sendInternalError(res);
   }
 });
 
@@ -2167,7 +2300,7 @@ router.put('/fragebogen/:id', async (req: Request, res: Response) => {
  * PUT /api/fragebogen/fragebogen/:id/archive
  * Archive or unarchive a fragebogen
  */
-router.put('/fragebogen/:id/archive', async (req: Request, res: Response) => {
+router.put('/fragebogen/:id/archive', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -2190,7 +2323,7 @@ router.put('/fragebogen/:id/archive', async (req: Request, res: Response) => {
       .from('fb_fragebogen')
       .update(updates)
       .eq('id', id)
-      .select()
+      .select(FB_FRAGEBOGEN_SELECT)
       .single();
     
     if (error) throw error;
@@ -2202,8 +2335,8 @@ router.put('/fragebogen/:id/archive', async (req: Request, res: Response) => {
     console.log(`✅ ${shouldArchive ? 'Archived' : 'Unarchived'} fragebogen: ${id}`);
     res.json(data);
   } catch (error: any) {
-    console.error('Error archiving fragebogen:', error);
-    res.status(500).json({ error: error.message || 'Failed to archive fragebogen' });
+    console.error('Error archiving fragebogen:');
+    sendInternalError(res);
   }
 });
 
@@ -2211,7 +2344,7 @@ router.put('/fragebogen/:id/archive', async (req: Request, res: Response) => {
  * DELETE /api/fragebogen/fragebogen/:id
  * Soft delete (archive) a fragebogen
  */
-router.delete('/fragebogen/:id', async (req: Request, res: Response) => {
+router.delete('/fragebogen/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -2221,7 +2354,7 @@ router.delete('/fragebogen/:id', async (req: Request, res: Response) => {
       .from('fb_fragebogen')
       .update({ archived: true, is_deleted: true, deleted_at: nowIso, status: 'inactive' })
       .eq('id', id)
-      .select()
+      .select(FB_FRAGEBOGEN_SELECT)
       .single();
     
     if (error) throw error;
@@ -2233,8 +2366,8 @@ router.delete('/fragebogen/:id', async (req: Request, res: Response) => {
     console.log(`✅ Deleted (archived) fragebogen: ${id}`);
     res.json({ success: true, data });
   } catch (error: any) {
-    console.error('Error deleting fragebogen:', error);
-    res.status(500).json({ error: error.message || 'Failed to delete fragebogen' });
+    console.error('Error deleting fragebogen:');
+    sendInternalError(res);
   }
 });
 
@@ -2243,7 +2376,7 @@ router.delete('/fragebogen/:id', async (req: Request, res: Response) => {
  * Permanently delete a fragebogen (keeps modules and questions intact).
  * Blocked if any completed responses exist.
  */
-router.delete('/fragebogen/:id/permanent', async (req: Request, res: Response) => {
+router.delete('/fragebogen/:id/permanent', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -2251,7 +2384,7 @@ router.delete('/fragebogen/:id/permanent', async (req: Request, res: Response) =
     // Guard: block if completed responses exist
     const { count: completedCount, error: ccError } = await freshClient
       .from('fb_responses')
-      .select('*', { count: 'exact', head: true })
+      .select('id', { count: 'exact', head: true })
       .eq('fragebogen_id', id)
       .eq('status', 'completed');
     if (ccError) throw ccError;
@@ -2317,8 +2450,8 @@ router.delete('/fragebogen/:id/permanent', async (req: Request, res: Response) =
     console.log(`✅ Permanently deleted fragebogen: ${id}`);
     res.json({ success: true });
   } catch (error: any) {
-    console.error('Error permanently deleting fragebogen:', error);
-    res.status(500).json({ error: error.message || 'Failed to permanently delete fragebogen' });
+    console.error('Error permanently deleting fragebogen:');
+    sendInternalError(res);
   }
 });
 
@@ -2326,7 +2459,7 @@ router.delete('/fragebogen/:id/permanent', async (req: Request, res: Response) =
  * GET /api/fragebogen/fragebogen/stats/:id
  * Get response statistics for a fragebogen
  */
-router.get('/fragebogen/stats/:id', async (req: Request, res: Response) => {
+router.get('/fragebogen/stats/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -2334,7 +2467,7 @@ router.get('/fragebogen/stats/:id', async (req: Request, res: Response) => {
     
     const { data, error } = await freshClient
       .from('fb_fragebogen_overview')
-      .select('*')
+      .select(FB_FRAGEBOGEN_OVERVIEW_SELECT)
       .eq('id', id)
       .single();
     
@@ -2346,8 +2479,8 @@ router.get('/fragebogen/stats/:id', async (req: Request, res: Response) => {
     
     res.json(data);
   } catch (error: any) {
-    console.error('Error fetching fragebogen stats:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch fragebogen stats' });
+    console.error('Error fetching fragebogen stats:');
+    sendInternalError(res);
   }
 });
 
@@ -2359,7 +2492,7 @@ router.get('/fragebogen/stats/:id', async (req: Request, res: Response) => {
  * GET /api/fragebogen/responses/fragebogen/:fragebogenId
  * Get all responses for a fragebogen
  */
-router.get('/responses/fragebogen/:fragebogenId', async (req: Request, res: Response) => {
+router.get('/responses/fragebogen/:fragebogenId', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { fragebogenId } = req.params;
     const freshClient = createFreshClient();
@@ -2385,8 +2518,8 @@ router.get('/responses/fragebogen/:fragebogenId', async (req: Request, res: Resp
     
     res.json(data);
   } catch (error: any) {
-    console.error('Error fetching responses:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch responses' });
+    console.error('Error fetching responses');
+    sendInternalError(res);
   }
 });
 
@@ -2394,12 +2527,13 @@ router.get('/responses/fragebogen/:fragebogenId', async (req: Request, res: Resp
  * GET /api/fragebogen/responses/completed-map
  * Return completed fragebogen ids for a GL+market tuple.
  */
-router.get('/responses/completed-map', async (req: Request, res: Response) => {
+router.get('/responses/completed-map', async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { gebietsleiter_id, market_id, fragebogen_ids } = req.query;
+    const effectiveGlId = req.user?.role === 'admin' ? String(gebietsleiter_id || '') : getAuthenticatedGlId(req.user);
 
-    if (!gebietsleiter_id || !market_id) {
+    if (!effectiveGlId || !market_id) {
       return res.status(400).json({
         error: 'gebietsleiter_id and market_id are required'
       });
@@ -2416,7 +2550,7 @@ router.get('/responses/completed-map', async (req: Request, res: Response) => {
     let query = freshClient
       .from('fb_responses')
       .select('fragebogen_id')
-      .eq('gebietsleiter_id', String(gebietsleiter_id))
+      .eq('gebietsleiter_id', effectiveGlId)
       .eq('market_id', String(market_id))
       .eq('status', 'completed');
 
@@ -2432,13 +2566,13 @@ router.get('/responses/completed-map', async (req: Request, res: Response) => {
     );
 
     res.json({
-      gebietsleiter_id: String(gebietsleiter_id),
+      gebietsleiter_id: effectiveGlId,
       market_id: String(market_id),
       completed_fragebogen_ids: completedIds
     });
   } catch (error: any) {
-    console.error('Error fetching completed response map:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch completed response map' });
+    console.error('Error fetching completed response map');
+    sendInternalError(res);
   }
 });
 
@@ -2446,7 +2580,7 @@ router.get('/responses/completed-map', async (req: Request, res: Response) => {
  * GET /api/fragebogen/responses/gl-history/:glId
  * Get all fragebogen response runs for a GL with ordered modules/questions, rules and answers.
  */
-router.get('/responses/gl-history/:glId', async (req: Request, res: Response) => {
+router.get('/responses/gl-history/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: Request, res: Response) => {
   try {
     const { glId } = req.params;
     const requesterGlId = String(req.query.requester_gebietsleiter_id || '').trim();
@@ -2613,8 +2747,8 @@ router.get('/responses/gl-history/:glId', async (req: Request, res: Response) =>
 
     res.json(payload);
   } catch (error: any) {
-    console.error('Error fetching GL response history:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch GL response history' });
+    console.error('Error fetching GL response history');
+    sendInternalError(res);
   }
 });
 
@@ -2622,7 +2756,7 @@ router.get('/responses/gl-history/:glId', async (req: Request, res: Response) =>
  * GET /api/fragebogen/responses/:id
  * Get a single response with all answers and resolved label context.
  */
-router.get('/responses/:id', async (req: Request, res: Response) => {
+router.get('/responses/:id', requireOwnedRowOrAdmin('fb_responses'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -2706,8 +2840,8 @@ router.get('/responses/:id', async (req: Request, res: Response) => {
     
     res.json({ ...response, answers: enrichedAnswers });
   } catch (error: any) {
-    console.error('Error fetching response:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch response' });
+    console.error('Error fetching response');
+    sendInternalError(res);
   }
 });
 
@@ -2717,12 +2851,13 @@ router.get('/responses/:id', async (req: Request, res: Response) => {
  * Multiple runs per (fragebogen, GL, market) are supported.
  * Compatibility: if a legacy DB still enforces unique_response, reuse/reopen existing.
  */
-router.post('/responses', async (req: Request, res: Response) => {
+router.post('/responses', async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { fragebogen_id, gebietsleiter_id, market_id, zeiterfassung_submission_id } = req.body;
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
     
-    if (!fragebogen_id || !gebietsleiter_id || !market_id) {
+    if (!fragebogen_id || !effectiveGlId || !market_id) {
       return res.status(400).json({ 
         error: 'fragebogen_id, gebietsleiter_id, and market_id are required' 
       });
@@ -2734,7 +2869,7 @@ router.post('/responses', async (req: Request, res: Response) => {
       .from('fb_responses')
       .select('id')
       .eq('fragebogen_id', fragebogen_id)
-      .eq('gebietsleiter_id', gebietsleiter_id)
+      .eq('gebietsleiter_id', effectiveGlId)
       .eq('market_id', market_id)
       .eq('status', 'completed')
       .limit(1);
@@ -2750,12 +2885,12 @@ router.post('/responses', async (req: Request, res: Response) => {
       .from('fb_responses')
       .insert({
         fragebogen_id,
-        gebietsleiter_id,
+        gebietsleiter_id: effectiveGlId,
         market_id,
         zeiterfassung_submission_id: zeiterfassung_submission_id || null,
         status: 'in_progress'
       })
-      .select()
+      .select(FB_RESPONSE_SELECT)
       .single();
     
     if (error) {
@@ -2764,9 +2899,9 @@ router.post('/responses', async (req: Request, res: Response) => {
       if (error.code === '23505' && String(error.message || '').includes('unique_response')) {
         const { data: existing, error: existingError } = await freshClient
           .from('fb_responses')
-          .select('*')
+          .select(FB_RESPONSE_SELECT)
           .eq('fragebogen_id', fragebogen_id)
-          .eq('gebietsleiter_id', gebietsleiter_id)
+          .eq('gebietsleiter_id', effectiveGlId)
           .eq('market_id', market_id)
           .maybeSingle();
 
@@ -2781,7 +2916,7 @@ router.post('/responses', async (req: Request, res: Response) => {
         }
 
         if (existing.status === 'in_progress') {
-          console.log(`✅ Reusing legacy unique in-progress response run: ${existing.id}`);
+    console.log('Reusing legacy unique in-progress response run');
           return res.status(200).json(existing);
         }
 
@@ -2790,11 +2925,11 @@ router.post('/responses', async (req: Request, res: Response) => {
       throw error;
     }
     
-    console.log(`✅ Started response run: ${data.id}`);
+    console.log('Started response run');
     res.status(201).json(data);
   } catch (error: any) {
-    console.error('Error creating response:', error);
-    res.status(500).json({ error: error.message || 'Failed to create response' });
+    console.error('Error creating response');
+    sendInternalError(res);
   }
 });
 
@@ -2803,16 +2938,17 @@ router.post('/responses', async (req: Request, res: Response) => {
  * Save/update answers for a response run. Validates each answer against the
  * authoritative question definition in the database before persisting.
  */
-router.put('/responses/:id', async (req: Request, res: Response) => {
+router.put('/responses/:id', requireOwnedRowOrAdmin('fb_responses'), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
     const { answers, requester_gebietsleiter_id } = req.body;
+    const effectiveRequesterGlId = req.user?.role === 'admin' ? requester_gebietsleiter_id : getAuthenticatedGlId(req.user);
     
     if (!answers || !Array.isArray(answers)) {
       return res.status(400).json({ error: 'answers array is required' });
     }
-    if (!requester_gebietsleiter_id || typeof requester_gebietsleiter_id !== 'string') {
+    if (!effectiveRequesterGlId || typeof effectiveRequesterGlId !== 'string') {
       return res.status(400).json({ error: 'requester_gebietsleiter_id is required' });
     }
 
@@ -2827,7 +2963,7 @@ router.put('/responses/:id', async (req: Request, res: Response) => {
     if (!responseRow) {
       return res.status(404).json({ error: 'Response not found' });
     }
-    if (String(responseRow.gebietsleiter_id || '') !== requester_gebietsleiter_id) {
+    if (String(responseRow.gebietsleiter_id || '') !== effectiveRequesterGlId) {
       return res.status(403).json({ error: 'Forbidden: response does not belong to requester GL' });
     }
 
@@ -3092,15 +3228,15 @@ router.put('/responses/:id', async (req: Request, res: Response) => {
     
     const { data: response } = await freshClient
       .from('fb_responses')
-      .select('*')
+      .select(FB_RESPONSE_SELECT)
       .eq('id', id)
       .single();
     
-    console.log(`✅ Saved ${answers.length} answer(s) for response: ${id}`);
+    console.log(`Saved ${answers.length} answer(s) for response run`);
     res.json(response);
   } catch (error: any) {
-    console.error('Error updating response:', error);
-    res.status(500).json({ error: error.message || 'Failed to update response' });
+    console.error('Error updating response');
+    sendInternalError(res);
   }
 });
 
@@ -3108,7 +3244,7 @@ router.put('/responses/:id', async (req: Request, res: Response) => {
  * PUT /api/fragebogen/responses/:id/complete
  * Mark a response as completed
  */
-router.put('/responses/:id/complete', async (req: Request, res: Response) => {
+router.put('/responses/:id/complete', requireOwnedRowOrAdmin('fb_responses'), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -3120,7 +3256,7 @@ router.put('/responses/:id/complete', async (req: Request, res: Response) => {
         completed_at: new Date().toISOString()
       })
       .eq('id', id)
-      .select()
+      .select(FB_RESPONSE_SELECT)
       .single();
     
     if (error) throw error;
@@ -3129,11 +3265,11 @@ router.put('/responses/:id/complete', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Response not found' });
     }
     
-    console.log(`✅ Completed response: ${id}`);
+    console.log('Completed response run');
     res.json(data);
   } catch (error: any) {
-    console.error('Error completing response:', error);
-    res.status(500).json({ error: error.message || 'Failed to complete response' });
+    console.error('Error completing response');
+    sendInternalError(res);
   }
 });
 
@@ -3142,13 +3278,14 @@ router.put('/responses/:id/complete', async (req: Request, res: Response) => {
  * Delete an in-progress response run (and cascading answers).
  * Used when a market visit is explicitly aborted by the same GL.
  */
-router.delete('/responses/:id', async (req: Request, res: Response) => {
+router.delete('/responses/:id', requireOwnedRowOrAdmin('fb_responses'), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { requester_gebietsleiter_id } = req.body || {};
+    const effectiveRequesterGlId = req.user?.role === 'admin' ? requester_gebietsleiter_id : getAuthenticatedGlId(req.user);
     const freshClient = createFreshClient();
 
-    if (!requester_gebietsleiter_id || typeof requester_gebietsleiter_id !== 'string') {
+    if (!effectiveRequesterGlId || typeof effectiveRequesterGlId !== 'string') {
       return res.status(400).json({ error: 'requester_gebietsleiter_id is required' });
     }
 
@@ -3163,7 +3300,7 @@ router.delete('/responses/:id', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Response not found' });
     }
 
-    if (String(responseRow.gebietsleiter_id || '') !== requester_gebietsleiter_id) {
+    if (String(responseRow.gebietsleiter_id || '') !== effectiveRequesterGlId) {
       return res.status(403).json({ error: 'Forbidden: response does not belong to requester GL' });
     }
 
@@ -3177,11 +3314,11 @@ router.delete('/responses/:id', async (req: Request, res: Response) => {
       .eq('id', id);
     if (deleteError) throw deleteError;
 
-    console.log(`✅ Deleted in-progress response: ${id}`);
+    console.log('Deleted in-progress response run');
     res.json({ message: 'Deleted successfully', id });
   } catch (error: any) {
-    console.error('Error deleting response:', error);
-    res.status(500).json({ error: error.message || 'Failed to delete response' });
+    console.error('Error deleting response');
+    sendInternalError(res);
   }
 });
 
@@ -3189,7 +3326,7 @@ router.delete('/responses/:id', async (req: Request, res: Response) => {
  * GET /api/fragebogen/responses/stats/fragebogen/:fragebogenId
  * Get detailed statistics for a fragebogen's responses
  */
-router.get('/responses/stats/fragebogen/:fragebogenId', async (req: Request, res: Response) => {
+router.get('/responses/stats/fragebogen/:fragebogenId', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { fragebogenId } = req.params;
     const freshClient = createFreshClient();
@@ -3197,7 +3334,7 @@ router.get('/responses/stats/fragebogen/:fragebogenId', async (req: Request, res
     // Get basic stats
     const { data: fragebogenStats, error: statsError } = await freshClient
       .from('fb_fragebogen_overview')
-      .select('*')
+      .select(FB_FRAGEBOGEN_OVERVIEW_SELECT)
       .eq('id', fragebogenId)
       .single();
     
@@ -3237,8 +3374,8 @@ router.get('/responses/stats/fragebogen/:fragebogenId', async (req: Request, res
       markets: Object.values(marketStats)
     });
   } catch (error: any) {
-    console.error('Error fetching response stats:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch response stats' });
+    console.error('Error fetching response stats');
+    sendInternalError(res);
   }
 });
 
@@ -3250,7 +3387,7 @@ router.get('/responses/stats/fragebogen/:fragebogenId', async (req: Request, res
  * POST /api/fragebogen/zeiterfassung
  * Submit zeiterfassung (time tracking) data for a market visit
  */
-router.post('/zeiterfassung', async (req: Request, res: Response) => {
+router.post('/zeiterfassung', async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const {
@@ -3266,12 +3403,36 @@ router.post('/zeiterfassung', async (req: Request, res: Response) => {
       kommentar,
       food_prozent
     } = req.body;
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
     
     // Validate required fields
-    if (!gebietsleiter_id || !market_id) {
+    if (!effectiveGlId || !market_id) {
       return res.status(400).json({ 
         error: 'gebietsleiter_id and market_id are required' 
       });
+    }
+
+    let effectiveFragebogenId = fragebogen_id || null;
+    if (response_id) {
+      const { data: responseRow, error: responseLookupError } = await freshClient
+        .from('fb_responses')
+        .select('id, fragebogen_id, gebietsleiter_id, market_id')
+        .eq('id', response_id)
+        .maybeSingle();
+
+      if (responseLookupError) throw responseLookupError;
+      if (!responseRow) {
+        return res.status(404).json({ error: 'Response not found' });
+      }
+      if (
+        responseRow.gebietsleiter_id !== effectiveGlId ||
+        responseRow.market_id !== market_id ||
+        (fragebogen_id && responseRow.fragebogen_id !== fragebogen_id)
+      ) {
+        return res.status(400).json({ error: 'response_id does not match provided fragebogen/market/gebietsleiter context' });
+      }
+
+      effectiveFragebogenId = responseRow.fragebogen_id || effectiveFragebogenId;
     }
     
     // Calculate time differences if both times are provided
@@ -3309,8 +3470,8 @@ router.post('/zeiterfassung', async (req: Request, res: Response) => {
       .from('fb_zeiterfassung_submissions')
       .insert({
         response_id: response_id || null,
-        fragebogen_id: fragebogen_id || null,
-        gebietsleiter_id,
+        fragebogen_id: effectiveFragebogenId,
+        gebietsleiter_id: effectiveGlId,
         market_id,
         fahrzeit_von: fahrzeit_von || null,
         fahrzeit_bis: fahrzeit_bis || null,
@@ -3322,16 +3483,16 @@ router.post('/zeiterfassung', async (req: Request, res: Response) => {
         kommentar: kommentar || null,
         food_prozent: food_prozent !== undefined ? parseInt(food_prozent) : null
       })
-      .select()
+      .select(FB_ZEITERFASSUNG_SELECT)
       .single();
     
     if (error) throw error;
     
-    console.log(`✅ Saved zeiterfassung: ${data.id}`);
+    console.log('Saved zeiterfassung submission');
     res.status(201).json(data);
   } catch (error: any) {
-    console.error('Error saving zeiterfassung:', error);
-    res.status(500).json({ error: error.message || 'Failed to save zeiterfassung' });
+    console.error('Error saving zeiterfassung');
+    sendInternalError(res);
   }
 });
 
@@ -3339,7 +3500,7 @@ router.post('/zeiterfassung', async (req: Request, res: Response) => {
  * PATCH /api/fragebogen/zeiterfassung/:id
  * Update an existing zeiterfassung submission (partial update)
  */
-router.patch('/zeiterfassung/:id', async (req: Request, res: Response) => {
+router.patch('/zeiterfassung/:id', requireOwnedRowOrAdmin('fb_zeiterfassung_submissions'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -3419,16 +3580,16 @@ router.patch('/zeiterfassung/:id', async (req: Request, res: Response) => {
       .from('fb_zeiterfassung_submissions')
       .update(updateData)
       .eq('id', id)
-      .select()
+      .select(FB_ZEITERFASSUNG_SELECT)
       .single();
 
     if (error) throw error;
 
-    console.log(`✅ Updated zeiterfassung: ${id}`);
+    console.log('Updated zeiterfassung submission');
     res.json(data);
   } catch (error: any) {
-    console.error('Error updating zeiterfassung:', error);
-    res.status(500).json({ error: error.message || 'Failed to update zeiterfassung' });
+    console.error('Error updating zeiterfassung');
+    sendInternalError(res);
   }
 });
 
@@ -3436,7 +3597,7 @@ router.patch('/zeiterfassung/:id', async (req: Request, res: Response) => {
  * DELETE /api/fragebogen/zeiterfassung/:id
  * Delete a zeiterfassung submission
  */
-router.delete('/zeiterfassung/:id', async (req: Request, res: Response) => {
+router.delete('/zeiterfassung/:id', requireOwnedRowOrAdmin('fb_zeiterfassung_submissions'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -3448,11 +3609,11 @@ router.delete('/zeiterfassung/:id', async (req: Request, res: Response) => {
     
     if (error) throw error;
     
-    console.log(`✅ Deleted zeiterfassung submission: ${id}`);
+    console.log('Deleted zeiterfassung submission');
     res.json({ message: 'Deleted successfully', id });
   } catch (error: any) {
-    console.error('Error deleting zeiterfassung:', error);
-    res.status(500).json({ error: error.message || 'Failed to delete zeiterfassung' });
+    console.error('Error deleting zeiterfassung');
+    sendInternalError(res);
   }
 });
 
@@ -3460,7 +3621,7 @@ router.delete('/zeiterfassung/:id', async (req: Request, res: Response) => {
  * GET /api/fragebogen/zeiterfassung/gl/:glId
  * Get zeiterfassung submissions for a GL
  */
-router.get('/zeiterfassung/gl/:glId', async (req: Request, res: Response) => {
+router.get('/zeiterfassung/gl/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: Request, res: Response) => {
   try {
     const { glId } = req.params;
     const freshClient = createFreshClient();
@@ -3493,8 +3654,8 @@ router.get('/zeiterfassung/gl/:glId', async (req: Request, res: Response) => {
     
     res.json(data);
   } catch (error: any) {
-    console.error('Error fetching zeiterfassung:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch zeiterfassung' });
+    console.error('Error fetching zeiterfassung');
+    sendInternalError(res);
   }
 });
 
@@ -3502,7 +3663,7 @@ router.get('/zeiterfassung/gl/:glId', async (req: Request, res: Response) => {
  * GET /api/fragebogen/zeiterfassung/admin
  * Get all zeiterfassung submissions grouped by date for admin view
  */
-router.get('/zeiterfassung/admin', async (req: Request, res: Response) => {
+router.get('/zeiterfassung/admin', requireAdmin, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { start_date, end_date, gl_id } = req.query;
@@ -3546,8 +3707,8 @@ router.get('/zeiterfassung/admin', async (req: Request, res: Response) => {
 
     res.json(allRows);
   } catch (error: any) {
-    console.error('Error fetching admin zeiterfassung:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch zeiterfassung' });
+    console.error('Error fetching admin zeiterfassung');
+    sendInternalError(res);
   }
 });
 
@@ -3555,7 +3716,7 @@ router.get('/zeiterfassung/admin', async (req: Request, res: Response) => {
  * GET /api/fragebogen/zeiterfassung/gl/:glId/date/:date
  * Get detailed zeiterfassung for a GL on a specific date with all related submissions
  */
-router.get('/zeiterfassung/gl/:glId/date/:date', async (req: Request, res: Response) => {
+router.get('/zeiterfassung/gl/:glId/date/:date', requireSelfOrAdmin(req => req.params.glId), async (req: Request, res: Response) => {
   try {
     const { glId, date } = req.params;
     const freshClient = createFreshClient();
@@ -3563,7 +3724,7 @@ router.get('/zeiterfassung/gl/:glId/date/:date', async (req: Request, res: Respo
     // Fetch day tracking record for this date to calculate Fahrzeit
     const { data: dayTracking } = await freshClient
       .from('fb_day_tracking')
-      .select('*')
+      .select(FB_DAY_TRACKING_SELECT)
       .eq('gebietsleiter_id', glId)
       .eq('tracking_date', date)
       .single();
@@ -3572,7 +3733,7 @@ router.get('/zeiterfassung/gl/:glId/date/:date', async (req: Request, res: Respo
     const { data: zeitEntries, error: zeitError } = await freshClient
       .from('fb_zeiterfassung_submissions')
       .select(`
-        *,
+        ${FB_ZEITERFASSUNG_SELECT},
         market:markets (id, name, chain, address, postal_code, city)
       `)
       .eq('gebietsleiter_id', glId)
@@ -3617,7 +3778,7 @@ router.get('/zeiterfassung/gl/:glId/date/:date', async (req: Request, res: Respo
     // Fetch wellen_submissions (Vorbesteller) for all markets on this date, including wave goal_type
     const { data: wellenSubs, error: wellenError } = await freshClient
       .from('wellen_submissions')
-      .select('*, wellen:welle_id ( goal_type )')
+      .select(WELLEN_SUBMISSION_FRAGEBOGEN_SELECT)
       .eq('gebietsleiter_id', glId)
       .in('market_id', marketIds)
       .gte('created_at', `${date}T00:00:00`)
@@ -3628,7 +3789,7 @@ router.get('/zeiterfassung/gl/:glId/date/:date', async (req: Request, res: Respo
     // Fetch vorverkauf_entries for all markets on this date
     const { data: vorverkaufEntries, error: vorverkaufError } = await freshClient
       .from('vorverkauf_entries')
-      .select('*')
+      .select(VORVERKAUF_ENTRY_FRAGEBOGEN_SELECT)
       .eq('gebietsleiter_id', glId)
       .in('market_id', marketIds)
       .gte('created_at', `${date}T00:00:00`)
@@ -3684,8 +3845,8 @@ router.get('/zeiterfassung/gl/:glId/date/:date', async (req: Request, res: Respo
     
     res.json(enrichedEntries);
   } catch (error: any) {
-    console.error('Error fetching detailed zeiterfassung:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch detailed zeiterfassung' });
+    console.error('Error fetching detailed zeiterfassung');
+    sendInternalError(res);
   }
 });
 
@@ -3699,12 +3860,13 @@ router.get('/zeiterfassung/gl/:glId/date/:date', async (req: Request, res: Respo
  * POST /api/fragebogen/zusatz-zeiterfassung
  * Create one or more zusatz zeiterfassung entries
  */
-router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
+router.post('/zusatz-zeiterfassung', async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { gebietsleiter_id, entries } = req.body;
-    
-    if (!gebietsleiter_id || !entries || !Array.isArray(entries) || entries.length === 0) {
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
+
+    if (!effectiveGlId || !entries || !Array.isArray(entries) || entries.length === 0) {
       return res.status(400).json({ error: 'gebietsleiter_id and entries array are required' });
     }
     
@@ -3721,7 +3883,7 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
       const diffMins = diffMinutes % 60;
       
       const dbEntry: any = {
-        gebietsleiter_id,
+        gebietsleiter_id: effectiveGlId,
         entry_date: entry.entryDate || today,
         reason: entry.reason,
         reason_label: entry.reasonLabel,
@@ -3746,7 +3908,7 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
     const { data, error } = await freshClient
       .from('fb_zusatz_zeiterfassung')
       .insert(dbEntries)
-      .select();
+      .select(FB_ZUSATZ_ZEITERFASSUNG_SELECT);
     
     if (error) throw error;
     
@@ -3771,7 +3933,7 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
         const { error: zeitError } = await freshClient
           .from('fb_zeiterfassung_submissions')
           .insert({
-            gebietsleiter_id,
+            gebietsleiter_id: effectiveGlId,
             market_id: entry.market_id,
             besuchszeit_von: entry.von,
             besuchszeit_bis: entry.bis,
@@ -3783,9 +3945,9 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
           });
         
         if (zeitError) {
-          console.warn(`⚠️ Could not create zeiterfassung submission for ${entry.reason}:`, zeitError.message);
+          console.warn('Could not create zeiterfassung submission from zusatz entry');
         } else {
-          console.log(`📍 Created zeiterfassung submission for ${entry.reason} at market ${entry.market_id}`);
+          console.log(`Created zeiterfassung submission for ${entry.reason}`);
         }
         
         // Increment market visit count
@@ -3803,25 +3965,25 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
               last_visit_date: entryDateStr
             })
             .eq('id', entry.market_id);
-          console.log(`📍 Incremented visit count for market ${entry.market_id}`);
+          console.log('Incremented visit count from zusatz zeiterfassung');
         }
 
         await freshClient
           .from('market_visits')
           .upsert({
             market_id: entry.market_id,
-            gebietsleiter_id,
+            gebietsleiter_id: effectiveGlId,
             visit_date: entryDateStr,
             source: 'zusatz'
           }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
       }
     }
     
-    console.log(`✅ Created ${data.length} zusatz zeiterfassung entries for GL ${gebietsleiter_id}`);
+    console.log(`Created ${data.length} zusatz zeiterfassung entries`);
     res.json(data);
   } catch (error: any) {
-    console.error('Error creating zusatz zeiterfassung:', error);
-    res.status(500).json({ error: error.message || 'Failed to create zusatz zeiterfassung' });
+    console.error('Error creating zusatz zeiterfassung');
+    sendInternalError(res);
   }
 });
 
@@ -3829,7 +3991,7 @@ router.post('/zusatz-zeiterfassung', async (req: Request, res: Response) => {
  * GET /api/fragebogen/zusatz-zeiterfassung/:glId
  * Get all zusatz zeiterfassung entries for a GL
  */
-router.get('/zusatz-zeiterfassung/:glId', async (req: Request, res: Response) => {
+router.get('/zusatz-zeiterfassung/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { glId } = req.params;
@@ -3844,7 +4006,7 @@ router.get('/zusatz-zeiterfassung/:glId', async (req: Request, res: Response) =>
     while (true) {
       let pageQuery = freshClient
         .from('fb_zusatz_zeiterfassung')
-        .select('*')
+        .select(FB_ZUSATZ_ZEITERFASSUNG_SELECT)
         .eq('gebietsleiter_id', glId)
         .order('created_at', { ascending: false });
 
@@ -3877,8 +4039,8 @@ router.get('/zusatz-zeiterfassung/:glId', async (req: Request, res: Response) =>
     
     res.json(enriched);
   } catch (error: any) {
-    console.error('Error getting zusatz zeiterfassung:', error);
-    res.status(500).json({ error: error.message || 'Failed to get zusatz zeiterfassung' });
+    console.error('Error getting zusatz zeiterfassung');
+    sendInternalError(res);
   }
 });
 
@@ -3886,7 +4048,7 @@ router.get('/zusatz-zeiterfassung/:glId', async (req: Request, res: Response) =>
  * GET /api/fragebogen/zusatz-zeiterfassung/all
  * Get all zusatz zeiterfassung entries (for admin)
  */
-router.get('/zusatz-zeiterfassung-all', async (req: Request, res: Response) => {
+router.get('/zusatz-zeiterfassung-all', requireAdmin, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { start_date, end_date } = req.query;
@@ -3900,7 +4062,7 @@ router.get('/zusatz-zeiterfassung-all', async (req: Request, res: Response) => {
     while (true) {
       let pageQuery = freshClient
         .from('fb_zusatz_zeiterfassung')
-        .select('*')
+        .select(FB_ZUSATZ_ZEITERFASSUNG_SELECT)
         .order('created_at', { ascending: false });
 
       if (start_date) {
@@ -3934,8 +4096,8 @@ router.get('/zusatz-zeiterfassung-all', async (req: Request, res: Response) => {
     console.log(`✅ Fetched ${enriched.length} zusatz zeiterfassung entries`);
     res.json(enriched);
   } catch (error: any) {
-    console.error('Error getting all zusatz zeiterfassung:', error);
-    res.status(500).json({ error: error.message || 'Failed to get zusatz zeiterfassung' });
+    console.error('Error getting all zusatz zeiterfassung');
+    sendInternalError(res);
   }
 });
 
@@ -3943,7 +4105,7 @@ router.get('/zusatz-zeiterfassung-all', async (req: Request, res: Response) => {
  * PATCH /api/fragebogen/zusatz-zeiterfassung/:id
  * Update an existing zusatz zeiterfassung entry (partial update)
  */
-router.patch('/zusatz-zeiterfassung/:id', async (req: Request, res: Response) => {
+router.patch('/zusatz-zeiterfassung/:id', requireOwnedRowOrAdmin('fb_zusatz_zeiterfassung'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -3986,16 +4148,16 @@ router.patch('/zusatz-zeiterfassung/:id', async (req: Request, res: Response) =>
       .from('fb_zusatz_zeiterfassung')
       .update(updateData)
       .eq('id', id)
-      .select()
+      .select(FB_ZUSATZ_ZEITERFASSUNG_SELECT)
       .single();
 
     if (error) throw error;
 
-    console.log(`✅ Updated zusatz zeiterfassung: ${id}`);
+    console.log('Updated zusatz zeiterfassung');
     res.json(data);
   } catch (error: any) {
-    console.error('Error updating zusatz zeiterfassung:', error);
-    res.status(500).json({ error: error.message || 'Failed to update zusatz zeiterfassung' });
+    console.error('Error updating zusatz zeiterfassung');
+    sendInternalError(res);
   }
 });
 
@@ -4003,7 +4165,7 @@ router.patch('/zusatz-zeiterfassung/:id', async (req: Request, res: Response) =>
  * DELETE /api/fragebogen/zusatz-zeiterfassung/:id
  * Delete a zusatz zeiterfassung entry
  */
-router.delete('/zusatz-zeiterfassung/:id', async (req: Request, res: Response) => {
+router.delete('/zusatz-zeiterfassung/:id', requireOwnedRowOrAdmin('fb_zusatz_zeiterfassung'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -4015,11 +4177,11 @@ router.delete('/zusatz-zeiterfassung/:id', async (req: Request, res: Response) =
 
     if (error) throw error;
 
-    console.log(`✅ Deleted zusatz zeiterfassung: ${id}`);
+    console.log('Deleted zusatz zeiterfassung');
     res.json({ message: 'Deleted successfully', id });
   } catch (error: any) {
-    console.error('Error deleting zusatz zeiterfassung:', error);
-    res.status(500).json({ error: error.message || 'Failed to delete zusatz zeiterfassung' });
+    console.error('Error deleting zusatz zeiterfassung');
+    sendInternalError(res);
   }
 });
 
@@ -4080,7 +4242,7 @@ const getCurrentTimeString = (): string => {
 };
 
 // GET ALL DAY TRACKING (for admin)
-router.get('/day-tracking-all', async (req: Request, res: Response) => {
+router.get('/day-tracking-all', requireAdmin, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { data, error } = await freshClient
@@ -4091,18 +4253,19 @@ router.get('/day-tracking-all', async (req: Request, res: Response) => {
     if (error) throw error;
     res.json(data || []);
   } catch (error: any) {
-    console.error('Error getting all day tracking:', error);
-    res.status(500).json({ error: error.message || 'Failed to get day tracking' });
+    console.error('Error getting all day tracking');
+    sendInternalError(res);
   }
 });
 
 // START DAY - Create or update day tracking record
-router.post('/day-tracking/start', async (req: Request, res: Response) => {
+router.post('/day-tracking/start', requireSelfOrAdmin(req => req.body.gebietsleiter_id), async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { gebietsleiter_id, skip_fahrzeit, start_time, km_stand_start } = req.body;
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
     
-    if (!gebietsleiter_id) {
+    if (!effectiveGlId) {
       return res.status(400).json({ error: 'gebietsleiter_id is required' });
     }
     
@@ -4112,8 +4275,8 @@ router.post('/day-tracking/start', async (req: Request, res: Response) => {
     // Check if a record already exists for today
     const { data: existing } = await freshClient
       .from('fb_day_tracking')
-      .select('*')
-      .eq('gebietsleiter_id', gebietsleiter_id)
+      .select(FB_DAY_TRACKING_SELECT)
+      .eq('gebietsleiter_id', effectiveGlId)
       .eq('tracking_date', today)
       .single();
     
@@ -4122,7 +4285,7 @@ router.post('/day-tracking/start', async (req: Request, res: Response) => {
     }
     
     const upsertData: Record<string, any> = {
-      gebietsleiter_id,
+      gebietsleiter_id: effectiveGlId,
       tracking_date: today,
       day_start_time: dayStartTime,
       skipped_first_fahrzeit: skip_fahrzeit || false,
@@ -4139,26 +4302,27 @@ router.post('/day-tracking/start', async (req: Request, res: Response) => {
       .upsert(upsertData, {
         onConflict: 'gebietsleiter_id,tracking_date'
       })
-      .select()
+      .select(FB_DAY_TRACKING_SELECT)
       .single();
     
     if (error) throw error;
     
-    console.log(`✅ Day tracking started for GL ${gebietsleiter_id} at ${dayStartTime}`);
+    console.log(`Day tracking started at ${dayStartTime}`);
     res.json(data);
   } catch (error: any) {
-    console.error('Error starting day tracking:', error);
-    res.status(500).json({ error: error.message || 'Failed to start day tracking' });
+    console.error('Error starting day tracking');
+    sendInternalError(res);
   }
 });
 
 // UPDATE DAY TRACKING TIMES - Edit day_start_time or day_end_time
-router.patch('/day-tracking/update-times', async (req: Request, res: Response) => {
+router.patch('/day-tracking/update-times', requireSelfOrAdmin(req => req.body.gebietsleiter_id), async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { gebietsleiter_id, date, day_start_time, day_end_time } = req.body;
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
     
-    if (!gebietsleiter_id || !date) {
+    if (!effectiveGlId || !date) {
       return res.status(400).json({ error: 'gebietsleiter_id and date are required' });
     }
     
@@ -4174,28 +4338,29 @@ router.patch('/day-tracking/update-times', async (req: Request, res: Response) =
     const { data, error } = await freshClient
       .from('fb_day_tracking')
       .update(updateData)
-      .eq('gebietsleiter_id', gebietsleiter_id)
+      .eq('gebietsleiter_id', effectiveGlId)
       .eq('tracking_date', date)
-      .select()
+      .select(FB_DAY_TRACKING_SELECT)
       .single();
     
     if (error) throw error;
     
-    console.log(`✅ Day tracking times updated for GL ${gebietsleiter_id} on ${date}:`, updateData);
+    console.log(`Day tracking times updated on ${date}`);
     res.json(data);
   } catch (error: any) {
-    console.error('Error updating day tracking times:', error);
-    res.status(500).json({ error: error.message || 'Failed to update day tracking times' });
+    console.error('Error updating day tracking times');
+    sendInternalError(res);
   }
 });
 
 // UPDATE KM STAND START - Update km_stand_start on an active day record
-router.patch('/day-tracking/update-km-start', async (req: Request, res: Response) => {
+router.patch('/day-tracking/update-km-start', requireSelfOrAdmin(req => req.body.gebietsleiter_id), async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { gebietsleiter_id, km_stand_start } = req.body;
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
 
-    if (!gebietsleiter_id || km_stand_start === undefined || km_stand_start === '') {
+    if (!effectiveGlId || km_stand_start === undefined || km_stand_start === '') {
       return res.status(400).json({ error: 'gebietsleiter_id and km_stand_start are required' });
     }
 
@@ -4204,28 +4369,29 @@ router.patch('/day-tracking/update-km-start', async (req: Request, res: Response
     const { data, error } = await freshClient
       .from('fb_day_tracking')
       .update({ km_stand_start: parseFloat(String(km_stand_start).replace(',', '.')) })
-      .eq('gebietsleiter_id', gebietsleiter_id)
+      .eq('gebietsleiter_id', effectiveGlId)
       .eq('tracking_date', today)
-      .select()
+      .select(FB_DAY_TRACKING_SELECT)
       .single();
 
     if (error) throw error;
 
-    console.log(`✅ km_stand_start updated for GL ${gebietsleiter_id} on ${today}:`, km_stand_start);
+    console.log(`km_stand_start updated on ${today}`);
     res.json(data);
   } catch (error: any) {
-    console.error('Error updating km_stand_start:', error);
-    res.status(500).json({ error: error.message || 'Failed to update km_stand_start' });
+    console.error('Error updating km_stand_start');
+    sendInternalError(res);
   }
 });
 
 // UPDATE KM STAND BY DATE - Update km_stand_start or km_stand_end for any specific date
-router.patch('/day-tracking/update-km', async (req: Request, res: Response) => {
+router.patch('/day-tracking/update-km', requireSelfOrAdmin(req => req.body.gebietsleiter_id), async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { gebietsleiter_id, date, km_stand_start, km_stand_end } = req.body;
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
 
-    if (!gebietsleiter_id || !date) {
+    if (!effectiveGlId || !date) {
       return res.status(400).json({ error: 'gebietsleiter_id and date are required' });
     }
 
@@ -4244,28 +4410,29 @@ router.patch('/day-tracking/update-km', async (req: Request, res: Response) => {
     const { data, error } = await freshClient
       .from('fb_day_tracking')
       .update(updateData)
-      .eq('gebietsleiter_id', gebietsleiter_id)
+      .eq('gebietsleiter_id', effectiveGlId)
       .eq('tracking_date', date)
-      .select()
+      .select(FB_DAY_TRACKING_SELECT)
       .single();
 
     if (error) throw error;
 
-    console.log(`✅ KM Stand updated for GL ${gebietsleiter_id} on ${date}:`, updateData);
+    console.log(`KM Stand updated on ${date}`);
     res.json(data);
   } catch (error: any) {
-    console.error('Error updating KM Stand:', error);
-    res.status(500).json({ error: error.message || 'Failed to update KM Stand' });
+    console.error('Error updating KM Stand');
+    sendInternalError(res);
   }
 });
 
 // END DAY - Complete day tracking and calculate totals
-router.post('/day-tracking/end', async (req: Request, res: Response) => {
+router.post('/day-tracking/end', requireSelfOrAdmin(req => req.body.gebietsleiter_id), async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { gebietsleiter_id, end_time, force_close, km_stand_end } = req.body;
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
     
-    if (!gebietsleiter_id || !end_time) {
+    if (!effectiveGlId || !end_time) {
       return res.status(400).json({ error: 'gebietsleiter_id and end_time are required' });
     }
     
@@ -4274,8 +4441,8 @@ router.post('/day-tracking/end', async (req: Request, res: Response) => {
     // Get current day tracking record
     const { data: dayTracking, error: fetchError } = await freshClient
       .from('fb_day_tracking')
-      .select('*')
-      .eq('gebietsleiter_id', gebietsleiter_id)
+      .select(FB_DAY_TRACKING_SELECT)
+      .eq('gebietsleiter_id', effectiveGlId)
       .eq('tracking_date', today)
       .eq('status', 'active')
       .single();
@@ -4287,8 +4454,8 @@ router.post('/day-tracking/end', async (req: Request, res: Response) => {
     // Get all market visits for today to calculate totals
     const { data: visits } = await freshClient
       .from('fb_zeiterfassung_submissions')
-      .select('*')
-      .eq('gebietsleiter_id', gebietsleiter_id)
+      .select(FB_ZEITERFASSUNG_SELECT)
+      .eq('gebietsleiter_id', effectiveGlId)
       .gte('created_at', `${today}T00:00:00`)
       .lt('created_at', `${today}T23:59:59`)
       .order('created_at', { ascending: true });
@@ -4296,8 +4463,8 @@ router.post('/day-tracking/end', async (req: Request, res: Response) => {
     // Get all Unterbrechung entries for today
     const { data: unterbrechungen } = await freshClient
       .from('fb_zusatz_zeiterfassung')
-      .select('*')
-      .eq('gebietsleiter_id', gebietsleiter_id)
+      .select(FB_ZUSATZ_ZEITERFASSUNG_SELECT)
+      .eq('gebietsleiter_id', effectiveGlId)
       .eq('entry_date', today)
       .eq('reason', 'unterbrechung');
 
@@ -4305,7 +4472,7 @@ router.post('/day-tracking/end', async (req: Request, res: Response) => {
     const { data: allZusatzToday } = await freshClient
       .from('fb_zusatz_zeiterfassung')
       .select('reason, zeit_bis')
-      .eq('gebietsleiter_id', gebietsleiter_id)
+      .eq('gebietsleiter_id', effectiveGlId)
       .eq('entry_date', today);
     
     // Calculate totals
@@ -4411,21 +4578,21 @@ router.post('/day-tracking/end', async (req: Request, res: Response) => {
         ...(km_stand_end !== undefined && km_stand_end !== null && km_stand_end !== '' ? { km_stand_end: parseFloat(km_stand_end) } : {})
       })
       .eq('id', dayTracking.id)
-      .select()
+      .select(FB_DAY_TRACKING_SELECT)
       .single();
     
     if (error) throw error;
     
-    console.log(`✅ Day tracking ended for GL ${gebietsleiter_id} at ${end_time}`);
+    console.log(`Day tracking ended at ${end_time}`);
     res.json(data);
   } catch (error: any) {
-    console.error('Error ending day tracking:', error);
-    res.status(500).json({ error: error.message || 'Failed to end day tracking' });
+    console.error('Error ending day tracking');
+    sendInternalError(res);
   }
 });
 
 // GET DAY TRACKING STATUS
-router.get('/day-tracking/status/:glId', async (req: Request, res: Response) => {
+router.get('/day-tracking/status/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { glId } = req.params;
@@ -4433,7 +4600,7 @@ router.get('/day-tracking/status/:glId', async (req: Request, res: Response) => 
     
     const { data, error } = await freshClient
       .from('fb_day_tracking')
-      .select('*')
+      .select(FB_DAY_TRACKING_SELECT)
       .eq('gebietsleiter_id', glId)
       .eq('tracking_date', date)
       .single();
@@ -4448,13 +4615,13 @@ router.get('/day-tracking/status/:glId', async (req: Request, res: Response) => 
     
     res.json(data);
   } catch (error: any) {
-    console.error('Error getting day tracking status:', error);
-    res.status(500).json({ error: error.message || 'Failed to get day tracking status' });
+    console.error('Error getting day tracking status');
+    sendInternalError(res);
   }
 });
 
 // GET MARKET VISITS FOR DAY
-router.get('/day-tracking/:glId/:date/visits', async (req: Request, res: Response) => {
+router.get('/day-tracking/:glId/:date/visits', requireSelfOrAdmin(req => req.params.glId), async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { glId, date } = req.params;
@@ -4488,13 +4655,13 @@ router.get('/day-tracking/:glId/:date/visits', async (req: Request, res: Respons
     
     res.json(visits);
   } catch (error: any) {
-    console.error('Error getting market visits:', error);
-    res.status(500).json({ error: error.message || 'Failed to get market visits' });
+    console.error('Error getting market visits');
+    sendInternalError(res);
   }
 });
 
 // GET DAY SUMMARY
-router.get('/day-tracking/:glId/:date/summary', async (req: Request, res: Response) => {
+router.get('/day-tracking/:glId/:date/summary', requireSelfOrAdmin(req => req.params.glId), async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { glId, date } = req.params;
@@ -4502,7 +4669,7 @@ router.get('/day-tracking/:glId/:date/summary', async (req: Request, res: Respon
     // Get day tracking record
     const { data: dayTracking } = await freshClient
       .from('fb_day_tracking')
-      .select('*')
+      .select(FB_DAY_TRACKING_SELECT)
       .eq('gebietsleiter_id', glId)
       .eq('tracking_date', date)
       .single();
@@ -4543,18 +4710,19 @@ router.get('/day-tracking/:glId/:date/summary', async (req: Request, res: Respon
     
     res.json(summary);
   } catch (error: any) {
-    console.error('Error getting day summary:', error);
-    res.status(500).json({ error: error.message || 'Failed to get day summary' });
+    console.error('Error getting day summary');
+    sendInternalError(res);
   }
 });
 
 // RECORD MARKET START - Called when GL starts a market visit
-router.post('/day-tracking/market-start', async (req: Request, res: Response) => {
+router.post('/day-tracking/market-start', requireSelfOrAdmin(req => req.body.gebietsleiter_id), async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { gebietsleiter_id, market_id, start_time } = req.body;
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
     
-    if (!gebietsleiter_id || !market_id) {
+    if (!effectiveGlId || !market_id) {
       return res.status(400).json({ error: 'gebietsleiter_id and market_id are required' });
     }
     
@@ -4564,8 +4732,8 @@ router.post('/day-tracking/market-start', async (req: Request, res: Response) =>
     // Get day tracking to check if day is started
     const { data: dayTracking } = await freshClient
       .from('fb_day_tracking')
-      .select('*')
-      .eq('gebietsleiter_id', gebietsleiter_id)
+      .select(FB_DAY_TRACKING_SELECT)
+      .eq('gebietsleiter_id', effectiveGlId)
       .eq('tracking_date', today)
       .eq('status', 'active')
       .single();
@@ -4578,7 +4746,7 @@ router.post('/day-tracking/market-start', async (req: Request, res: Response) =>
     const { data: previousVisits } = await freshClient
       .from('fb_zeiterfassung_submissions')
       .select('id, market_end_time, besuchszeit_bis, visit_order')
-      .eq('gebietsleiter_id', gebietsleiter_id)
+      .eq('gebietsleiter_id', effectiveGlId)
       .gte('created_at', `${today}T00:00:00`)
       .lt('created_at', `${today}T23:59:59`)
       .order('created_at', { ascending: true });
@@ -4608,8 +4776,8 @@ router.post('/day-tracking/market-start', async (req: Request, res: Response) =>
       market_start_time: marketStartTime
     });
   } catch (error: any) {
-    console.error('Error recording market start:', error);
-    res.status(500).json({ error: error.message || 'Failed to record market start' });
+    console.error('Error recording market start');
+    sendInternalError(res);
   }
 });
 
@@ -4780,7 +4948,7 @@ function applyGroupRow(row: ExcelJS.Row) {
   });
 }
 
-router.get('/fragebogen/:id/export.xlsx', async (req: Request, res: Response) => {
+router.get('/fragebogen/:id/export.xlsx', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -5244,9 +5412,9 @@ router.get('/fragebogen/:id/export.xlsx', async (req: Request, res: Response) =>
     await workbook.xlsx.write(res);
     res.end();
   } catch (error: any) {
-    console.error('Error generating Fragebogen export:', error);
+    console.error('Error generating Fragebogen export:');
     if (!res.headersSent) {
-      res.status(500).json({ error: error.message || 'Failed to generate export' });
+      sendInternalError(res);
     }
   }
 });
@@ -5255,7 +5423,7 @@ router.get('/fragebogen/:id/export.xlsx', async (req: Request, res: Response) =>
 // FRAGEBOGEN DISTRIBUTION EXPORT (Monatlich, Ja/Nein)
 // POST /api/fragebogen/fragebogen/distribution-export.xlsx
 // ============================================================================
-router.post('/fragebogen/distribution-export.xlsx', async (req: Request, res: Response) => {
+router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Request, res: Response) => {
   try {
     const fragebogenIds: string[] = Array.from(new Set((req.body?.fragebogen_ids || []).filter(Boolean)));
     const questionIds: string[] = Array.from(new Set((req.body?.question_ids || []).filter(Boolean)));
@@ -5386,9 +5554,9 @@ router.post('/fragebogen/distribution-export.xlsx', async (req: Request, res: Re
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.status(200).send(workbookBuffer);
   } catch (error: any) {
-    console.error('Error generating distribution export:', error);
+    console.error('Error generating distribution export:');
     if (!res.headersSent) {
-      res.status(500).json({ error: error.message || 'Distribution-Export fehlgeschlagen' });
+      sendInternalError(res);
     }
   }
 });

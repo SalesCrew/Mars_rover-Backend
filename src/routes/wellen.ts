@@ -1,8 +1,225 @@
 import { Router, Request, Response } from 'express';
+import { randomUUID } from 'crypto';
 import { createFreshClient } from '../config/supabase';
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
+import { AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
+import { sendInternalError } from '../utils/httpErrors';
 
 const router = Router();
+
+const DELIVERY_PHOTOS_BUCKET = 'vorbesteller-lieferung';
+const DELIVERY_PHOTO_SIGNED_URL_SECONDS = 60 * 60;
+const WELLEN_IMAGES_BUCKET = 'wellen-images';
+const WELLEN_PHOTOS_BUCKET = 'wellen-photos';
+const WELLEN_PHOTO_SIGNED_URL_SECONDS = 60 * 60;
+const DELIVERY_PHOTO_MIME_TO_EXTENSION: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp'
+};
+const DELIVERY_PHOTO_MAX_BYTES = 8 * 1024 * 1024;
+const WELLEN_PHOTO_MIME_TO_EXTENSION: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp'
+};
+const WELLEN_PHOTO_ALLOWED_MIME_TYPES = Object.keys(WELLEN_PHOTO_MIME_TO_EXTENSION);
+const WELLEN_PHOTO_MAX_BYTES = 8 * 1024 * 1024;
+const WELLE_SELECT_COLUMNS = 'id, name, description, start_date, end_date, status, types, goal_type, goal_percentage, goal_value, image_url, foto_enabled, foto_only, foto_header, foto_description, no_limit_welle, is_deleted, created_at, updated_at';
+const WELLE_DISPLAY_SELECT_COLUMNS = 'id, welle_id, name, target_number, item_value, display_order, description, image_url, picture_url, ve, ve_size, vpe';
+const WELLE_KARTONWARE_SELECT_COLUMNS = 'id, welle_id, name, target_number, item_value, kartonware_order, description, image_url, picture_url, ve, ve_size, vpe';
+const WELLE_EINZELPRODUKT_SELECT_COLUMNS = 'id, welle_id, name, target_number, item_value, einzelprodukt_order, description, image_url, picture_url, ve, ve_size, vpe';
+const WELLE_PHOTO_TAG_SELECT_COLUMNS = 'id, welle_id, tag_name, tag_type, tag_order, created_at';
+const WELLE_PALETTE_SELECT_COLUMNS = 'id, welle_id, name, description, image_url, picture_url, size, palette_order';
+const WELLE_PALETTE_PRODUCT_SELECT_COLUMNS = 'id, palette_id, name, target_number, item_value, product_order, description, image_url, picture_url';
+const WELLE_SCHUETTE_SELECT_COLUMNS = 'id, welle_id, name, description, image_url, picture_url, size, schuette_order';
+const WELLE_SCHUETTE_PRODUCT_SELECT_COLUMNS = 'id, schuette_id, name, target_number, item_value, product_order, description, image_url, picture_url';
+const WELLE_KW_DAY_SELECT_COLUMNS = 'id, welle_id, kw, days, kw_order';
+const WELLEN_SUBMISSION_SELECT_COLUMNS = 'id, welle_id, gebietsleiter_id, market_id, item_type, item_id, quantity, value_per_unit, photo_url, created_at';
+const WELLEN_PHOTO_SELECT_COLUMNS = 'id, welle_id, gebietsleiter_id, market_id, photo_url, tags, comment, submission_batch_id, created_at';
+
+function extractStoragePathFromValue(value: string, bucket: string): string | null {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return null;
+
+  const marker = `/${bucket}/`;
+  const markerIndex = trimmed.indexOf(marker);
+  if (markerIndex >= 0) {
+    return decodeURIComponent(trimmed.slice(markerIndex + marker.length).split('?')[0]);
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return null;
+  }
+
+  return trimmed.replace(/^\/+/, '');
+}
+
+const storageErrorMessage = (error: unknown): string => {
+  const value = error as { message?: string; statusCode?: string | number; status?: string | number };
+  return `${value?.message || ''} ${value?.statusCode || ''} ${value?.status || ''}`.toLowerCase();
+};
+
+const isMissingBucketError = (error: unknown): boolean => {
+  const message = storageErrorMessage(error);
+  return message.includes('bucket not found') || message.includes('bucket_not_found') || message.includes('404');
+};
+
+const ensureWellenPhotosBucket = async (client: ReturnType<typeof createFreshClient>): Promise<void> => {
+  const { error } = await client.storage.createBucket(WELLEN_PHOTOS_BUCKET, {
+    public: false,
+    allowedMimeTypes: WELLEN_PHOTO_ALLOWED_MIME_TYPES,
+    fileSizeLimit: WELLEN_PHOTO_MAX_BYTES
+  });
+
+  if (!error) return;
+
+  const message = storageErrorMessage(error);
+  if (!message.includes('already exists') && !message.includes('already_exist') && !message.includes('409')) {
+    throw error;
+  }
+
+  await client.storage.updateBucket(WELLEN_PHOTOS_BUCKET, {
+    public: false,
+    allowedMimeTypes: WELLEN_PHOTO_ALLOWED_MIME_TYPES,
+    fileSizeLimit: WELLEN_PHOTO_MAX_BYTES
+  });
+};
+
+async function createSignedWellenPhotoUrl(
+  freshClient: ReturnType<typeof createFreshClient>,
+  value: string
+): Promise<{ url: string; path?: string }> {
+  const privatePath = extractStoragePathFromValue(value, WELLEN_PHOTOS_BUCKET);
+  const legacyPath = extractStoragePathFromValue(value, WELLEN_IMAGES_BUCKET);
+  const path = privatePath || legacyPath;
+  if (!path) return { url: value };
+
+  const primaryBucket = privatePath ? WELLEN_PHOTOS_BUCKET : WELLEN_IMAGES_BUCKET;
+  const { data, error } = await freshClient.storage
+    .from(primaryBucket)
+    .createSignedUrl(path, WELLEN_PHOTO_SIGNED_URL_SECONDS);
+
+  if ((!data?.signedUrl || error) && primaryBucket === WELLEN_PHOTOS_BUCKET) {
+    const fallback = await freshClient.storage
+      .from(WELLEN_IMAGES_BUCKET)
+      .createSignedUrl(path, WELLEN_PHOTO_SIGNED_URL_SECONDS);
+    if (fallback.data?.signedUrl) {
+      return { url: fallback.data.signedUrl, path };
+    }
+  }
+
+  if (!data?.signedUrl) {
+    console.warn('Could not sign wellen photo URL');
+    return { url: value, path };
+  }
+
+  return { url: data.signedUrl, path };
+}
+
+async function removeWellenPhotoObject(
+  freshClient: ReturnType<typeof createFreshClient>,
+  value: string
+): Promise<void> {
+  const privatePath = extractStoragePathFromValue(value, WELLEN_PHOTOS_BUCKET);
+  const legacyPath = extractStoragePathFromValue(value, WELLEN_IMAGES_BUCKET);
+  const path = privatePath || legacyPath;
+  if (!path) return;
+
+  const primaryBucket = privatePath ? WELLEN_PHOTOS_BUCKET : WELLEN_IMAGES_BUCKET;
+  const { error } = await freshClient.storage.from(primaryBucket).remove([path]);
+  if (!error || primaryBucket === WELLEN_IMAGES_BUCKET) return;
+
+  await freshClient.storage.from(WELLEN_IMAGES_BUCKET).remove([path]);
+}
+
+function parseWellenPhotoImageData(imageData: string): { base64Data: string; mimeType: string; extension: string } {
+  let base64Data = imageData;
+  let mimeType = 'image/jpeg';
+
+  if (imageData.startsWith('data:')) {
+    const matches = imageData.match(/^data:([^;]+);base64,(.+)$/);
+    if (matches) {
+      mimeType = String(matches[1] || mimeType).toLowerCase().trim();
+      base64Data = matches[2];
+    }
+  }
+
+  const extension = WELLEN_PHOTO_MIME_TO_EXTENSION[mimeType];
+  if (!extension) {
+    throw new Error('Unsupported wellen photo type');
+  }
+
+  return { base64Data, mimeType, extension };
+}
+
+function extractDeliveryPhotoPath(value: string): string | null {
+  return extractStoragePathFromValue(value, DELIVERY_PHOTOS_BUCKET);
+}
+
+async function createSignedDeliveryPhotoUrl(
+  freshClient: ReturnType<typeof createFreshClient>,
+  value: string
+): Promise<{ url: string; path?: string }> {
+  const path = extractDeliveryPhotoPath(value);
+  if (!path) return { url: value };
+
+  const { data, error } = await freshClient.storage
+    .from(DELIVERY_PHOTOS_BUCKET)
+    .createSignedUrl(path, DELIVERY_PHOTO_SIGNED_URL_SECONDS);
+
+  if (error || !data?.signedUrl) {
+    console.warn('Could not sign delivery photo URL');
+    return { url: value, path };
+  }
+
+  return { url: data.signedUrl, path };
+}
+
+function parseDeliveryImageData(imageData: string): { base64Data: string; mimeType: string; extension: string } {
+  let base64Data = imageData;
+  let mimeType = 'image/jpeg';
+
+  if (imageData.startsWith('data:')) {
+    const matches = imageData.match(/^data:([^;]+);base64,(.+)$/);
+    if (matches) {
+      mimeType = String(matches[1] || mimeType).toLowerCase().trim();
+      base64Data = matches[2];
+    }
+  }
+
+  const extension = DELIVERY_PHOTO_MIME_TO_EXTENSION[mimeType];
+  if (!extension) {
+    throw new Error('Unsupported delivery photo type');
+  }
+
+  return { base64Data, mimeType, extension };
+}
+
+const createExcelBuffer = async (
+  sheetName: string,
+  rows: Array<Record<string, any>>,
+  widths: number[]
+): Promise<Buffer> => {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet(sheetName);
+  const headers = rows.length > 0 ? Object.keys(rows[0]) : [];
+
+  worksheet.columns = headers.map((header, index) => ({
+    header,
+    key: header,
+    width: widths[index] || 20,
+  }));
+
+  for (const row of rows) {
+    worksheet.addRow(row);
+  }
+
+  worksheet.getRow(1).font = { bold: true };
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  return Buffer.from(buffer as ArrayBuffer);
+};
 
 // ============================================================================
 // SUBMISSION AGGREGATION HELPER
@@ -276,7 +493,7 @@ const isWaveInKWSellPeriod = (kwDays: Array<{ kw: string; days: string[] }> | nu
 // ============================================================================
 // DASHBOARD: GET CHAIN AVERAGES
 // ============================================================================
-router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
+router.get('/dashboard/chain-averages', async (req: AuthRequest, res: Response) => {
   try {
     // Use fresh client to avoid caching issues with wellen queries
     const freshClient = createFreshClient();
@@ -294,11 +511,13 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
     const endDate = req.query.endDate as string | undefined;
     const itemType = req.query.itemType as 'displays' | 'kartonware' | undefined;
     
-    const glFilter = glIdsParam ? glIdsParam.split(',').filter(Boolean) : [];
+    const glFilter = req.user?.role === 'admin'
+      ? (glIdsParam ? glIdsParam.split(',').filter(Boolean) : [])
+      : [getAuthenticatedGlId(req.user)].filter(Boolean) as string[];
     const isNoneSelected = glFilter.includes('__none__');
     const chainFilterIncludesOnlyTestGLs = glFilter.length > 0 && glFilter.every(id => testGLIdsChain.has(id));
    
-    console.log('📊 Fetching chain averages...', {
+    console.log('Fetching chain averages...', {
       glFilter: glFilter.length > 0 ? (isNoneSelected ? 'NONE' : glFilter.join(', ')) : 'ALL',
       dateRange: startDate && endDate ? `${startDate} to ${endDate}` : 'ALL',
       itemType: itemType || 'ALL'
@@ -1104,24 +1323,26 @@ router.get('/dashboard/chain-averages', async (req: Request, res: Response) => {
     console.log(`✅ Fetched chain averages for ${chainAverages.length} chains`);
     res.json(chainAverages);
   } catch (error: any) {
-    console.error('❌ Error fetching chain averages:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error fetching chain averages:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // DASHBOARD: GET WAVES PROGRESS
 // ============================================================================
-router.get('/dashboard/waves', async (req: Request, res: Response) => {
+router.get('/dashboard/waves', async (req: AuthRequest, res: Response) => {
   try {
     // Get filters from query params
     const glIdsParam = req.query.glIds as string | undefined;
     const itemType = req.query.itemType as 'displays' | 'kartonware' | undefined;
     
-    const glFilter = glIdsParam ? glIdsParam.split(',').filter(Boolean) : [];
+    const glFilter = req.user?.role === 'admin'
+      ? (glIdsParam ? glIdsParam.split(',').filter(Boolean) : [])
+      : [getAuthenticatedGlId(req.user)].filter(Boolean) as string[];
     const isNoneSelected = glFilter.includes('__none__');
     
-    console.log('📊 Fetching waves for dashboard...', {
+    console.log('Fetching waves for dashboard...', {
       glFilter: glFilter.length > 0 ? (isNoneSelected ? 'NONE' : glFilter.join(', ')) : 'ALL',
       itemType: itemType || 'ALL'
     });
@@ -1151,7 +1372,7 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
     // Fetch active, upcoming, and recently finished waves
     const { data: wellen, error: wellenError } = await freshClient
       .from('wellen')
-      .select('*')
+      .select(WELLE_SELECT_COLUMNS)
       .eq('is_deleted', false)
       .or(`status.eq.active,status.eq.upcoming,and(status.eq.past,end_date.gte.${threeDaysAgo.toISOString().split('T')[0]})`)
       .order('start_date', { ascending: false });
@@ -1406,8 +1627,8 @@ router.get('/dashboard/waves', async (req: Request, res: Response) => {
     console.log(`✅ Fetched ${wavesProgress.length} waves for dashboard`);
     res.json(wavesProgress);
   } catch (error: any) {
-    console.error('❌ Error fetching waves:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error fetching waves:');
+    sendInternalError(res);
   }
 });
 
@@ -1422,12 +1643,12 @@ router.get('/', async (req: Request, res: Response) => {
     // Fetch all wellen
     const { data: wellen, error: wellenError } = await freshClient
       .from('wellen')
-      .select('*')
+      .select(WELLE_SELECT_COLUMNS)
       .eq('is_deleted', false)
       .order('created_at', { ascending: false });
 
     if (wellenError) {
-      console.error('❌ Wellen query error:', wellenError);
+      console.error('❌ Wellen query error:');
       throw wellenError;
     }
     
@@ -1439,39 +1660,39 @@ router.get('/', async (req: Request, res: Response) => {
         // Fetch displays
         const { data: displays } = await freshClient
           .from('wellen_displays')
-          .select('*')
+          .select(WELLE_DISPLAY_SELECT_COLUMNS)
           .eq('welle_id', welle.id)
           .order('display_order', { ascending: true });
 
         // Fetch kartonware
         const { data: kartonware } = await freshClient
           .from('wellen_kartonware')
-          .select('*')
+          .select(WELLE_KARTONWARE_SELECT_COLUMNS)
           .eq('welle_id', welle.id)
           .order('kartonware_order', { ascending: true });
 
         // Fetch einzelprodukte
         const { data: einzelprodukte } = await freshClient
           .from('wellen_einzelprodukte')
-          .select('*')
+          .select(WELLE_EINZELPRODUKT_SELECT_COLUMNS)
           .eq('welle_id', welle.id)
           .order('einzelprodukt_order', { ascending: true });
 
         // Fetch foto tags
         const { data: fotoTagsData } = await freshClient
           .from('wellen_photo_tags')
-          .select('*')
+          .select(WELLE_PHOTO_TAG_SELECT_COLUMNS)
           .eq('welle_id', welle.id);
 
         // Fetch palettes with their products
         const { data: paletten, error: palError } = await freshClient
           .from('wellen_paletten')
-          .select('*')
+          .select(WELLE_PALETTE_SELECT_COLUMNS)
           .eq('welle_id', welle.id)
           .order('palette_order', { ascending: true });
         console.log(`Fetched palettes for welle ${welle.id}:`, paletten?.length || 0);
         if (palError) {
-          console.error(`Palette fetch failed for welle ${welle.id}:`, palError.message);
+          console.error(`Palette fetch failed for welle ${welle.id}:`);
         }
 
         // Fetch palette products for each palette
@@ -1479,7 +1700,7 @@ router.get('/', async (req: Request, res: Response) => {
           (paletten || []).map(async (palette) => {
             const { data: products } = await freshClient
               .from('wellen_paletten_products')
-              .select('*')
+              .select(WELLE_PALETTE_PRODUCT_SELECT_COLUMNS)
               .eq('palette_id', palette.id)
               .order('product_order', { ascending: true });
             
@@ -1493,12 +1714,12 @@ router.get('/', async (req: Request, res: Response) => {
         // Fetch schütten with their products
         const { data: schuetten, error: schError } = await freshClient
           .from('wellen_schuetten')
-          .select('*')
+          .select(WELLE_SCHUETTE_SELECT_COLUMNS)
           .eq('welle_id', welle.id)
           .order('schuette_order', { ascending: true });
         console.log(`Fetched schuetten for welle ${welle.id}:`, schuetten?.length || 0);
         if (schError) {
-          console.error(`Schuetten fetch failed for welle ${welle.id}:`, schError.message);
+          console.error(`Schuetten fetch failed for welle ${welle.id}:`);
         }
 
         // Fetch schütte products for each schütte
@@ -1506,7 +1727,7 @@ router.get('/', async (req: Request, res: Response) => {
           (schuetten || []).map(async (schuette) => {
             const { data: products } = await freshClient
               .from('wellen_schuetten_products')
-              .select('*')
+              .select(WELLE_SCHUETTE_PRODUCT_SELECT_COLUMNS)
               .eq('schuette_id', schuette.id)
               .order('product_order', { ascending: true });
             
@@ -1520,7 +1741,7 @@ router.get('/', async (req: Request, res: Response) => {
         // Fetch KW days
         const { data: kwDays } = await freshClient
           .from('wellen_kw_days')
-          .select('*')
+          .select(WELLE_KW_DAY_SELECT_COLUMNS)
           .eq('welle_id', welle.id)
           .order('kw_order', { ascending: true });
 
@@ -1684,8 +1905,8 @@ router.get('/', async (req: Request, res: Response) => {
 
     res.json(wellenWithDetails);
   } catch (error: any) {
-    console.error('❌ Error fetching wellen:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error fetching wellen:');
+    sendInternalError(res);
   }
 });
 
@@ -1936,12 +2157,13 @@ async function fetchWellenPhotoRowsForAdmin(
   const glMap = new Map((glData || []).map((g: any) => [g.id, g.name]));
   const marketMap = new Map((marketData || []).map((m: any) => [m.id, m]));
 
-  return (data || []).map((photo: any) => {
+  return Promise.all((data || []).map(async (photo: any) => {
     const market = marketMap.get(photo.market_id) || {};
     const marketAddressLine = String((market as any).address || '');
     const marketPostalCode = String((market as any).postal_code || '');
     const marketCity = String((market as any).city || '');
     const marketAddress = [marketAddressLine, [marketPostalCode, marketCity].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+    const signedPhoto = await createSignedWellenPhotoUrl(freshClient, photo.photo_url);
 
     return {
       id: photo.id,
@@ -1959,12 +2181,12 @@ async function fetchWellenPhotoRowsForAdmin(
       marketPostalCode,
       marketCity,
       marketAddress,
-      photoUrl: photo.photo_url,
+      photoUrl: signedPhoto.url,
       tags: photo.tags || [],
       comment: photo.comment || null,
       createdAt: photo.created_at
     };
-  });
+  }));
 }
 
 async function fetchFragebogenPhotoRowsForAdmin(
@@ -2097,56 +2319,76 @@ async function fetchAdminPhotoRows(
   return merged.filter(row => row.source === filters.source);
 }
 
-router.post('/photos/upload', async (req: Request, res: Response) => {
+router.post('/photos/upload', async (req: AuthRequest, res: Response) => {
   try {
     const { welle_id, gebietsleiter_id, market_id, photos, submission_batch_id } = req.body;
-    
-    if (!welle_id || !gebietsleiter_id || !market_id || !photos || !Array.isArray(photos) || photos.length === 0) {
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
+
+    if (!welle_id || !effectiveGlId || !market_id || !photos || !Array.isArray(photos) || photos.length === 0) {
       return res.status(400).json({ error: 'Missing required fields: welle_id, gebietsleiter_id, market_id, photos' });
     }
 
-    console.log(`📷 Uploading ${photos.length} photos for welle ${welle_id}...`);
+    console.log(`Uploading ${photos.length} photos for welle ${welle_id}...`);
     const uploadedPhotos: any[] = [];
 
     for (const photo of photos) {
-      let base64Data = photo.image;
-      let contentType = 'image/jpeg';
-      if (photo.image.startsWith('data:')) {
-        const matches = photo.image.match(/^data:([^;]+);base64,(.+)$/);
-        if (matches) { contentType = matches[1]; base64Data = matches[2]; }
+      let parsedPhoto;
+      try {
+        parsedPhoto = parseWellenPhotoImageData(photo.image);
+      } catch {
+        return res.status(400).json({ error: 'Unsupported wellen photo type' });
       }
+      const { base64Data, mimeType, extension } = parsedPhoto;
       const buffer = Buffer.from(base64Data, 'base64');
-      const timestamp = Date.now();
-      const randomStr = Math.random().toString(36).substring(2, 8);
-      const extension = contentType.split('/')[1] || 'jpg';
-      const filePath = `photos/${welle_id}/${timestamp}-${randomStr}.${extension}`;
+      if (!buffer.length || buffer.length > WELLEN_PHOTO_MAX_BYTES) {
+        return res.status(400).json({ error: 'Wellen photo is empty or too large' });
+      }
+      const today = new Date().toISOString().slice(0, 10);
+      const filePath = `photos/${welle_id}/${today}/${randomUUID()}.${extension}`;
 
       const photoClient = createFreshClient();
-      const { data: uploadData, error: uploadError } = await photoClient.storage
-        .from('wellen-images').upload(filePath, buffer, { contentType, upsert: true });
+      let { data: uploadData, error: uploadError } = await photoClient.storage
+        .from(WELLEN_PHOTOS_BUCKET).upload(filePath, buffer, { contentType: mimeType, upsert: false });
 
-      if (uploadError) { console.error('❌ Photo upload error:', uploadError); continue; }
+      if (uploadError && isMissingBucketError(uploadError)) {
+        await ensureWellenPhotosBucket(photoClient);
+        const retryUpload = await photoClient.storage
+          .from(WELLEN_PHOTOS_BUCKET).upload(filePath, buffer, { contentType: mimeType, upsert: false });
+        uploadData = retryUpload.data;
+        uploadError = retryUpload.error;
+      }
 
-      const { data: urlData } = photoClient.storage.from('wellen-images').getPublicUrl(uploadData.path);
+      if (uploadError) { console.error('Photo upload error'); continue; }
+
+      if (!uploadData?.path) { console.error('Photo upload returned no storage path'); continue; }
+      const uploadedPath = uploadData.path;
 
       const { data: photoRecord, error: dbError } = await photoClient
         .from('wellen_photos')
-        .insert({ welle_id, gebietsleiter_id, market_id, photo_url: urlData.publicUrl, tags: photo.tags || [], comment: photo.comment || null, submission_batch_id: submission_batch_id || null })
-        .select().single();
+        .insert({ welle_id, gebietsleiter_id: effectiveGlId, market_id, photo_url: uploadedPath, tags: photo.tags || [], comment: photo.comment || null, submission_batch_id: submission_batch_id || null })
+        .select(WELLEN_PHOTO_SELECT_COLUMNS).single();
 
-      if (dbError) { console.warn('⚠️ Could not save photo record:', dbError.message); }
-      else { uploadedPhotos.push(photoRecord); }
+      if (dbError) { console.warn('Could not save photo record'); }
+      else {
+        const signedPhoto = await createSignedWellenPhotoUrl(photoClient, uploadedPath);
+        uploadedPhotos.push({
+          ...photoRecord,
+          photo_url: signedPhoto.url,
+          photoUrl: signedPhoto.url,
+          photoPath: signedPhoto.path || uploadedPath
+        });
+      }
     }
 
     console.log(`✅ Uploaded ${uploadedPhotos.length}/${photos.length} photos`);
     res.json({ uploaded: uploadedPhotos.length, photos: uploadedPhotos });
   } catch (error: any) {
-    console.error('❌ Error uploading photos:', error);
-    res.status(500).json({ error: error.message || 'Failed to upload photos' });
+    console.error('Error uploading photos');
+    sendInternalError(res);
   }
 });
 
-router.get('/photos', async (req: Request, res: Response) => {
+router.get('/photos', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { welle_id, fragebogen_id, gl_id, market_id, tag, tags, source, start_date, end_date, limit: limitParam, offset: offsetParam } = req.query;
     const parsedSource = parseAdminPhotoSource(source);
@@ -2169,12 +2411,12 @@ router.get('/photos', async (req: Request, res: Response) => {
     const pagedRows = allRows.slice(offset, offset + limit);
     res.json({ photos: pagedRows, total: allRows.length });
   } catch (error: any) {
-    console.error('❌ Error fetching photos:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch photos' });
+    console.error('Error fetching photos');
+    sendInternalError(res);
   }
 });
 
-router.get('/photos/export.zip', async (req: Request, res: Response) => {
+router.get('/photos/export.zip', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { welle_id, fragebogen_id, gl_id, market_id, tag, tags, source, start_date, end_date, zip_name } = req.query;
     const parsedSource = parseAdminPhotoSource(source);
@@ -2205,10 +2447,10 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
 
     const archive = await createZipArchiver();
     archive.on('warning', (warning: unknown) => {
-      console.warn('Photo export ZIP warning:', warning);
+      console.warn('Photo export ZIP warning');
     });
     archive.on('error', (archiveError: unknown) => {
-      console.error('Photo export ZIP error:', archiveError);
+      console.error('Photo export ZIP error');
       if (!res.headersSent) {
         res.status(500).json({ error: 'ZIP konnte nicht erstellt werden.' });
       } else {
@@ -2236,7 +2478,7 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
             const downloaded = await fetchPhotoForExport(photo.photoUrl, PHOTO_EXPORT_TIMEOUT_MS);
             return { photo, downloaded };
           } catch (photoError: any) {
-            console.warn(`Skipping photo ${photo.id}:`, photoError?.message || photoError);
+            console.warn('Skipping photo during export');
             return { photo, downloaded: null as { buffer: Buffer; contentType: string | null } | null };
           }
         })
@@ -2248,7 +2490,7 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
           return;
         }
         if (!downloaded) {
-          console.warn(`Skipping photo ${photo.id}: fetch failed/timeout/invalid URL`);
+          console.warn('Skipping photo during export: fetch failed/timeout/invalid URL');
           continue;
         }
 
@@ -2274,28 +2516,27 @@ router.get('/photos/export.zip', async (req: Request, res: Response) => {
     if (res.writableEnded || (res as any).destroyed) return;
     await archive.finalize();
   } catch (error: any) {
-    console.error('❌ Error exporting photos zip:', error);
+    console.error('Error exporting photos zip');
     if (!res.headersSent) {
-      res.status(500).json({ error: error.message || 'Failed to export photos zip' });
+      sendInternalError(res);
     }
   }
 });
 
-router.delete('/photos/:id', async (req: Request, res: Response) => {
+router.delete('/photos/:id', requireOwnedRowOrAdmin('wellen_photos'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
     const { data: photo } = await freshClient.from('wellen_photos').select('photo_url').eq('id', id).single();
     if (photo?.photo_url) {
-      const urlParts = photo.photo_url.split('/wellen-images/');
-      if (urlParts[1]) { await freshClient.storage.from('wellen-images').remove([urlParts[1]]); }
+      await removeWellenPhotoObject(freshClient, photo.photo_url);
     }
     const { error } = await freshClient.from('wellen_photos').delete().eq('id', id);
     if (error) throw error;
     res.json({ message: 'Photo deleted', id });
   } catch (error: any) {
-    console.error('❌ Error deleting photo:', error);
-    res.status(500).json({ error: error.message || 'Failed to delete photo' });
+    console.error('Error deleting photo');
+    sendInternalError(res);
   }
 });
 
@@ -2305,12 +2546,12 @@ router.delete('/photos/:id', async (req: Request, res: Response) => {
 router.get('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    console.log(`📄 Fetching welle ${id}...`);
+    console.log(`Fetching welle ${id}...`);
 
     const freshClient = createFreshClient();
     const { data: welle, error: welleError } = await freshClient
       .from('wellen')
-      .select('*')
+      .select(WELLE_SELECT_COLUMNS)
       .eq('id', id)
       .eq('is_deleted', false)
       .single();
@@ -2323,25 +2564,25 @@ router.get('/:id', async (req: Request, res: Response) => {
     // Fetch related data (same as GET ALL logic)
     const { data: displays } = await freshClient
       .from('wellen_displays')
-      .select('*')
+      .select(WELLE_DISPLAY_SELECT_COLUMNS)
       .eq('welle_id', id)
       .order('display_order', { ascending: true });
 
     const { data: kartonware } = await freshClient
       .from('wellen_kartonware')
-      .select('*')
+      .select(WELLE_KARTONWARE_SELECT_COLUMNS)
       .eq('welle_id', id)
       .order('kartonware_order', { ascending: true });
 
     const { data: einzelprodukte } = await freshClient
       .from('wellen_einzelprodukte')
-      .select('*')
+      .select(WELLE_EINZELPRODUKT_SELECT_COLUMNS)
       .eq('welle_id', id)
       .order('einzelprodukt_order', { ascending: true });
 
     const { data: kwDays } = await freshClient
       .from('wellen_kw_days')
-      .select('*')
+      .select(WELLE_KW_DAY_SELECT_COLUMNS)
       .eq('welle_id', id)
       .order('kw_order', { ascending: true });
 
@@ -2424,17 +2665,17 @@ router.get('/:id', async (req: Request, res: Response) => {
     console.log(`✅ Fetched welle ${id}`);
     res.json(welleWithDetails);
   } catch (error: any) {
-    console.error('❌ Error fetching welle:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error fetching welle:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // CREATE NEW WELLE
 // ============================================================================
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requireAdmin, async (req: Request, res: Response) => {
   try {
-    console.log('➕ Creating new welle...');
+    console.log('Creating new welle...');
     const {
       name,
       image,
@@ -2459,16 +2700,7 @@ router.post('/', async (req: Request, res: Response) => {
       noLimitWelle
     } = req.body;
 
-    console.log('📦 Received data:', {
-      displays: displays?.length || 0,
-      kartonwareItems: kartonwareItems?.length || 0,
-      paletteItems: paletteItems?.length || 0,
-      schutteItems: schutteItems?.length || 0,
-      einzelproduktItems: einzelproduktItems?.length || 0,
-      paletteItemsData: JSON.stringify(paletteItems),
-      schutteItemsData: JSON.stringify(schutteItems),
-      fotoOnly: fotoOnly || false
-    });
+    console.log('Received welle create request');
 
     // Validate required fields
     if (!name || !startDate || !endDate || !goalType) {
@@ -2507,7 +2739,7 @@ router.post('/', async (req: Request, res: Response) => {
     const { data: welle, error: welleError } = await freshClient
       .from('wellen')
       .insert(insertPayload)
-      .select()
+      .select(WELLE_SELECT_COLUMNS)
       .single();
 
     if (welleError) throw welleError;
@@ -2521,8 +2753,8 @@ router.post('/', async (req: Request, res: Response) => {
         tag_type: tag.type
       }));
       const { error: tagError } = await freshClient.from('wellen_photo_tags').insert(tagsToInsert);
-      if (tagError) console.warn('⚠️ Could not insert foto tags:', tagError.message);
-      else console.log(`📷 Inserted ${tagsToInsert.length} foto tags`);
+      if (tagError) console.warn('Could not insert foto tags:');
+      else console.log(`Inserted ${tagsToInsert.length} foto tags`);
     }
 
     // Insert displays
@@ -2584,10 +2816,10 @@ router.post('/', async (req: Request, res: Response) => {
 
     // Insert palettes with their products
     if (paletteItems && paletteItems.length > 0) {
-      console.log(`📦 Inserting ${paletteItems.length} palettes...`);
+      console.log(`Inserting ${paletteItems.length} palettes...`);
       for (let index = 0; index < paletteItems.length; index++) {
         const p = paletteItems[index];
-        console.log(`  Palette ${index}: ${p.name}, products: ${p.products?.length || 0}`);
+        console.log(`  Palette ${index}: ${p.products?.length || 0} products`);
         
         // Insert palette - use fresh client
         const freshClient = createFreshClient();
@@ -2600,11 +2832,11 @@ router.post('/', async (req: Request, res: Response) => {
             picture_url: p.picture || null,
             palette_order: index
           })
-          .select()
+          .select(WELLE_PALETTE_SELECT_COLUMNS)
           .single();
 
         if (paletteError) {
-          console.error('❌ Palette insert error:', paletteError);
+          console.error('❌ Palette insert error:');
           throw paletteError;
         }
         console.log(`  ✅ Palette inserted with id: ${palette.id}`);
@@ -2635,7 +2867,7 @@ router.post('/', async (req: Request, res: Response) => {
       console.log(`📦 Inserting ${schutteItems.length} schütten...`);
       for (let index = 0; index < schutteItems.length; index++) {
         const s = schutteItems[index];
-        console.log(`  Schütte ${index}: ${s.name}, products: ${s.products?.length || 0}`);
+        console.log(`  Schuette ${index}: ${s.products?.length || 0} products`);
         
         // Insert schütte - use fresh client
         const freshClient = createFreshClient();
@@ -2648,11 +2880,11 @@ router.post('/', async (req: Request, res: Response) => {
             picture_url: s.picture || null,
             schuette_order: index
           })
-          .select()
+          .select(WELLE_SCHUETTE_SELECT_COLUMNS)
           .single();
 
         if (schutteError) {
-          console.error('❌ Schütte insert error:', schutteError);
+          console.error('❌ Schütte insert error:');
           throw schutteError;
         }
         console.log(`  ✅ Schütte inserted with id: ${schuette.id}`);
@@ -2704,15 +2936,15 @@ router.post('/', async (req: Request, res: Response) => {
     console.log(`✅ Successfully created welle ${welle.id} with all related data`);
     res.status(201).json({ id: welle.id, message: 'Welle created successfully' });
   } catch (error: any) {
-    console.error('❌ Error creating welle:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error creating welle:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // UPDATE WELLE
 // ============================================================================
-router.put('/:id', async (req: Request, res: Response) => {
+router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     console.log(`✏️ Updating welle ${id}...`);
@@ -2919,7 +3151,7 @@ router.put('/:id', async (req: Request, res: Response) => {
     if (palettesToDelete.length > 0) {
       await freshClient.from('wellen_paletten_products').delete().in('palette_id', palettesToDelete);
       await freshClient.from('wellen_paletten').delete().in('id', palettesToDelete);
-      console.log(`🗑️ Deleted ${palettesToDelete.length} removed palettes`);
+      console.log(`Deleted ${palettesToDelete.length} removed palettes`);
     }
     
     if (paletteItems && paletteItems.length > 0) {
@@ -2949,7 +3181,7 @@ router.put('/:id', async (req: Request, res: Response) => {
               picture_url: p.picture || null,
               palette_order: index
             })
-            .select()
+            .select(WELLE_PALETTE_SELECT_COLUMNS)
             .single();
 
           if (paletteError) throw paletteError;
@@ -3050,7 +3282,7 @@ router.put('/:id', async (req: Request, res: Response) => {
               picture_url: s.picture || null,
               schuette_order: index
             })
-            .select()
+            .select(WELLE_SCHUETTE_SELECT_COLUMNS)
             .single();
 
           if (schutteError) throw schutteError;
@@ -3133,18 +3365,18 @@ router.put('/:id', async (req: Request, res: Response) => {
     console.log(`✅ Updated welle ${id}`);
     res.json({ message: 'Welle updated successfully' });
   } catch (error: any) {
-    console.error('❌ Error updating welle:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error updating welle:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // DELETE WELLE (soft delete — sets is_deleted=true, never removes the row)
 // ============================================================================
-router.delete('/:id', async (req: Request, res: Response) => {
+router.delete('/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    console.log(`🗑️ Soft-deleting welle ${id}...`);
+    console.log(`Soft-deleting welle ${id}...`);
 
     const freshClient = createFreshClient();
     const { error } = await freshClient
@@ -3157,24 +3389,25 @@ router.delete('/:id', async (req: Request, res: Response) => {
     console.log(`✅ Soft-deleted welle ${id} (row preserved, is_deleted=true)`);
     res.json({ message: 'Welle deleted successfully' });
   } catch (error: any) {
-    console.error('❌ Error deleting welle:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error deleting welle:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // UPDATE GL PROGRESS (BATCH) - Adds to existing values (cumulative)
 // ============================================================================
-router.post('/:id/progress/batch', async (req: Request, res: Response) => {
+router.post('/:id/progress/batch', requireSelfOrAdmin(req => req.body.gebietsleiter_id), async (req: AuthRequest, res: Response) => {
   try {
     const { id: welleId } = req.params;
     const { gebietsleiter_id, market_id, items, skipVisitUpdate, timestamp } = req.body;
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
 
-    console.log(`📊 Batch updating GL progress for welle ${welleId}...${skipVisitUpdate ? ' (skipping visit update)' : ''}`);
+    console.log(`Batch updating GL progress for welle ${welleId}...${skipVisitUpdate ? ' (skipping visit update)' : ''}`);
     
     const freshClient = createFreshClient();
 
-    if (!gebietsleiter_id || !items || !Array.isArray(items)) {
+    if (!effectiveGlId || !items || !Array.isArray(items)) {
       return res.status(400).json({ error: 'Missing required fields: gebietsleiter_id, items' });
     }
 
@@ -3182,7 +3415,7 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
     const submissionLogs = items.map((item: any) => {
       const entry: any = {
         welle_id: welleId,
-        gebietsleiter_id,
+        gebietsleiter_id: effectiveGlId,
         market_id: market_id || null,
         item_type: item.item_type,
         item_id: item.item_id,
@@ -3200,7 +3433,7 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
       .insert(submissionLogs);
 
     if (error) throw error;
-    console.log(`📝 Logged ${submissionLogs.length} submissions for market ${market_id || 'N/A'}`);
+    console.log(`Logged ${submissionLogs.length} welle submissions`);
 
     // Update market visit count (if market_id is provided and not skipping)
     if (market_id && !skipVisitUpdate) {
@@ -3220,19 +3453,19 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
             last_visit_date: today
           })
           .eq('id', market_id);
-        console.log(`📍 Recorded visit for market ${market_id}`);
+          console.log('Recorded welle market visit');
       }
 
       await freshClient
         .from('market_visits')
         .upsert({
           market_id,
-          gebietsleiter_id,
+          gebietsleiter_id: effectiveGlId,
           visit_date: today,
           source: 'vorbesteller'
         }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
     } else if (skipVisitUpdate) {
-      console.log(`⏭️ Skipping visit update for market ${market_id} (user chose not to record new visit)`);
+      console.log('Skipping welle visit update by user choice');
     }
 
     console.log(`✅ Updated ${items.length} progress entries (cumulative)`);
@@ -3241,21 +3474,26 @@ router.post('/:id/progress/batch', async (req: Request, res: Response) => {
       items_updated: items.length 
     });
   } catch (error: any) {
-    console.error('❌ Error updating batch progress:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error updating batch progress:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // UPDATE GL PROGRESS - Adds to existing value (cumulative)
 // ============================================================================
-router.post('/:id/progress', async (req: Request, res: Response) => {
+router.post('/:id/progress', requireSelfOrAdmin(req => req.body.gebietsleiter_id), async (req: AuthRequest, res: Response) => {
   try {
     const { id: welleId } = req.params;
     const { gebietsleiter_id, market_id, item_type, item_id, current_number, value_per_unit } = req.body;
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
 
-    console.log(`📊 Updating GL progress for welle ${welleId}...`);
+    console.log(`Updating GL progress for welle ${welleId}...`);
     
+    if (!effectiveGlId) {
+      return res.status(400).json({ error: 'Missing required fields: gebietsleiter_id' });
+    }
+
     const freshClient = createFreshClient();
 
     // Insert submission (single source of truth)
@@ -3263,7 +3501,7 @@ router.post('/:id/progress', async (req: Request, res: Response) => {
       .from('wellen_submissions')
       .insert({
         welle_id: welleId,
-        gebietsleiter_id,
+        gebietsleiter_id: effectiveGlId,
         market_id: market_id || null,
         item_type,
         item_id,
@@ -3273,21 +3511,25 @@ router.post('/:id/progress', async (req: Request, res: Response) => {
 
     if (error) throw error;
 
-    console.log(`✅ Inserted submission for welle ${welleId}`);
+    console.log('Inserted welle submission');
     res.json({ message: 'Progress updated successfully' });
   } catch (error: any) {
-    console.error('❌ Error updating progress:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error updating progress:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // GET GL PROGRESS FOR A WELLE
 // ============================================================================
-router.get('/:id/progress/:glId', async (req: Request, res: Response) => {
+router.get('/:id/progress/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: AuthRequest, res: Response) => {
   try {
     const { id: welleId, glId } = req.params;
-    console.log(`📊 Fetching GL progress for welle ${welleId}, GL ${glId}...`);
+    const effectiveGlId = req.user?.role === 'admin' ? glId : getAuthenticatedGlId(req.user);
+    if (!effectiveGlId) {
+      return res.status(400).json({ error: 'gebietsleiter_id required' });
+    }
+    console.log('Fetching GL progress for welle');
     
     const freshClient = createFreshClient();
 
@@ -3295,7 +3537,7 @@ router.get('/:id/progress/:glId', async (req: Request, res: Response) => {
       .from('wellen_submissions')
       .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, market_id')
       .eq('welle_id', welleId)
-      .eq('gebietsleiter_id', glId);
+      .eq('gebietsleiter_id', effectiveGlId);
 
     if (error) throw error;
 
@@ -3303,25 +3545,29 @@ router.get('/:id/progress/:glId', async (req: Request, res: Response) => {
     console.log(`✅ Fetched ${data.length} progress entries`);
     res.json(data);
   } catch (error: any) {
-    console.error('❌ Error fetching progress:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error fetching progress:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // GET GL-SPECIFIC SUBMISSIONS FOR A WELLE - For GL Vorbesteller History
 // ============================================================================
-router.get('/:welleId/gl-submissions/:glId', async (req: Request, res: Response) => {
+router.get('/:welleId/gl-submissions/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: AuthRequest, res: Response) => {
   try {
     const { welleId, glId } = req.params;
+    const effectiveGlId = req.user?.role === 'admin' ? glId : getAuthenticatedGlId(req.user);
+    if (!effectiveGlId) {
+      return res.status(400).json({ error: 'gebietsleiter_id required' });
+    }
     const freshClient = createFreshClient();
 
     // Fetch all submissions for this GL + wave
     const { data: submissions, error: submissionsError } = await freshClient
       .from('wellen_submissions')
-      .select('*')
+      .select(WELLEN_SUBMISSION_SELECT_COLUMNS)
       .eq('welle_id', welleId)
-      .eq('gebietsleiter_id', glId)
+      .eq('gebietsleiter_id', effectiveGlId)
       .order('created_at', { ascending: false });
 
     if (submissionsError) throw submissionsError;
@@ -3471,8 +3717,8 @@ router.get('/:welleId/gl-submissions/:glId', async (req: Request, res: Response)
 
     res.json(response);
   } catch (error: any) {
-    console.error('Error fetching GL submissions:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching GL submissions:');
+    sendInternalError(res);
   }
 });
 
@@ -3480,9 +3726,13 @@ router.get('/:welleId/gl-submissions/:glId', async (req: Request, res: Response)
 // GET SUBMITTED MARKET IDS FOR A WELLE + GL
 // Returns distinct market_ids that have submissions (or photos for foto-only)
 // ============================================================================
-router.get('/:welleId/submitted-markets/:glId', async (req: Request, res: Response) => {
+router.get('/:welleId/submitted-markets/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: AuthRequest, res: Response) => {
   try {
     const { welleId, glId } = req.params;
+    const effectiveGlId = req.user?.role === 'admin' ? glId : getAuthenticatedGlId(req.user);
+    if (!effectiveGlId) {
+      return res.status(400).json({ error: 'gebietsleiter_id required' });
+    }
     const freshClient = createFreshClient();
 
     const { data: welleRow } = await freshClient.from('wellen').select('foto_only').eq('id', welleId).single();
@@ -3492,14 +3742,14 @@ router.get('/:welleId/submitted-markets/:glId', async (req: Request, res: Respon
 
     if (welleRow?.foto_only) {
       const [myPhotos, allPhotos] = await Promise.all([
-        freshClient.from('wellen_photos').select('market_id').eq('welle_id', welleId).eq('gebietsleiter_id', glId),
+        freshClient.from('wellen_photos').select('market_id').eq('welle_id', welleId).eq('gebietsleiter_id', effectiveGlId),
         freshClient.from('wellen_photos').select('market_id').eq('welle_id', welleId)
       ]);
       myMarketIds = [...new Set((myPhotos.data || []).map(p => p.market_id).filter(Boolean))];
       allMarketIds = [...new Set((allPhotos.data || []).map(p => p.market_id).filter(Boolean))];
     } else {
       const [mySubs, allSubs] = await Promise.all([
-        freshClient.from('wellen_submissions').select('market_id').eq('welle_id', welleId).eq('gebietsleiter_id', glId),
+        freshClient.from('wellen_submissions').select('market_id').eq('welle_id', welleId).eq('gebietsleiter_id', effectiveGlId),
         freshClient.from('wellen_submissions').select('market_id').eq('welle_id', welleId)
       ]);
       myMarketIds = [...new Set((mySubs.data || []).map(s => s.market_id).filter(Boolean))];
@@ -3508,8 +3758,8 @@ router.get('/:welleId/submitted-markets/:glId', async (req: Request, res: Respon
 
     res.json({ marketIds: myMarketIds, allMarketIds });
   } catch (error: any) {
-    console.error('Error fetching submitted markets:', error);
-    res.status(500).json({ error: error.message });
+    console.error('Error fetching submitted markets:');
+    sendInternalError(res);
   }
 });
 
@@ -3517,7 +3767,7 @@ router.get('/:welleId/submitted-markets/:glId', async (req: Request, res: Respon
 // GET ALL PROGRESS FOR A WELLE (ALL GLs) - For detailed view
 // Uses wellen_submissions for individual market-specific entries
 // ============================================================================
-router.get('/:id/all-progress', async (req: Request, res: Response) => {
+router.get('/:id/all-progress', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id: welleId } = req.params;
     
@@ -3529,7 +3779,7 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       // Return photos instead of submissions for foto-only waves
       const { data: photos, error: photoErr } = await freshClient
         .from('wellen_photos')
-        .select('*')
+        .select('id, welle_id, gebietsleiter_id, market_id, photo_url, tags, comment, created_at')
         .eq('welle_id', welleId)
         .order('created_at', { ascending: false });
       if (photoErr) throw photoErr;
@@ -3544,11 +3794,12 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       const glMap = new Map((glRes.data || []).map((g: any) => [g.id, g.name]));
       const marketMap = new Map((marketRes.data || []).map((m: any) => [m.id, m]));
 
-      const enrichedPhotos = (photos || []).map(p => {
+      const enrichedPhotos = await Promise.all((photos || []).map(async p => {
         const market = marketMap.get(p.market_id) as any;
+        const signedPhoto = await createSignedWellenPhotoUrl(freshClient, p.photo_url);
         return {
           id: p.id,
-          photoUrl: p.photo_url,
+          photoUrl: signedPhoto.url,
           tags: p.tags || [],
           comment: p.comment || null,
           glId: p.gebietsleiter_id,
@@ -3559,7 +3810,7 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
           marketAddress: [market?.address, [market?.postal_code, market?.city].filter(Boolean).join(' ')].filter(Boolean).join(', '),
           createdAt: p.created_at
         };
-      });
+      }));
 
       return res.json({ type: 'foto', photos: enrichedPhotos });
     }
@@ -3567,12 +3818,12 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     // Use wellen_submissions for detailed view (individual submissions with market_id)
     const { data: submissions, error: submissionsError } = await freshClient
       .from('wellen_submissions')
-      .select('*')
+      .select(WELLEN_SUBMISSION_SELECT_COLUMNS)
       .eq('welle_id', welleId)
       .order('created_at', { ascending: false });
 
     if (submissionsError) {
-      return res.status(500).json({ error: submissionsError.message });
+      return sendInternalError(res);
     }
 
     if (!submissions || submissions.length === 0) {
@@ -3624,10 +3875,13 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
     const schutteEntries = submissions.filter(p => p.item_type === 'schuette');
 
     // Process display/kartonware/einzelprodukt entries - each submission is separate
-    const standardResponses = displayKartonwareEinzelproduktEntries.map(entry => {
+    const standardResponses = await Promise.all(displayKartonwareEinzelproduktEntries.map(async entry => {
       const gl = glDetails.find((g: any) => g.id === entry.gebietsleiter_id);
       const glUser = gls.find((u: any) => u.id === entry.gebietsleiter_id);
       const market = markets.find((m: any) => m.id === entry.market_id);
+      const signedPhoto = entry.photo_url
+        ? await createSignedWellenPhotoUrl(freshClient, entry.photo_url)
+        : null;
       let item: any;
       if (entry.item_type === 'display') {
         item = displays.find((d: any) => d.id === entry.item_id);
@@ -3651,9 +3905,9 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
         quantity: entry.quantity,
         value: entry.quantity * (item?.item_value ?? item?.itemValue ?? entry.value_per_unit ?? 0),
         timestamp: entry.created_at,
-        photoUrl: entry.photo_url
+        photoUrl: signedPhoto?.url || entry.photo_url
       };
-    });
+    }));
 
     // Group palette entries by parent palette (per GL, market, AND timestamp for same submission batch)
     const paletteGroups = new Map<string, any[]>();
@@ -3677,6 +3931,9 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       const glUser = gls.find((u: any) => u.id === firstEntry.gebietsleiter_id);
       const market = markets.find((m: any) => m.id === firstEntry.market_id);
       const parentPalette = palettes.find((p: any) => p.id === firstEntry.product?.palette_id);
+      const signedPhoto = firstEntry.photo_url
+        ? await createSignedWellenPhotoUrl(freshClient, firstEntry.photo_url)
+        : null;
 
       const products = entries.map((e: any) => {
         const valueUsed = e.value_per_unit || e.product?.value_per_ve || 0;
@@ -3707,7 +3964,7 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
         quantity: 1,
         value: totalValue,
         timestamp: firstEntry.created_at,
-        photoUrl: firstEntry.photo_url
+        photoUrl: signedPhoto?.url || firstEntry.photo_url
       });
     }
 
@@ -3732,6 +3989,9 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
       const glUser = gls.find((u: any) => u.id === firstEntry.gebietsleiter_id);
       const market = markets.find((m: any) => m.id === firstEntry.market_id);
       const parentSchutte = schutten.find((s: any) => s.id === firstEntry.product?.schuette_id);
+      const signedPhoto = firstEntry.photo_url
+        ? await createSignedWellenPhotoUrl(freshClient, firstEntry.photo_url)
+        : null;
 
       const products = entries.map((e: any) => {
         const valueUsed = e.value_per_unit || e.product?.value_per_ve || 0;
@@ -3762,7 +4022,7 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
         quantity: 1,
         value: totalValue,
         timestamp: firstEntry.created_at,
-        photoUrl: firstEntry.photo_url
+        photoUrl: signedPhoto?.url || firstEntry.photo_url
       });
     }
 
@@ -3772,16 +4032,20 @@ router.get('/:id/all-progress', async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // GET GL CHAIN PERFORMANCE - For GL detail modal charts
 // ============================================================================
-router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) => {
+router.get('/gl/:glId/chain-performance', requireSelfOrAdmin(req => req.params.glId), async (req: AuthRequest, res: Response) => {
   try {
     const { glId } = req.params;
+    const effectiveGlId = req.user?.role === 'admin' ? glId : getAuthenticatedGlId(req.user);
+    if (!effectiveGlId) {
+      return res.status(400).json({ error: 'gebietsleiter_id required' });
+    }
     
     const freshClient = createFreshClient();
     
@@ -3797,7 +4061,7 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
     const { data: rawAllSubs, error: progressError } = await freshClient
       .from('wellen_submissions')
       .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, market_id, created_at')
-      .eq('gebietsleiter_id', glId)
+      .eq('gebietsleiter_id', effectiveGlId)
       .order('created_at', { ascending: true });
     
     const allProgress = (rawAllSubs || []).map(s => ({ ...s, current_number: s.quantity }));
@@ -3932,7 +4196,7 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
     const { data: glMarkets } = await freshClient
       .from('markets')
       .select('id, chain')
-      .eq('gebietsleiter_id', glId);
+      .eq('gebietsleiter_id', effectiveGlId);
     const glMarketIds = new Set((glMarkets || []).map(m => m.id));
     
     // Count GL's markets per chain group
@@ -4057,14 +4321,14 @@ router.get('/gl/:glId/chain-performance', async (req: Request, res: Response) =>
       hagebau: formatChainResponse('hagebau')
     });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // IMAGE UPLOAD: Upload image to Supabase Storage
 // ============================================================================
-router.post('/upload-image', async (req: Request, res: Response) => {
+router.post('/upload-image', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { image, folder, filename } = req.body;
     
@@ -4072,7 +4336,7 @@ router.post('/upload-image', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'No image provided' });
     }
 
-    console.log('📷 Uploading image to wellen-images bucket...');
+    console.log('Uploading image to wellen-images bucket...');
 
     // Extract base64 data (remove data:image/...;base64, prefix if present)
     let base64Data = image;
@@ -4088,6 +4352,9 @@ router.post('/upload-image', async (req: Request, res: Response) => {
 
     // Convert base64 to buffer
     const buffer = Buffer.from(base64Data, 'base64');
+    if (!buffer.length || buffer.length > WELLEN_PHOTO_MAX_BYTES) {
+      return res.status(400).json({ error: 'Image is empty or too large' });
+    }
 
     // Generate unique filename
     const timestamp = Date.now();
@@ -4106,8 +4373,8 @@ router.post('/upload-image', async (req: Request, res: Response) => {
       });
 
     if (error) {
-      console.error('❌ Storage upload error:', error);
-      return res.status(500).json({ error: error.message });
+      console.error('Storage upload error');
+      return sendInternalError(res);
     }
 
     // Get public URL
@@ -4115,7 +4382,7 @@ router.post('/upload-image', async (req: Request, res: Response) => {
       .from('wellen-images')
       .getPublicUrl(data.path);
 
-    console.log('✅ Image uploaded successfully:', urlData.publicUrl);
+    console.log('Image uploaded successfully');
 
     res.json({
       success: true,
@@ -4123,15 +4390,15 @@ router.post('/upload-image', async (req: Request, res: Response) => {
       url: urlData.publicUrl
     });
   } catch (error: any) {
-    console.error('❌ Error uploading image:', error);
-    res.status(500).json({ error: error.message || 'Failed to upload image' });
+    console.error('Error uploading image');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // IMAGE DELETE: Delete image from Supabase Storage
 // ============================================================================
-router.delete('/delete-image', async (req: Request, res: Response) => {
+router.delete('/delete-image', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { path } = req.body;
     
@@ -4139,7 +4406,7 @@ router.delete('/delete-image', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'No path provided' });
     }
 
-    console.log('🗑️ Deleting image from wellen-images bucket:', path);
+    console.log('Deleting image from wellen-images bucket');
 
     const delClient = createFreshClient();
     const { error } = await delClient.storage
@@ -4147,22 +4414,22 @@ router.delete('/delete-image', async (req: Request, res: Response) => {
       .remove([path]);
 
     if (error) {
-      console.error('❌ Storage delete error:', error);
-      return res.status(500).json({ error: error.message });
+      console.error('Storage delete error');
+      return sendInternalError(res);
     }
 
     console.log('✅ Image deleted successfully');
     res.json({ success: true });
   } catch (error: any) {
-    console.error('❌ Error deleting image:', error);
-    res.status(500).json({ error: error.message || 'Failed to delete image' });
+    console.error('Error deleting image');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // GET WAVE MARKETS WITH VISIT STATUS - For markets modal
 // ============================================================================
-router.get('/:id/markets-status', async (req: Request, res: Response) => {
+router.get('/:id/markets-status', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id: welleId } = req.params;
     
@@ -4185,7 +4452,7 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
 
     const assignedMarketIds = (wellenMarkets || []).map(wm => wm.market_id);
     
-    console.log(`📊 Wave ${welleId} markets-status: found ${assignedMarketIds.length} assigned markets`);
+    console.log(`Wave ${welleId} markets-status: found ${assignedMarketIds.length} assigned markets`);
 
     if (assignedMarketIds.length === 0) {
       return res.json({ visited: [], notVisited: [], visitedCount: 0, totalCount: 0 });
@@ -4255,18 +4522,18 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
     };
 
     if (marketsError) {
-      return res.status(500).json({ error: marketsError.message });
+      return sendInternalError(res);
     }
 
     // Get all submissions for this wave (each submission is a visit with progress)
     const { data: submissions, error: submissionsError } = await freshClient
       .from('wellen_submissions')
-      .select('*')
+      .select(WELLEN_SUBMISSION_SELECT_COLUMNS)
       .eq('welle_id', welleId)
       .order('created_at', { ascending: false });
 
     if (submissionsError) {
-      return res.status(500).json({ error: submissionsError.message });
+      return sendInternalError(res);
     }
 
     // Get GL details for submissions
@@ -4510,22 +4777,22 @@ router.get('/:id/markets-status', async (req: Request, res: Response) => {
       totalCount: markets?.length || 0
     });
   } catch (error: any) {
-    console.error('Error fetching wave markets status:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching wave markets status:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // TEMPORARY: EXPORT WELLEN_SUBMISSIONS TO EXCEL
 // ============================================================================
-router.get('/export/submissions', async (req: Request, res: Response) => {
+router.get('/export/submissions', requireAdmin, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     
     // Get all submissions
     const { data: submissions, error: subError } = await freshClient
       .from('wellen_submissions')
-      .select('*')
+      .select(WELLEN_SUBMISSION_SELECT_COLUMNS)
       .order('created_at', { ascending: false });
     
     if (subError) throw subError;
@@ -4617,50 +4884,41 @@ router.get('/export/submissions', async (req: Request, res: Response) => {
       };
     });
     
-    // Create workbook and worksheet
-    const ws = XLSX.utils.json_to_sheet(excelData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Submissions');
-    
-    // Set column widths
-    ws['!cols'] = [
-      { wch: 38 }, // ID
-      { wch: 38 }, // Welle ID
-      { wch: 30 }, // Welle Name
-      { wch: 38 }, // GL ID
-      { wch: 25 }, // GL Name
-      { wch: 38 }, // Market ID
-      { wch: 30 }, // Market Name
-      { wch: 15 }, // Market Chain
-      { wch: 40 }, // Market Address
-      { wch: 20 }, // Market City
-      { wch: 12 }, // Item Type
-      { wch: 38 }, // Item ID
-      { wch: 40 }, // Item Name
-      { wch: 10 }, // Quantity
-      { wch: 15 }, // Value Per Unit
-      { wch: 25 }, // Created At
-    ];
-    
-    // Generate buffer
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = await createExcelBuffer('Submissions', excelData, [
+      38, // ID
+      38, // Welle ID
+      30, // Welle Name
+      38, // GL ID
+      25, // GL Name
+      38, // Market ID
+      30, // Market Name
+      15, // Market Chain
+      40, // Market Address
+      20, // Market City
+      12, // Item Type
+      38, // Item ID
+      40, // Item Name
+      10, // Quantity
+      15, // Value Per Unit
+      25, // Created At
+    ]);
     
     // Set headers and send file
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename=wellen_submissions_export.xlsx');
     res.send(buffer);
     
-    console.log(`📊 Exported ${submissions.length} submissions to Excel`);
+    console.log(`Exported ${submissions.length} submissions to Excel`);
   } catch (error: any) {
-    console.error('Error exporting submissions:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error exporting submissions:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // UPDATE INDIVIDUAL SUBMISSION QUANTITY
 // ============================================================================
-router.put('/submissions/:submissionId', async (req: Request, res: Response) => {
+router.put('/submissions/:submissionId', requireOwnedRowOrAdmin('wellen_submissions', 'gebietsleiter_id', 'submissionId'), async (req: Request, res: Response) => {
   try {
     const { submissionId } = req.params;
     const { quantity } = req.body;
@@ -4674,7 +4932,7 @@ router.put('/submissions/:submissionId', async (req: Request, res: Response) => 
     // Get the original submission to find related progress entry
     const { data: submission, error: fetchError } = await freshClient
       .from('wellen_submissions')
-      .select('*')
+      .select(WELLEN_SUBMISSION_SELECT_COLUMNS)
       .eq('id', submissionId)
       .single();
 
@@ -4692,12 +4950,12 @@ router.put('/submissions/:submissionId', async (req: Request, res: Response) => 
       .eq('id', submissionId);
 
     if (updateError) {
-      return res.status(500).json({ error: updateError.message });
+      return sendInternalError(res);
     }
 
     res.json({ message: 'Submission updated', submissionId, newQuantity: quantity });
   } catch (error) {
-    console.error('Error updating submission:', error);
+    console.error('Error updating submission:');
     res.status(500).json({ error: 'Failed to update submission' });
   }
 });
@@ -4705,7 +4963,7 @@ router.put('/submissions/:submissionId', async (req: Request, res: Response) => 
 // ============================================================================
 // DELETE INDIVIDUAL SUBMISSION
 // ============================================================================
-router.delete('/submissions/:submissionId', async (req: Request, res: Response) => {
+router.delete('/submissions/:submissionId', requireOwnedRowOrAdmin('wellen_submissions', 'gebietsleiter_id', 'submissionId'), async (req: Request, res: Response) => {
   try {
     const { submissionId } = req.params;
 
@@ -4714,7 +4972,7 @@ router.delete('/submissions/:submissionId', async (req: Request, res: Response) 
     // Get the original submission first
     const { data: submission, error: fetchError } = await freshClient
       .from('wellen_submissions')
-      .select('*')
+      .select(WELLEN_SUBMISSION_SELECT_COLUMNS)
       .eq('id', submissionId)
       .single();
 
@@ -4729,12 +4987,12 @@ router.delete('/submissions/:submissionId', async (req: Request, res: Response) 
       .eq('id', submissionId);
 
     if (deleteError) {
-      return res.status(500).json({ error: deleteError.message });
+      return sendInternalError(res);
     }
 
     res.json({ message: 'Submission deleted', submissionId });
   } catch (error) {
-    console.error('Error deleting submission:', error);
+    console.error('Error deleting submission:');
     res.status(500).json({ error: 'Failed to delete submission' });
   }
 });
@@ -4742,13 +5000,13 @@ router.delete('/submissions/:submissionId', async (req: Request, res: Response) 
 // ============================================================================
 // EXPORT SUBMISSIONS TO EXCEL
 // ============================================================================
-router.get('/export/progress', async (req: Request, res: Response) => {
+router.get('/export/progress', requireAdmin, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     
     const { data: submissions, error: subsError } = await freshClient
       .from('wellen_submissions')
-      .select('*')
+      .select(WELLEN_SUBMISSION_SELECT_COLUMNS)
       .order('created_at', { ascending: false });
     
     if (subsError) throw subsError;
@@ -4796,26 +5054,20 @@ router.get('/export/progress', async (req: Request, res: Response) => {
       'Created At': s.created_at
     }));
     
-    const ws = XLSX.utils.json_to_sheet(excelData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Submissions');
-    
-    ws['!cols'] = [
-      { wch: 38 }, { wch: 38 }, { wch: 30 }, { wch: 38 }, { wch: 25 },
-      { wch: 20 }, { wch: 12 }, { wch: 38 }, { wch: 40 }, { wch: 10 },
-      { wch: 15 }, { wch: 25 }
-    ];
-    
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = await createExcelBuffer('Submissions', excelData, [
+      38, 38, 30, 38, 25,
+      20, 12, 38, 40, 10,
+      15, 25
+    ]);
     
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename=wellen_submissions_export.xlsx');
     res.send(buffer);
     
-    console.log(`📊 Exported ${submissions.length} submission entries to Excel`);
+    console.log(`Exported ${submissions.length} submission entries to Excel`);
   } catch (error: any) {
-    console.error('Error exporting submissions:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error exporting submissions:');
+    sendInternalError(res);
   }
 });
 
@@ -4828,19 +5080,20 @@ router.get('/export/progress', async (req: Request, res: Response) => {
  * Get Vorbesteller submissions for a market that don't have delivery photos yet
  * Returns grouped items with palette/schuette parents and their nested products
  */
-router.get('/market/:marketId/pending-photos', async (req: Request, res: Response) => {
+router.get('/market/:marketId/pending-photos', async (req: AuthRequest, res: Response) => {
   try {
     const { marketId } = req.params;
     const freshClient = createFreshClient();
 
-    console.log(`📷 Checking pending delivery photos for market: ${marketId}`);
+    console.log('Checking pending delivery photos for market');
 
     // Get submissions without delivery photos for this market
-    const { data: submissions, error } = await freshClient
+    let submissionsQuery = freshClient
       .from('wellen_submissions')
       .select(`
         id,
         welle_id,
+        gebietsleiter_id,
         item_type,
         item_id,
         quantity,
@@ -4854,9 +5107,15 @@ router.get('/market/:marketId/pending-photos', async (req: Request, res: Respons
       .is('delivery_photo_url', null)
       .order('created_at', { ascending: false });
 
+    if (req.user?.role !== 'admin') {
+      submissionsQuery = submissionsQuery.eq('gebietsleiter_id', getAuthenticatedGlId(req.user));
+    }
+
+    const { data: submissions, error } = await submissionsQuery;
+
     if (error) {
-      console.error('Error fetching pending photos:', error);
-      return res.status(500).json({ error: error.message });
+      console.error('Error fetching pending photos');
+      return sendInternalError(res);
     }
 
     if (!submissions || submissions.length === 0) {
@@ -4993,11 +5252,11 @@ router.get('/market/:marketId/pending-photos', async (req: Request, res: Respons
     // Combine: grouped items first, then standalone items
     const result = [...groupedItems, ...standaloneItems];
 
-    console.log(`📷 Found ${result.length} pending items (${groupedItems.length} grouped, ${standaloneItems.length} standalone) for market ${marketId}`);
+    console.log(`Found ${result.length} pending delivery-photo items (${groupedItems.length} grouped, ${standaloneItems.length} standalone)`);
     res.json(result);
   } catch (error: any) {
-    console.error('Error fetching pending photos:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching pending photos');
+    sendInternalError(res);
   }
 });
 
@@ -5005,7 +5264,7 @@ router.get('/market/:marketId/pending-photos', async (req: Request, res: Respons
  * POST /wellen/upload-delivery-photo
  * Upload a delivery verification photo and link it to submissions
  */
-router.post('/upload-delivery-photo', async (req: Request, res: Response) => {
+router.post('/upload-delivery-photo', async (req: AuthRequest, res: Response) => {
   try {
     const { submissionIds, imageData } = req.body;
 
@@ -5017,70 +5276,78 @@ router.post('/upload-delivery-photo', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'imageData is required' });
     }
 
-    console.log(`📷 Uploading delivery photo for ${submissionIds.length} submissions`);
+    console.log('Uploading delivery photo for submissions');
 
     const freshClient = createFreshClient();
+    const { data: submissionRows, error: ownershipError } = await freshClient
+      .from('wellen_submissions')
+      .select('id, gebietsleiter_id')
+      .in('id', submissionIds);
 
-    // Parse base64 image
-    let base64Data = imageData;
-    let mimeType = 'image/jpeg';
-
-    if (imageData.startsWith('data:')) {
-      const matches = imageData.match(/^data:([^;]+);base64,(.+)$/);
-      if (matches) {
-        mimeType = matches[1];
-        base64Data = matches[2];
-      }
+    if (ownershipError) {
+      console.error('Error checking delivery photo submission ownership:');
+      return sendInternalError(res);
     }
 
-    // Determine file extension
-    const ext = mimeType.includes('png') ? 'png' : mimeType.includes('gif') ? 'gif' : 'jpg';
-    const fileName = `delivery_${Date.now()}_${Math.random().toString(36).substring(7)}.${ext}`;
+    const allowedSubmissionIds = (submissionRows || [])
+      .filter((submission: any) => req.user?.role === 'admin' || submission.gebietsleiter_id === getAuthenticatedGlId(req.user))
+      .map((submission: any) => submission.id);
+
+    if (allowedSubmissionIds.length !== submissionIds.length) {
+      return res.status(403).json({ error: 'Access denied for one or more submissions' });
+    }
+
+    let parsedImage;
+    try {
+      parsedImage = parseDeliveryImageData(imageData);
+    } catch {
+      return res.status(400).json({ error: 'Unsupported delivery photo type' });
+    }
+    const filePath = `delivery/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.${parsedImage.extension}`;
 
     // Convert base64 to buffer
-    const buffer = Buffer.from(base64Data, 'base64');
+    const buffer = Buffer.from(parsedImage.base64Data, 'base64');
+    if (!buffer.length || buffer.length > DELIVERY_PHOTO_MAX_BYTES) {
+      return res.status(400).json({ error: 'Delivery photo is empty or too large' });
+    }
 
     // Upload to Supabase Storage - dedicated bucket for delivery photos
-    const { data: uploadData, error: uploadError } = await freshClient.storage
-      .from('vorbesteller-lieferung')
-      .upload(fileName, buffer, {
-        contentType: mimeType,
+    const { error: uploadError } = await freshClient.storage
+      .from(DELIVERY_PHOTOS_BUCKET)
+      .upload(filePath, buffer, {
+        contentType: parsedImage.mimeType,
         cacheControl: '3600',
         upsert: false
       });
 
     if (uploadError) {
-      console.error('Upload error:', uploadError);
-      return res.status(500).json({ error: uploadError.message });
+      console.error('Delivery photo upload error');
+      return sendInternalError(res);
     }
 
-    // Get public URL
-    const { data: urlData } = freshClient.storage
-      .from('vorbesteller-lieferung')
-      .getPublicUrl(fileName);
-
-    const publicUrl = urlData.publicUrl;
+    const signedPhoto = await createSignedDeliveryPhotoUrl(freshClient, filePath);
 
     // Update all submissions with the delivery photo URL
     const { error: updateError } = await freshClient
       .from('wellen_submissions')
-      .update({ delivery_photo_url: publicUrl })
-      .in('id', submissionIds);
+      .update({ delivery_photo_url: filePath })
+      .in('id', allowedSubmissionIds);
 
     if (updateError) {
-      console.error('Error updating submissions:', updateError);
-      return res.status(500).json({ error: updateError.message });
+      console.error('Error updating delivery-photo submissions');
+      return sendInternalError(res);
     }
 
-    console.log(`✅ Delivery photo uploaded and linked to ${submissionIds.length} submissions`);
-    res.json({ 
-      success: true, 
-      photoUrl: publicUrl,
-      updatedCount: submissionIds.length 
+    console.log('Delivery photo uploaded and linked to submissions');
+    res.json({
+      success: true,
+      photoUrl: signedPhoto.url,
+      photoPath: filePath,
+      updatedCount: allowedSubmissionIds.length
     });
   } catch (error: any) {
-    console.error('Error uploading delivery photo:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error uploading delivery photo');
+    sendInternalError(res);
   }
 });
 
@@ -5089,7 +5356,7 @@ router.post('/upload-delivery-photo', async (req: Request, res: Response) => {
  * Upload individual delivery photos per palette/schütte
  * Each photo is linked to the parent and all its child products
  */
-router.post('/upload-delivery-photos-per-item', async (req: Request, res: Response) => {
+router.post('/upload-delivery-photos-per-item', async (req: AuthRequest, res: Response) => {
   try {
     const { photos } = req.body;
 
@@ -5097,7 +5364,7 @@ router.post('/upload-delivery-photos-per-item', async (req: Request, res: Respon
       return res.status(400).json({ error: 'photos array is required' });
     }
 
-    console.log(`📷 Uploading ${photos.length} individual delivery photos`);
+    console.log(`Uploading ${photos.length} individual delivery photos`);
 
     const freshClient = createFreshClient();
     let totalUpdated = 0;
@@ -5110,61 +5377,70 @@ router.post('/upload-delivery-photos-per-item', async (req: Request, res: Respon
         continue;
       }
 
-      // Parse base64 image
-      let base64Data = photoBase64;
-      let mimeType = 'image/jpeg';
+      const { data: ownershipSubmission, error: ownershipError } = await freshClient
+        .from('wellen_submissions')
+        .select('id, gebietsleiter_id')
+        .eq('id', submissionId)
+        .maybeSingle();
 
-      if (photoBase64.startsWith('data:')) {
-        const matches = photoBase64.match(/^data:([^;]+);base64,(.+)$/);
-        if (matches) {
-          mimeType = matches[1];
-          base64Data = matches[2];
-        }
+      if (ownershipError) {
+        console.error('Delivery-photo ownership check failed:');
+        continue;
       }
 
-      // Determine file extension
-      const ext = mimeType.includes('png') ? 'png' : mimeType.includes('gif') ? 'gif' : 'jpg';
-      const fileName = `delivery_${submissionId}_${Date.now()}_${Math.random().toString(36).substring(7)}.${ext}`;
+      if (!ownershipSubmission || (req.user?.role !== 'admin' && ownershipSubmission.gebietsleiter_id !== getAuthenticatedGlId(req.user))) {
+        console.warn('Skipping delivery photo for unauthorized submission');
+        continue;
+      }
+
+      let parsedImage;
+      try {
+        parsedImage = parseDeliveryImageData(photoBase64);
+      } catch {
+        console.warn('Skipping unsupported delivery photo type');
+        continue;
+      }
+      const filePath = `delivery/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.${parsedImage.extension}`;
 
       // Convert base64 to buffer
-      const buffer = Buffer.from(base64Data, 'base64');
+      const buffer = Buffer.from(parsedImage.base64Data, 'base64');
+      if (!buffer.length || buffer.length > DELIVERY_PHOTO_MAX_BYTES) {
+        console.warn('Skipping empty or oversized delivery photo');
+        continue;
+      }
 
       // Upload to Supabase Storage - dedicated bucket for delivery photos
-      const { data: uploadData, error: uploadError } = await freshClient.storage
-        .from('vorbesteller-lieferung')
-        .upload(fileName, buffer, {
-          contentType: mimeType,
+      const { error: uploadError } = await freshClient.storage
+        .from(DELIVERY_PHOTOS_BUCKET)
+        .upload(filePath, buffer, {
+          contentType: parsedImage.mimeType,
           cacheControl: '3600',
           upsert: false
         });
 
       if (uploadError) {
-        console.error(`Upload error for ${submissionId}:`, uploadError);
+        console.error('Delivery-photo upload failed');
         continue;
       }
-
-      // Get public URL
-      const { data: urlData } = freshClient.storage
-        .from('vorbesteller-lieferung')
-        .getPublicUrl(fileName);
-
-      const publicUrl = urlData.publicUrl;
 
       // First, get the parent submission to find its palette/schuette details
       const { data: parentSubmission, error: parentError } = await freshClient
         .from('wellen_submissions')
-        .select('id, parent_palette_id, market_id, welle_id')
+        .select('id, parent_palette_id, market_id, welle_id, gebietsleiter_id')
         .eq('id', submissionId)
         .single();
 
       if (parentError || !parentSubmission) {
-        console.error(`Parent submission not found for ${submissionId}`);
+        console.error('Parent submission not found for delivery photo');
         // Still try to update just this one
-        await freshClient
+        const { error: fallbackUpdateError } = await freshClient
           .from('wellen_submissions')
-          .update({ delivery_photo_url: publicUrl })
-          .eq('id', submissionId);
-        totalUpdated++;
+          .update({ delivery_photo_url: filePath })
+          .eq('id', submissionId)
+          .eq('gebietsleiter_id', req.user?.role === 'admin' ? ownershipSubmission.gebietsleiter_id : getAuthenticatedGlId(req.user));
+        if (!fallbackUpdateError) {
+          totalUpdated++;
+        }
         continue;
       }
 
@@ -5173,25 +5449,27 @@ router.post('/upload-delivery-photos-per-item', async (req: Request, res: Respon
       // We need to update all children that have parent_palette_id = this submissionId
       const { data: childSubmissions, error: childError } = await freshClient
         .from('wellen_submissions')
-        .select('id')
+        .select('id, gebietsleiter_id')
         .eq('parent_palette_id', submissionId);
 
       const idsToUpdate = [submissionId];
       if (!childError && childSubmissions && childSubmissions.length > 0) {
-        idsToUpdate.push(...childSubmissions.map(c => c.id));
+        idsToUpdate.push(...childSubmissions
+          .filter((child: any) => req.user?.role === 'admin' || child.gebietsleiter_id === getAuthenticatedGlId(req.user))
+          .map((child: any) => child.id));
       }
 
       // Update all related submissions with the delivery photo URL
       const { error: updateError } = await freshClient
         .from('wellen_submissions')
-        .update({ delivery_photo_url: publicUrl })
+        .update({ delivery_photo_url: filePath })
         .in('id', idsToUpdate);
 
       if (updateError) {
-        console.error(`Error updating submissions for ${submissionId}:`, updateError);
+        console.error('Error updating delivery-photo submissions');
       } else {
         totalUpdated += idsToUpdate.length;
-        console.log(`✅ Photo for ${submissionId} linked to ${idsToUpdate.length} submissions`);
+        console.log(`Delivery photo linked to ${idsToUpdate.length} submissions`);
       }
     }
 
@@ -5201,8 +5479,8 @@ router.post('/upload-delivery-photos-per-item', async (req: Request, res: Respon
       uploadedCount: totalUpdated 
     });
   } catch (error: any) {
-    console.error('Error uploading delivery photos per item:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error uploading delivery photos per item');
+    sendInternalError(res);
   }
 });
 

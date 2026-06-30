@@ -1,7 +1,9 @@
 import express, { Request, Response } from 'express';
 import { supabase, createFreshClient } from '../config/supabase';
+import { sendInternalError } from '../utils/httpErrors';
 
 const router = express.Router();
+const ACTION_HISTORY_SELECT = 'id, action_type, market_id, market_chain, market_address, market_postal_code, market_city, target_gl, previous_gl, performed_by, notes, timestamp';
 
 // Get all action history (with optional filtering)
 router.get('/', async (req: Request, res: Response) => {
@@ -12,7 +14,7 @@ router.get('/', async (req: Request, res: Response) => {
     
     let query = freshClient
       .from('action_history')
-      .select('*')
+      .select(ACTION_HISTORY_SELECT)
       .order('timestamp', { ascending: false })
       .range(parseInt(offset as string), parseInt(offset as string) + parseInt(limit as string) - 1);
     
@@ -24,15 +26,15 @@ router.get('/', async (req: Request, res: Response) => {
     const { data, error } = await query;
     
     if (error) {
-      console.error('Error fetching action history:', error);
+      console.error('Error fetching action history:');
       throw error;
     }
     
     console.log(`✅ Fetched ${data?.length || 0} action history entries`);
     res.json(data || []);
   } catch (error: any) {
-    console.error('Error fetching action history:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching action history:');
+    sendInternalError(res);
   }
 });
 
@@ -82,19 +84,19 @@ router.post('/', async (req: Request, res: Response) => {
         performed_by,
         notes
       }])
-      .select()
+      .select(ACTION_HISTORY_SELECT)
       .single();
     
     if (error) {
-      console.error('Error creating action history:', error);
+      console.error('Error creating action history:');
       throw error;
     }
     
-    console.log(`✅ Created action history entry: ${action_type} - ${market_chain} ${market_address}`);
+    console.log(`Created action history entry: ${action_type}`);
     res.status(201).json(data);
   } catch (error: any) {
-    console.error('Error creating action history:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error creating action history:');
+    sendInternalError(res);
   }
 });
 
@@ -111,15 +113,15 @@ router.delete('/:id', async (req: Request, res: Response) => {
       .eq('id', id);
     
     if (error) {
-      console.error('Error deleting action history:', error);
+      console.error('Error deleting action history:');
       throw error;
     }
     
-    console.log(`✅ Deleted action history entry: ${id}`);
+    console.log('Deleted action history entry');
     res.status(204).send();
   } catch (error: any) {
-    console.error('Error deleting action history:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error deleting action history:');
+    sendInternalError(res);
   }
 });
 

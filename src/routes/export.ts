@@ -3,6 +3,7 @@ import ExcelJS from 'exceljs';
 import { createFreshClient } from '../config/supabase';
 import { EXPORT_DATASETS, getColumnDef } from '../config/exportColumns';
 import { transformDataset, transformSingleWaveExport } from '../utils/exportTransformers';
+import { sendInternalError } from '../utils/httpErrors';
 
 const router = express.Router();
 
@@ -612,8 +613,8 @@ router.post('/custom', async (req: Request, res: Response) => {
     res.end();
 
   } catch (error: any) {
-    console.error('❌ Error generating Excel export:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error generating Excel export:');
+    sendInternalError(res);
   }
 });
 
@@ -641,8 +642,8 @@ router.get('/dataset-stats', async (req: Request, res: Response) => {
 
     res.json(result);
   } catch (error: any) {
-    console.error('Error fetching dataset stats:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching dataset stats:');
+    sendInternalError(res);
   }
 });
 

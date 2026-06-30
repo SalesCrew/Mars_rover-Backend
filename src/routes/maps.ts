@@ -2,6 +2,15 @@ import { Router } from 'express';
 
 const router = Router();
 
+const MAX_DRIVING_TIME_PAIRS = 25;
+const MAX_ROUTE_STOPS = 25;
+const MAX_ADDRESS_LENGTH = 300;
+
+const isValidAddress = (value: unknown): value is string =>
+  typeof value === 'string' &&
+  value.trim().length > 0 &&
+  value.trim().length <= MAX_ADDRESS_LENGTH;
+
 interface DrivingTimePair {
   originAddress: string;
   destinationAddress: string;
@@ -23,6 +32,14 @@ router.post('/driving-times', async (req, res) => {
 
     if (!pairs || !Array.isArray(pairs) || pairs.length === 0) {
       return res.status(400).json({ error: 'pairs array is required' });
+    }
+
+    if (pairs.length > MAX_DRIVING_TIME_PAIRS) {
+      return res.status(400).json({ error: `pairs array must contain at most ${MAX_DRIVING_TIME_PAIRS} entries` });
+    }
+
+    if (!pairs.every(pair => isValidAddress(pair.originAddress) && isValidAddress(pair.destinationAddress))) {
+      return res.status(400).json({ error: 'Each pair must include valid originAddress and destinationAddress values' });
     }
 
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
@@ -78,7 +95,7 @@ router.post('/driving-times', async (req, res) => {
 
     res.json({ results });
   } catch (error) {
-    console.error('Error in /driving-times:', error);
+    console.error('Error in /driving-times:');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -99,6 +116,22 @@ router.post('/optimize-route', async (req, res) => {
 
     if (!homeAddress || !stops || !Array.isArray(stops) || stops.length === 0) {
       return res.status(400).json({ error: 'homeAddress and stops array are required' });
+    }
+
+    if (!isValidAddress(homeAddress)) {
+      return res.status(400).json({ error: 'homeAddress must be a non-empty address string' });
+    }
+
+    if (stops.length > MAX_ROUTE_STOPS) {
+      return res.status(400).json({ error: `stops array must contain at most ${MAX_ROUTE_STOPS} entries` });
+    }
+
+    if (!['driving', 'transit'].includes(mode)) {
+      return res.status(400).json({ error: 'mode must be driving or transit' });
+    }
+
+    if (!stops.every(stop => typeof stop.id === 'string' && stop.id.trim() && isValidAddress(stop.address))) {
+      return res.status(400).json({ error: 'Each stop must include a valid id and address' });
     }
 
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
@@ -148,7 +181,7 @@ router.post('/optimize-route', async (req, res) => {
       totalDrivingSeconds,
     });
   } catch (error) {
-    console.error('Error in /optimize-route:', error);
+    console.error('Error in /optimize-route:');
     res.status(500).json({ error: 'Internal server error' });
   }
 });

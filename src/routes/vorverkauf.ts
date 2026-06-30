@@ -1,14 +1,67 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { supabase, createFreshClient } from '../config/supabase';
+import { AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
+import { sendInternalError } from '../utils/httpErrors';
 
 const router = Router();
+const VORVERKAUF_ENTRY_SELECT = 'id, gebietsleiter_id, market_id, reason, notes, status, created_at';
+const VORVERKAUF_ITEM_SELECT = 'id, vorverkauf_entry_id, product_id, quantity, item_type';
+const VORVERKAUF_PRODUCT_SELECT = 'id, name, weight, content, price';
+
+const requireVorverkaufItemOwnerOrAdmin = async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    if (req.user?.role === 'admin') {
+      return next();
+    }
+
+    const { itemId } = req.params;
+    const freshClient = createFreshClient();
+
+    const { data: item, error: itemError } = await freshClient
+      .from('vorverkauf_items')
+      .select('vorverkauf_entry_id')
+      .eq('id', itemId)
+      .maybeSingle();
+
+    if (itemError) {
+      throw itemError;
+    }
+
+    if (!item?.vorverkauf_entry_id) {
+      return res.status(404).json({ error: 'Item not found' });
+    }
+
+    const { data: entry, error: entryError } = await freshClient
+      .from('vorverkauf_entries')
+      .select('gebietsleiter_id')
+      .eq('id', item.vorverkauf_entry_id)
+      .maybeSingle();
+
+    if (entryError) {
+      throw entryError;
+    }
+
+    if (!entry) {
+      return res.status(404).json({ error: 'Entry not found' });
+    }
+
+    if (entry.gebietsleiter_id !== getAuthenticatedGlId(req.user)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    return next();
+  } catch (error) {
+    console.error('Error checking vorverkauf item ownership:');
+    return res.status(500).json({ error: 'Authorization check failed' });
+  }
+};
 
 // ============================================================================
 // GET ALL VORVERKAUF ENTRIES (with GL and market info)
 // ============================================================================
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    console.log('📦 Fetching all vorverkauf entries...');
+    console.log('Fetching all vorverkauf entries...');
     
     const freshClient = createFreshClient();
 
@@ -18,11 +71,13 @@ router.get('/', async (req: Request, res: Response) => {
     // Fetch all entries
     let query = freshClient
       .from('vorverkauf_entries')
-      .select('*')
+      .select(VORVERKAUF_ENTRY_SELECT)
       .order('created_at', { ascending: false });
 
     // Apply GL filter if specified
-    if (glId && typeof glId === 'string') {
+    if (req.user?.role !== 'admin') {
+      query = query.eq('gebietsleiter_id', getAuthenticatedGlId(req.user));
+    } else if (glId && typeof glId === 'string') {
       query = query.eq('gebietsleiter_id', glId);
     }
 
@@ -42,7 +97,7 @@ router.get('/', async (req: Request, res: Response) => {
     const [glsResult, marketsResult, itemsResult] = await Promise.all([
       glIds.length > 0 ? freshClient.from('gebietsleiter').select('id, name').in('id', glIds) : { data: [] },
       marketIds.length > 0 ? freshClient.from('markets').select('id, name, chain, address, city, postal_code').in('id', marketIds) : { data: [] },
-      entryIds.length > 0 ? freshClient.from('vorverkauf_items').select('*').in('vorverkauf_entry_id', entryIds) : { data: [] }
+      entryIds.length > 0 ? freshClient.from('vorverkauf_items').select(VORVERKAUF_ITEM_SELECT).in('vorverkauf_entry_id', entryIds) : { data: [] }
     ]);
 
     const gls = glsResult.data || [];
@@ -53,10 +108,9 @@ router.get('/', async (req: Request, res: Response) => {
     const productIds = [...new Set(items.map(i => i.product_id).filter(Boolean))];
     let products: any[] = [];
     if (productIds.length > 0) {
-      console.log('Looking up product IDs:', productIds);
-      const { data, error: productError } = await freshClient.from('products').select('*').in('id', productIds);
-      if (productError) console.error('Product lookup error:', productError);
-      console.log('Found products:', data?.length || 0);
+      const { data, error: productError } = await freshClient.from('products').select(VORVERKAUF_PRODUCT_SELECT).in('id', productIds);
+      if (productError) console.error('Product lookup error:');
+      console.log(`Found ${data?.length || 0} products for vorverkauf entry enrichment`);
       products = data || [];
     }
 
@@ -115,15 +169,15 @@ router.get('/', async (req: Request, res: Response) => {
     console.log(`✅ Fetched ${response.length} vorverkauf entries`);
     res.json(response);
   } catch (error: any) {
-    console.error('❌ Error fetching vorverkauf entries:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error fetching vorverkauf entries:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // GET SINGLE VORVERKAUF ENTRY
 // ============================================================================
-router.get('/:id', async (req: Request, res: Response) => {
+router.get('/:id', requireOwnedRowOrAdmin('vorverkauf_entries'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     
@@ -131,7 +185,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 
     const { data: entry, error: entryError } = await freshClient
       .from('vorverkauf_entries')
-      .select('*')
+      .select(VORVERKAUF_ENTRY_SELECT)
       .eq('id', id)
       .single();
 
@@ -144,7 +198,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     const [glResult, marketResult, itemsResult] = await Promise.all([
       freshClient.from('gebietsleiter').select('id, name').eq('id', entry.gebietsleiter_id).single(),
       freshClient.from('markets').select('id, name, chain, address, city, postal_code').eq('id', entry.market_id).single(),
-      freshClient.from('vorverkauf_items').select('*').eq('vorverkauf_entry_id', entry.id)
+      freshClient.from('vorverkauf_items').select(VORVERKAUF_ITEM_SELECT).eq('vorverkauf_entry_id', entry.id)
     ]);
 
     const gl = glResult.data;
@@ -155,7 +209,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     const productIds = items.map(i => i.product_id);
     let products: any[] = [];
     if (productIds.length > 0) {
-      const { data } = await freshClient.from('products').select('id, name, brand, size').in('id', productIds);
+      const { data } = await freshClient.from('products').select(VORVERKAUF_PRODUCT_SELECT).in('id', productIds);
       products = data || [];
     }
 
@@ -187,20 +241,20 @@ router.get('/:id', async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error: any) {
-    console.error('❌ Error fetching vorverkauf entry:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error fetching vorverkauf entry:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // CREATE VORVERKAUF ENTRY
 // ============================================================================
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', async (req: AuthRequest, res: Response) => {
   try {
     const { gebietsleiter_id, market_id, reason, notes, items, take_out_items, replace_items, status, skipVisitUpdate } = req.body;
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
 
-    console.log('📦 Creating vorverkauf entry...');
-    console.log('Request body:', JSON.stringify(req.body, null, 2));
+    console.log('Creating vorverkauf entry...');
     
     // Validate status
     const entryStatus = status === 'pending' ? 'pending' : 'completed';
@@ -223,7 +277,7 @@ router.post('/', async (req: Request, res: Response) => {
       allItems = items.map((item: any) => ({ ...item, item_type: item.type || 'take_out' }));
     }
 
-    if (!gebietsleiter_id || !market_id || !reason || allItems.length === 0) {
+    if (!effectiveGlId || !market_id || !reason || allItems.length === 0) {
       return res.status(400).json({ error: 'Missing required fields: gebietsleiter_id, market_id, reason, items' });
     }
 
@@ -231,17 +285,17 @@ router.post('/', async (req: Request, res: Response) => {
     const { data: entry, error: entryError } = await freshClient
       .from('vorverkauf_entries')
       .insert({
-        gebietsleiter_id,
+        gebietsleiter_id: effectiveGlId,
         market_id,
         reason,
         notes: notes || null,
         status: entryStatus
       })
-      .select()
+      .select(VORVERKAUF_ENTRY_SELECT)
       .single();
 
     if (entryError) {
-      console.error('Error creating entry:', entryError);
+      console.error('Error creating entry:');
       throw entryError;
     }
 
@@ -253,14 +307,12 @@ router.post('/', async (req: Request, res: Response) => {
       item_type: item.item_type || 'take_out'
     }));
 
-    console.log('Items to insert:', itemsToInsert);
-
     const { error: itemsError } = await freshClient
       .from('vorverkauf_items')
       .insert(itemsToInsert);
 
     if (itemsError) {
-      console.error('Error creating items:', itemsError);
+      console.error('Error creating items:');
       throw itemsError;
     }
 
@@ -281,19 +333,19 @@ router.post('/', async (req: Request, res: Response) => {
             last_visit_date: today
           })
           .eq('id', market_id);
-        console.log(`📍 Recorded visit for market ${market_id}`);
+        console.log('Recorded vorverkauf market visit');
       }
 
       await freshClient
         .from('market_visits')
         .upsert({
           market_id,
-          gebietsleiter_id,
+          gebietsleiter_id: effectiveGlId,
           visit_date: today,
           source: 'vorverkauf'
         }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
     } else {
-      console.log(`⏭️ Skipping visit update for market ${market_id} (user chose not to record new visit)`);
+      console.log('Skipping vorverkauf visit update by user choice');
     }
 
     console.log(`✅ Created vorverkauf entry with ${allItems.length} items (status: ${entryStatus})`);
@@ -304,25 +356,25 @@ router.post('/', async (req: Request, res: Response) => {
       status: entryStatus
     });
   } catch (error: any) {
-    console.error('❌ Error creating vorverkauf entry:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error creating vorverkauf entry:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // GET PENDING ENTRIES FOR GL
 // ============================================================================
-router.get('/pending/:glId', async (req: Request, res: Response) => {
+router.get('/pending/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: Request, res: Response) => {
   try {
     const { glId } = req.params;
-    console.log(`📋 Fetching pending entries for GL ${glId}...`);
+    console.log('Fetching pending vorverkauf entries for GL profile');
     
     const freshClient = createFreshClient();
 
     // Fetch pending entries for this GL
     const { data: entries, error: entriesError } = await freshClient
       .from('vorverkauf_entries')
-      .select('*')
+      .select(VORVERKAUF_ENTRY_SELECT)
       .eq('gebietsleiter_id', glId)
       .eq('status', 'pending')
       .order('created_at', { ascending: false });
@@ -339,7 +391,7 @@ router.get('/pending/:glId', async (req: Request, res: Response) => {
 
     const [marketsResult, itemsResult] = await Promise.all([
       marketIds.length > 0 ? freshClient.from('markets').select('id, name, chain, address, city, postal_code').in('id', marketIds) : { data: [] },
-      entryIds.length > 0 ? freshClient.from('vorverkauf_items').select('*').in('vorverkauf_entry_id', entryIds) : { data: [] }
+      entryIds.length > 0 ? freshClient.from('vorverkauf_items').select(VORVERKAUF_ITEM_SELECT).in('vorverkauf_entry_id', entryIds) : { data: [] }
     ]);
 
     const markets = marketsResult.data || [];
@@ -349,7 +401,7 @@ router.get('/pending/:glId', async (req: Request, res: Response) => {
     const productIds = [...new Set(items.map(i => i.product_id).filter(Boolean))];
     let products: any[] = [];
     if (productIds.length > 0) {
-      const { data } = await freshClient.from('products').select('*').in('id', productIds);
+      const { data } = await freshClient.from('products').select(VORVERKAUF_PRODUCT_SELECT).in('id', productIds);
       products = data || [];
     }
 
@@ -404,28 +456,28 @@ router.get('/pending/:glId', async (req: Request, res: Response) => {
       };
     });
 
-    console.log(`✅ Found ${response.length} pending entries for GL ${glId}`);
+    console.log(`Found ${response.length} pending vorverkauf entries`);
     res.json(response);
   } catch (error: any) {
-    console.error('❌ Error fetching pending entries:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error fetching pending entries:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // FULFILL PENDING ENTRY
 // ============================================================================
-router.put('/:id/fulfill', async (req: Request, res: Response) => {
+router.put('/:id/fulfill', requireOwnedRowOrAdmin('vorverkauf_entries'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    console.log(`✅ Fulfilling pending entry ${id}...`);
+    console.log('Fulfilling pending vorverkauf entry');
     
     const freshClient = createFreshClient();
 
     // Get the entry first
     const { data: entry, error: getError } = await freshClient
       .from('vorverkauf_entries')
-      .select('*')
+      .select(VORVERKAUF_ENTRY_SELECT)
       .eq('id', id)
       .single();
 
@@ -464,7 +516,7 @@ router.put('/:id/fulfill', async (req: Request, res: Response) => {
           last_visit_date: today
         })
         .eq('id', entry.market_id);
-      console.log(`📍 Recorded visit for market ${entry.market_id}`);
+      console.log('Recorded vorverkauf pending-entry market visit');
     }
 
     await freshClient
@@ -476,25 +528,25 @@ router.put('/:id/fulfill', async (req: Request, res: Response) => {
         source: 'vorverkauf'
       }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
 
-    console.log(`✅ Fulfilled pending entry ${id}`);
+    console.log('Fulfilled pending vorverkauf entry');
     res.json({ 
       message: 'Entry fulfilled successfully',
       id: entry.id 
     });
   } catch (error: any) {
-    console.error('❌ Error fulfilling entry:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error fulfilling entry:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // DELETE VORVERKAUF ENTRY
 // ============================================================================
-router.delete('/:id', async (req: Request, res: Response) => {
+router.delete('/:id', requireOwnedRowOrAdmin('vorverkauf_entries'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
-    console.log(`🗑️ Deleting vorverkauf entry ${id}...`);
+    console.log('Deleting vorverkauf entry');
     
     const freshClient = createFreshClient();
 
@@ -506,18 +558,18 @@ router.delete('/:id', async (req: Request, res: Response) => {
 
     if (error) throw error;
 
-    console.log(`✅ Deleted vorverkauf entry ${id}`);
+    console.log('Deleted vorverkauf entry');
     res.json({ message: 'Entry deleted successfully' });
   } catch (error: any) {
-    console.error('❌ Error deleting vorverkauf entry:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error deleting vorverkauf entry:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // UPDATE ITEM QUANTITY
 // ============================================================================
-router.put('/items/:itemId', async (req: Request, res: Response) => {
+router.put('/items/:itemId', requireVorverkaufItemOwnerOrAdmin, async (req: Request, res: Response) => {
   try {
     const { itemId } = req.params;
     const { quantity } = req.body;
@@ -537,21 +589,22 @@ router.put('/items/:itemId', async (req: Request, res: Response) => {
 
     res.json({ message: 'Item updated', itemId, newQuantity: quantity });
   } catch (error: any) {
-    console.error('Error updating vorverkauf item:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error updating vorverkauf item:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // SUBMIT VORVERKAUF (GL - no wave required)
 // ============================================================================
-router.post('/submit', async (req: Request, res: Response) => {
+router.post('/submit', async (req: AuthRequest, res: Response) => {
   try {
     const { gebietsleiter_id, market_id, products, notes } = req.body;
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
 
-    console.log('📦 Submitting vorverkauf (direct, no wave)...');
+    console.log('Submitting vorverkauf (direct, no wave)...');
 
-    if (!gebietsleiter_id || !market_id || !products || products.length === 0) {
+    if (!effectiveGlId || !market_id || !products || products.length === 0) {
       return res.status(400).json({ 
         error: 'gebietsleiter_id, market_id, and products are required' 
       });
@@ -567,17 +620,17 @@ router.post('/submit', async (req: Request, res: Response) => {
     const { data: entry, error: entryError } = await freshClient
       .from('vorverkauf_entries')
       .insert({
-        gebietsleiter_id,
+        gebietsleiter_id: effectiveGlId,
         market_id,
         reason: primaryReason,
         notes: notes || null,
         status: 'completed'
       })
-      .select()
+      .select(VORVERKAUF_ENTRY_SELECT)
       .single();
 
     if (entryError) {
-      console.error('Error creating entry:', entryError);
+      console.error('Error creating entry:');
       throw entryError;
     }
 
@@ -593,7 +646,7 @@ router.post('/submit', async (req: Request, res: Response) => {
       .insert(itemsToInsert);
 
     if (itemsError) {
-      console.error('Error creating items:', itemsError);
+      console.error('Error creating items:');
       throw itemsError;
     }
 
@@ -613,14 +666,14 @@ router.post('/submit', async (req: Request, res: Response) => {
           last_visit_date: today
         })
         .eq('id', market_id);
-      console.log(`📍 Recorded visit for market ${market_id}`);
+      console.log('Recorded direct vorverkauf market visit');
     }
 
     await freshClient
       .from('market_visits')
       .upsert({
         market_id,
-        gebietsleiter_id,
+        gebietsleiter_id: effectiveGlId,
         visit_date: today,
         source: 'vorverkauf'
       }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
@@ -631,15 +684,15 @@ router.post('/submit', async (req: Request, res: Response) => {
       itemsCount: products.length
     });
   } catch (error: any) {
-    console.error('❌ Error submitting vorverkauf:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error submitting vorverkauf:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // GET VORVERKAUF STATISTICS
 // ============================================================================
-router.get('/stats/summary', async (req: Request, res: Response) => {
+router.get('/stats/summary', requireAdmin, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     
@@ -665,8 +718,8 @@ router.get('/stats/summary', async (req: Request, res: Response) => {
       replaceItems
     });
   } catch (error: any) {
-    console.error('❌ Error fetching vorverkauf stats:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error fetching vorverkauf stats:');
+    sendInternalError(res);
   }
 });
 

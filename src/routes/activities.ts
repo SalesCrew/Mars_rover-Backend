@@ -1,7 +1,12 @@
 import { Router, Request, Response } from 'express';
 import { supabase, createFreshClient } from '../config/supabase';
+import { sendInternalError } from '../utils/httpErrors';
 
 const router = Router();
+const WELLEN_SUBMISSION_ACTIVITY_SELECT = 'id, welle_id, gebietsleiter_id, market_id, item_type, item_id, quantity, value_per_unit, created_at';
+const VORVERKAUF_ENTRY_ACTIVITY_SELECT = 'id, gebietsleiter_id, market_id, reason, notes, status, created_at';
+const VORVERKAUF_ITEM_ACTIVITY_SELECT = 'id, vorverkauf_entry_id, product_id, quantity, item_type';
+const ACTIVITY_PRODUCT_SELECT = 'id, name, price';
 
 interface Activity {
   id: string;
@@ -26,27 +31,27 @@ router.get('/', async (req: Request, res: Response) => {
     const limit = parseInt(req.query.limit as string) || 50;
     const offset = parseInt(req.query.offset as string) || 0;
     
-    console.log('📊 Fetching combined activities...');
+    console.log('Fetching combined activities...');
     
     const freshClient = createFreshClient();
     
     // Fetch vorbestellungen (wellen_submissions - individual market submissions)
     const { data: progressData, error: progressError } = await freshClient
       .from('wellen_submissions')
-      .select('*')
+      .select(WELLEN_SUBMISSION_ACTIVITY_SELECT)
       .order('created_at', { ascending: false })
       .range(0, 100);
     
-    if (progressError) console.error('Progress error:', progressError);
+    if (progressError) console.error('Progress error:');
     
     // Fetch vorverkäufe
     const { data: vorverkaufData, error: vorverkaufError } = await freshClient
       .from('vorverkauf_entries')
-      .select('*')
+      .select(VORVERKAUF_ENTRY_ACTIVITY_SELECT)
       .order('created_at', { ascending: false })
       .range(0, 100);
     
-    if (vorverkaufError) console.error('Vorverkauf error:', vorverkaufError);
+    if (vorverkaufError) console.error('Vorverkauf error:');
     
     // Get all related data
     const glIds = [
@@ -103,14 +108,14 @@ router.get('/', async (req: Request, res: Response) => {
     // Fetch vorverkauf items
     const vorverkaufEntryIds = (vorverkaufData || []).map(v => v.id);
     const vorverkaufItemsResult = vorverkaufEntryIds.length > 0 
-      ? await freshClient.from('vorverkauf_items').select('*').in('vorverkauf_entry_id', vorverkaufEntryIds)
+      ? await freshClient.from('vorverkauf_items').select(VORVERKAUF_ITEM_ACTIVITY_SELECT).in('vorverkauf_entry_id', vorverkaufEntryIds)
       : { data: [] };
     const vorverkaufItems = vorverkaufItemsResult.data || [];
     
     // Fetch product info for vorverkauf items
     const vorverkaufProductIds = [...new Set(vorverkaufItems.map(i => i.product_id))].filter(Boolean);
     const vorverkaufProductsResult = vorverkaufProductIds.length > 0
-      ? await freshClient.from('products').select('*').in('id', vorverkaufProductIds)
+      ? await freshClient.from('products').select(ACTIVITY_PRODUCT_SELECT).in('id', vorverkaufProductIds)
       : { data: [] };
     const vorverkaufProducts = vorverkaufProductsResult.data || [];
     
@@ -386,7 +391,7 @@ router.get('/', async (req: Request, res: Response) => {
       .order('created_at', { ascending: false })
       .range(0, 100);
     
-    if (naraError) console.error('NARA error:', naraError);
+    if (naraError) console.error('NARA error:');
     
     const naraActivities: Activity[] = (naraData || []).map((n: any) => {
       const items = (n.nara_incentive_items || []);
@@ -425,8 +430,8 @@ router.get('/', async (req: Request, res: Response) => {
     console.log(`✅ Fetched ${allActivities.length} activities (${progressActivities.length} vorbestellungen, ${vorverkaufActivities.length} vorverkäufe, ${naraActivities.length} nara-incentive)`);
     res.json(allActivities);
   } catch (error: any) {
-    console.error('❌ Error fetching activities:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error fetching activities:');
+    sendInternalError(res);
   }
 });
 
@@ -438,7 +443,7 @@ router.put('/vorbestellung/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
     const { current_number } = req.body;
     
-    console.log(`📝 Updating vorbestellung submission ${id} to quantity ${current_number}...`);
+    console.log(`Updating vorbestellung submission quantity to ${current_number}`);
     
     const freshClient = createFreshClient();
     
@@ -446,16 +451,16 @@ router.put('/vorbestellung/:id', async (req: Request, res: Response) => {
       .from('wellen_submissions')
       .update({ quantity: current_number })
       .eq('id', id)
-      .select()
+      .select(WELLEN_SUBMISSION_ACTIVITY_SELECT)
       .single();
     
     if (error) throw error;
     
-    console.log(`✅ Updated vorbestellung submission ${id}`);
+    console.log('Updated vorbestellung submission');
     res.json(data);
   } catch (error: any) {
-    console.error('❌ Error updating vorbestellung submission:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error updating vorbestellung submission:');
+    sendInternalError(res);
   }
 });
 
@@ -467,7 +472,7 @@ router.put('/vorbestellung/product/:submissionId', async (req: Request, res: Res
     const { submissionId } = req.params;
     const { quantity } = req.body;
     
-    console.log(`📝 Updating product submission ${submissionId} to quantity ${quantity}...`);
+    console.log(`Updating product submission quantity to ${quantity}`);
     
     const freshClient = createFreshClient();
     
@@ -487,16 +492,16 @@ router.put('/vorbestellung/product/:submissionId', async (req: Request, res: Res
       .from('wellen_submissions')
       .update({ quantity })
       .eq('id', submissionId)
-      .select()
+      .select(WELLEN_SUBMISSION_ACTIVITY_SELECT)
       .single();
     
     if (error) throw error;
     
-    console.log(`✅ Updated product submission ${submissionId}`);
+    console.log('Updated product submission');
     res.json(data);
   } catch (error: any) {
-    console.error('❌ Error updating product submission:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error updating product submission:');
+    sendInternalError(res);
   }
 });
 
@@ -508,7 +513,7 @@ router.put('/vorverkauf/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
     const { reason, notes } = req.body;
     
-    console.log(`📝 Updating vorverkauf ${id}...`);
+    console.log('Updating vorverkauf entry');
     
     const freshClient = createFreshClient();
     
@@ -520,16 +525,16 @@ router.put('/vorverkauf/:id', async (req: Request, res: Response) => {
       .from('vorverkauf_entries')
       .update(updateData)
       .eq('id', id)
-      .select()
+      .select(VORVERKAUF_ENTRY_ACTIVITY_SELECT)
       .single();
     
     if (error) throw error;
     
-    console.log(`✅ Updated vorverkauf ${id}`);
+    console.log('Updated vorverkauf entry');
     res.json(data);
   } catch (error: any) {
-    console.error('❌ Error updating vorverkauf:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error updating vorverkauf:');
+    sendInternalError(res);
   }
 });
 
@@ -540,7 +545,7 @@ router.delete('/:type/:id', async (req: Request, res: Response) => {
   try {
     const { type, id } = req.params;
     
-    console.log(`🗑️ Deleting ${type} ${id}...`);
+    console.log(`Deleting activity of type ${type}`);
     
     const freshClient = createFreshClient();
     
@@ -557,7 +562,7 @@ router.delete('/:type/:id', async (req: Request, res: Response) => {
           .single();
         
         if (fetchError) {
-          console.warn(`Could not fetch submission details for ${submissionId}:`, fetchError.message);
+          console.warn('Could not fetch submission details:');
           continue;
         }
         
@@ -568,7 +573,7 @@ router.delete('/:type/:id', async (req: Request, res: Response) => {
           .eq('id', submissionId);
         
         if (error) {
-          console.error(`Error deleting submission ${submissionId}:`, error.message);
+          console.error('Error deleting submission:');
           continue;
         }
         
@@ -602,11 +607,11 @@ router.delete('/:type/:id', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid type' });
     }
     
-    console.log(`✅ Deleted ${type} ${id}`);
+    console.log(`Deleted activity of type ${type}`);
     res.json({ message: 'Deleted successfully' });
   } catch (error: any) {
-    console.error('❌ Error deleting activity:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error deleting activity:');
+    sendInternalError(res);
   }
 });
 

@@ -1,7 +1,13 @@
 import { Router, Request, Response } from 'express';
-import { supabase, createFreshClient } from '../config/supabase';
+import { createFreshClient } from '../config/supabase';
+import { AuthRequest, getAuthenticatedGlId, requireAdmin, requireSelfOrAdmin } from '../middleware/auth';
+import { sendInternalError } from '../utils/httpErrors';
 
 const router = Router();
+const VORVERKAUF_WELLE_SELECT = 'id, name, image_url, start_date, end_date, status, created_at, updated_at';
+const VORVERKAUF_SUBMISSION_SELECT = 'id, vorverkauf_welle_id, gebietsleiter_id, market_id, notes, created_at';
+const VORVERKAUF_SUBMISSION_PRODUCT_SELECT = 'id, submission_id, product_id, quantity, reason';
+const VORVERKAUF_MARKET_SELECT = 'id, name, address, city, postal_code, chain, gebietsleiter_id, gebietsleiter_name, frequency, current_visits, last_visit_date';
 
 // Helper to determine status based on dates
 const determineStatus = (startDate: string, endDate: string): 'upcoming' | 'active' | 'past' => {
@@ -31,7 +37,7 @@ router.get('/', async (_req: Request, res: Response) => {
 
     const { data: wellen, error } = await freshClient
       .from('vorverkauf_wellen')
-      .select('*')
+      .select(VORVERKAUF_WELLE_SELECT)
       .order('start_date', { ascending: false });
 
     if (error) throw error;
@@ -58,8 +64,8 @@ router.get('/', async (_req: Request, res: Response) => {
 
     res.json(wellenWithCounts);
   } catch (error) {
-    console.error('Error fetching vorverkauf wellen:', error);
-    res.status(500).json({ error: 'Failed to fetch vorverkauf wellen' });
+    console.error('Error fetching vorverkauf wellen:');
+    sendInternalError(res);
   }
 });
 
@@ -67,18 +73,18 @@ router.get('/', async (_req: Request, res: Response) => {
 // GET VORVERKAUF WELLEN FOR GL (active/upcoming for their markets)
 // NOTE: This route MUST be before /:id to avoid "gl" being matched as an ID
 // ============================================================================
-router.get('/gl/:glId', async (req: Request, res: Response) => {
+router.get('/gl/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: Request, res: Response) => {
   try {
     const { glId } = req.params;
 
-    console.log('Fetching vorverkauf wellen for GL:', glId);
+    console.log('Fetching vorverkauf wellen for GL context');
     
     const freshClient = createFreshClient();
 
     // Get ALL active/upcoming wellen first (since markets may not be assigned to GL yet)
     const { data: wellen, error: wellenError } = await freshClient
       .from('vorverkauf_wellen')
-      .select('*')
+      .select(VORVERKAUF_WELLE_SELECT)
       .order('start_date', { ascending: true });
 
     if (wellenError) throw wellenError;
@@ -99,8 +105,8 @@ router.get('/gl/:glId', async (req: Request, res: Response) => {
 
     res.json(wellenWithStatus);
   } catch (error) {
-    console.error('Error fetching GL vorverkauf wellen:', error);
-    res.status(500).json({ error: 'Failed to fetch vorverkauf wellen for GL' });
+    console.error('Error fetching GL vorverkauf wellen:');
+    sendInternalError(res);
   }
 });
 
@@ -108,7 +114,7 @@ router.get('/gl/:glId', async (req: Request, res: Response) => {
 // GET SUBMISSIONS FOR A WAVE (Admin)
 // NOTE: This route MUST be before /:id to avoid "submissions" being matched as an ID
 // ============================================================================
-router.get('/submissions/:waveId', async (req: Request, res: Response) => {
+router.get('/submissions/:waveId', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { waveId } = req.params;
     
@@ -117,7 +123,7 @@ router.get('/submissions/:waveId', async (req: Request, res: Response) => {
     const { data: submissions, error: submissionsError } = await freshClient
       .from('vorverkauf_submissions')
       .select(`
-        *,
+        ${VORVERKAUF_SUBMISSION_SELECT},
         gebietsleiter:gebietsleiter_id (id, name),
         market:market_id (id, name, city, chain)
       `)
@@ -125,22 +131,23 @@ router.get('/submissions/:waveId', async (req: Request, res: Response) => {
       .order('created_at', { ascending: false });
 
     if (submissionsError) {
-      console.error('Error fetching submissions:', submissionsError);
+      console.error('Error fetching vorverkauf wave submissions');
       throw submissionsError;
     }
 
     // Get products for each submission
     const submissionsWithProducts = await Promise.all((submissions || []).map(async (sub) => {
+      const gebietsleiter = Array.isArray((sub as any).gebietsleiter) ? (sub as any).gebietsleiter[0] : (sub as any).gebietsleiter;
       const { data: products } = await freshClient
         .from('vorverkauf_submission_products')
         .select(`
-          *,
+          ${VORVERKAUF_SUBMISSION_PRODUCT_SELECT},
           product:product_id (id, name, department, product_type, weight, price)
         `)
         .eq('submission_id', sub.id);
 
       // Parse GL name into first_name and last_name for frontend compatibility
-      const glName = sub.gebietsleiter?.name || '';
+      const glName = gebietsleiter?.name || '';
       const nameParts = glName.split(' ');
       const firstName = nameParts[0] || '';
       const lastName = nameParts.slice(1).join(' ') || '';
@@ -148,8 +155,8 @@ router.get('/submissions/:waveId', async (req: Request, res: Response) => {
       return {
         id: sub.id,
         welleId: sub.vorverkauf_welle_id,
-        gebietsleiter: sub.gebietsleiter ? {
-          id: sub.gebietsleiter.id,
+        gebietsleiter: gebietsleiter ? {
+          id: gebietsleiter.id,
           first_name: firstName,
           last_name: lastName,
           name: glName
@@ -168,8 +175,8 @@ router.get('/submissions/:waveId', async (req: Request, res: Response) => {
 
     res.json(submissionsWithProducts);
   } catch (error) {
-    console.error('Error fetching submissions:', error);
-    res.status(500).json({ error: 'Failed to fetch submissions' });
+    console.error('Error fetching submissions:');
+    sendInternalError(res);
   }
 });
 
@@ -177,7 +184,7 @@ router.get('/submissions/:waveId', async (req: Request, res: Response) => {
 // GET SUBMISSION STATS FOR A WAVE (Admin)
 // NOTE: This route MUST be before /:id to avoid "stats" being matched as an ID
 // ============================================================================
-router.get('/stats/:waveId', async (req: Request, res: Response) => {
+router.get('/stats/:waveId', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { waveId } = req.params;
     
@@ -194,7 +201,7 @@ router.get('/stats/:waveId', async (req: Request, res: Response) => {
     const submissionIds = (submissions || []).map(s => s.id);
 
     // Get product counts by reason
-    let reasonCounts = { OOS: 0, Listungslücke: 0, Platzierung: 0 };
+    let reasonCounts: Record<string, number> = { OOS: 0, "Listungsl\u00fccke": 0, Platzierung: 0 };
     let totalProducts = 0;
 
     if (submissionIds.length > 0) {
@@ -219,8 +226,8 @@ router.get('/stats/:waveId', async (req: Request, res: Response) => {
       byReason: reasonCounts
     });
   } catch (error) {
-    console.error('Error fetching stats:', error);
-    res.status(500).json({ error: 'Failed to fetch stats' });
+    console.error('Error fetching stats');
+    sendInternalError(res);
   }
 });
 
@@ -235,7 +242,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 
     const { data: welle, error } = await freshClient
       .from('vorverkauf_wellen')
-      .select('*')
+      .select(VORVERKAUF_WELLE_SELECT)
       .eq('id', id)
       .single();
 
@@ -262,15 +269,15 @@ router.get('/:id', async (req: Request, res: Response) => {
       updatedAt: welle.updated_at
     });
   } catch (error) {
-    console.error('Error fetching vorverkauf welle:', error);
-    res.status(500).json({ error: 'Failed to fetch vorverkauf welle' });
+    console.error('Error fetching vorverkauf welle:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // CREATE VORVERKAUF WELLE (Admin)
 // ============================================================================
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { name, image, startDate, endDate, assignedMarketIds } = req.body;
 
@@ -292,7 +299,7 @@ router.post('/', async (req: Request, res: Response) => {
         end_date: endDate,
         status
       })
-      .select()
+      .select(VORVERKAUF_WELLE_SELECT)
       .single();
 
     if (welleError) throw welleError;
@@ -309,7 +316,7 @@ router.post('/', async (req: Request, res: Response) => {
         .insert(marketInserts);
 
       if (marketsError) {
-        console.error('Error assigning markets:', marketsError);
+        console.error('Error assigning markets to vorverkauf wave');
         // Continue anyway, welle is created
       }
     }
@@ -326,15 +333,15 @@ router.post('/', async (req: Request, res: Response) => {
       updatedAt: welle.updated_at
     });
   } catch (error) {
-    console.error('Error creating vorverkauf welle:', error);
-    res.status(500).json({ error: 'Failed to create vorverkauf welle' });
+    console.error('Error creating vorverkauf welle:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // UPDATE VORVERKAUF WELLE (Admin)
 // ============================================================================
-router.put('/:id', async (req: Request, res: Response) => {
+router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { name, image, startDate, endDate, assignedMarketIds } = req.body;
@@ -354,7 +361,7 @@ router.put('/:id', async (req: Request, res: Response) => {
         status
       })
       .eq('id', id)
-      .select()
+      .select(VORVERKAUF_WELLE_SELECT)
       .single();
 
     if (welleError) throw welleError;
@@ -392,15 +399,15 @@ router.put('/:id', async (req: Request, res: Response) => {
       updatedAt: welle.updated_at
     });
   } catch (error) {
-    console.error('Error updating vorverkauf welle:', error);
-    res.status(500).json({ error: 'Failed to update vorverkauf welle' });
+    console.error('Error updating vorverkauf welle:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // DELETE VORVERKAUF WELLE (Admin)
 // ============================================================================
-router.delete('/:id', async (req: Request, res: Response) => {
+router.delete('/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     
@@ -415,8 +422,8 @@ router.delete('/:id', async (req: Request, res: Response) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Error deleting vorverkauf welle:', error);
-    res.status(500).json({ error: 'Failed to delete vorverkauf welle' });
+    console.error('Error deleting vorverkauf welle:');
+    sendInternalError(res);
   }
 });
 
@@ -439,7 +446,7 @@ router.get('/:id/markets', async (req: Request, res: Response) => {
       .eq('welle_id', id);
 
     if (welleMarketsError) {
-      console.error('Error fetching welle markets junction:', welleMarketsError);
+      console.error('Error fetching vorverkauf wave market assignments');
       throw welleMarketsError;
     }
 
@@ -455,11 +462,11 @@ router.get('/:id/markets', async (req: Request, res: Response) => {
     // Get all market details for assigned markets
     const { data: markets, error: marketsError } = await freshClient
       .from('markets')
-      .select('*')
+      .select(VORVERKAUF_MARKET_SELECT)
       .in('id', marketIds);
 
     if (marketsError) {
-      console.error('Error fetching market details:', marketsError);
+      console.error('Error fetching vorverkauf wave market details');
       throw marketsError;
     }
 
@@ -469,7 +476,7 @@ router.get('/:id/markets', async (req: Request, res: Response) => {
     const formattedMarkets = (markets || []).map(m => ({
       id: m.id,
       name: m.name,
-      address: m.address || m.street || '',
+      address: m.address || '',
       city: m.city || '',
       postalCode: m.postal_code || '',
       chain: m.chain || '',
@@ -482,19 +489,20 @@ router.get('/:id/markets', async (req: Request, res: Response) => {
 
     res.json(formattedMarkets);
   } catch (error) {
-    console.error('Error fetching welle markets:', error);
-    res.status(500).json({ error: 'Failed to fetch welle markets' });
+    console.error('Error fetching welle markets:');
+    sendInternalError(res);
   }
 });
 
 // ============================================================================
 // SUBMIT VORVERKAUF ENTRY (GL)
 // ============================================================================
-router.post('/submit', async (req: Request, res: Response) => {
+router.post('/submit', async (req: AuthRequest, res: Response) => {
   try {
     const { welleId, gebietsleiter_id, market_id, products, notes } = req.body;
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
 
-    if (!welleId || !gebietsleiter_id || !market_id || !products || products.length === 0) {
+    if (!welleId || !effectiveGlId || !market_id || !products || products.length === 0) {
       return res.status(400).json({ 
         error: 'welleId, gebietsleiter_id, market_id, and products are required' 
       });
@@ -507,11 +515,11 @@ router.post('/submit', async (req: Request, res: Response) => {
       .from('vorverkauf_submissions')
       .insert({
         vorverkauf_welle_id: welleId,
-        gebietsleiter_id,
+        gebietsleiter_id: effectiveGlId,
         market_id,
         notes: notes || null
       })
-      .select()
+      .select(VORVERKAUF_SUBMISSION_SELECT)
       .single();
 
     if (submissionError) throw submissionError;
@@ -552,7 +560,7 @@ router.post('/submit', async (req: Request, res: Response) => {
       .from('market_visits')
       .upsert({
         market_id,
-        gebietsleiter_id,
+        gebietsleiter_id: effectiveGlId,
         visit_date: today,
         source: 'vorverkauf_wellen'
       }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
@@ -566,8 +574,8 @@ router.post('/submit', async (req: Request, res: Response) => {
       createdAt: submission.created_at
     });
   } catch (error) {
-    console.error('Error submitting vorverkauf:', error);
-    res.status(500).json({ error: 'Failed to submit vorverkauf' });
+    console.error('Error submitting vorverkauf:');
+    sendInternalError(res);
   }
 });
 

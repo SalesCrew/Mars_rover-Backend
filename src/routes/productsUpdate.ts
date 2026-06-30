@@ -1,8 +1,10 @@
 import express from 'express';
 import { randomUUID } from 'crypto';
 import { createFreshClient } from '../config/supabase.js';
+import { sendInternalError } from '../utils/httpErrors';
 
 const router = express.Router();
+const PRODUCTS_UPDATE_SELECT = 'id, name, department, product_type, weight, content, pallet_size, price, sku, artikel_nr, palette_products, is_active';
 
 const transformFromDB = (row: any) => ({
   id: row.id,
@@ -40,14 +42,14 @@ router.get('/', async (_req, res) => {
     const client = createFreshClient();
     const { data, error } = await client
       .from('products_update')
-      .select('*')
+      .select(PRODUCTS_UPDATE_SELECT)
       .order('name', { ascending: true });
 
     if (error) throw error;
     res.json((data || []).map(transformFromDB));
   } catch (err: any) {
-    console.error('❌ GET /products-update:', err);
-    res.status(500).json({ error: err.message || 'Internal server error' });
+    console.error('❌ GET /products-update:');
+    sendInternalError(res);
   }
 });
 
@@ -69,15 +71,15 @@ router.post('/', async (req, res) => {
     const { data, error } = await client
       .from('products_update')
       .insert(rows)
-      .select();
+      .select(PRODUCTS_UPDATE_SELECT);
 
     if (error) throw error;
 
     console.log(`✅ products_update: replaced with ${rows.length} products`);
     res.json((data || []).map(transformFromDB));
   } catch (err: any) {
-    console.error('❌ POST /products-update:', err);
-    res.status(500).json({ error: err.message || 'Internal server error' });
+    console.error('❌ POST /products-update:');
+    sendInternalError(res);
   }
 });
 
@@ -94,15 +96,15 @@ router.post('/append', async (req, res) => {
     const { data, error } = await client
       .from('products_update')
       .insert(rows)
-      .select();
+      .select(PRODUCTS_UPDATE_SELECT);
 
     if (error) throw error;
 
     console.log(`✅ products_update: appended ${rows.length} products`);
     res.json((data || []).map(transformFromDB));
   } catch (err: any) {
-    console.error('❌ POST /products-update/append:', err);
-    res.status(500).json({ error: err.message || 'Internal server error' });
+    console.error('❌ POST /products-update/append:');
+    sendInternalError(res);
   }
 });
 
@@ -116,8 +118,8 @@ router.delete('/', async (_req, res) => {
     console.log('✅ products_update: cleared');
     res.json({ message: 'Staging table cleared' });
   } catch (err: any) {
-    console.error('❌ DELETE /products-update:', err);
-    res.status(500).json({ error: err.message || 'Internal server error' });
+    console.error('❌ DELETE /products-update:');
+    sendInternalError(res);
   }
 });
 
@@ -140,14 +142,14 @@ router.patch('/:id', async (req, res) => {
       .from('products_update')
       .update(updates)
       .eq('id', req.params.id)
-      .select()
+      .select(PRODUCTS_UPDATE_SELECT)
       .single();
 
     if (error) throw error;
     res.json(transformFromDB(data));
   } catch (err: any) {
-    console.error('❌ PATCH /products-update/:id:', err);
-    res.status(500).json({ error: err.message || 'Internal server error' });
+    console.error('❌ PATCH /products-update/:id:');
+    sendInternalError(res);
   }
 });
 
@@ -163,8 +165,8 @@ router.delete('/:id', async (req, res) => {
     if (error) throw error;
     res.json({ message: 'Product removed from staging' });
   } catch (err: any) {
-    console.error('❌ DELETE /products-update/:id:', err);
-    res.status(500).json({ error: err.message || 'Internal server error' });
+    console.error('❌ DELETE /products-update/:id:');
+    sendInternalError(res);
   }
 });
 
@@ -187,8 +189,8 @@ router.post('/remove-by-names', async (req, res) => {
     console.log(`✅ products_update: removed ${names.length} products by name`);
     res.json({ removed: names.length });
   } catch (err: any) {
-    console.error('❌ POST /products-update/remove-by-names:', err);
-    res.status(500).json({ error: err.message || 'Internal server error' });
+    console.error('❌ POST /products-update/remove-by-names:');
+    sendInternalError(res);
   }
 });
 
@@ -204,7 +206,7 @@ router.post('/apply', async (req, res) => {
     // 1. Fetch all staged products
     const { data: staged, error: fetchError } = await client
       .from('products_update')
-      .select('*');
+      .select(PRODUCTS_UPDATE_SELECT);
 
     if (fetchError) throw fetchError;
     if (!staged || staged.length === 0) {
@@ -251,7 +253,7 @@ router.post('/apply', async (req, res) => {
       .select('id');
 
     if (archiveError) {
-      console.error('⚠️ Soft-delete of old products failed (new products already live):', archiveError);
+      console.error('⚠️ Soft-delete of old products failed (new products already live):');
       // Don't throw — new list is already active, old ones still visible but not catastrophic
     }
 
@@ -264,14 +266,14 @@ router.post('/apply', async (req, res) => {
       .neq('id', '');
 
     if (clearError) {
-      console.error('⚠️ Could not clear staging table (swap already complete):', clearError);
+      console.error('⚠️ Could not clear staging table (swap already complete):');
     }
 
     console.log(`✅ Product swap complete: ${rows.length} inserted fresh, ${softDeletedCount} archived`);
     res.json({ inserted: rows.length, softDeleted: softDeletedCount });
   } catch (err: any) {
-    console.error('❌ POST /products-update/apply:', err);
-    res.status(500).json({ error: err.message || 'Internal server error' });
+    console.error('❌ POST /products-update/apply:');
+    sendInternalError(res);
   }
 });
 

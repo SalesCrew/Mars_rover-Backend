@@ -1,28 +1,31 @@
 import { Router, Request, Response } from 'express';
 import { createFreshClient } from '../config/supabase';
+import { AuthRequest, getAuthenticatedGlId, requireAdmin } from '../middleware/auth';
+import { sendInternalError } from '../utils/httpErrors';
 
 const router = Router();
 
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', async (req: AuthRequest, res: Response) => {
   try {
     const { gebietsleiter_id, market_id, items } = req.body;
+    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
 
-    if (!gebietsleiter_id || !market_id || !items || !Array.isArray(items) || items.length === 0) {
+    if (!effectiveGlId || !market_id || !items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'gebietsleiter_id, market_id, and items are required' });
     }
 
-    console.log(`📦 Creating NARA-Incentive submission for GL ${gebietsleiter_id}, market ${market_id}, ${items.length} items...`);
+    console.log(`Creating NARA-Incentive submission with ${items.length} items`);
 
     const freshClient = createFreshClient();
 
     const { data: submission, error: submissionError } = await freshClient
       .from('nara_incentive_submissions')
-      .insert({ gebietsleiter_id, market_id })
-      .select()
+      .insert({ gebietsleiter_id: effectiveGlId, market_id })
+      .select('id, gebietsleiter_id, market_id, created_at')
       .single();
 
     if (submissionError) {
-      console.error('Error creating submission:', submissionError);
+      console.error('Error creating submission:');
       throw submissionError;
     }
 
@@ -37,19 +40,19 @@ router.post('/', async (req: Request, res: Response) => {
       .insert(itemRows);
 
     if (itemsError) {
-      console.error('Error creating items:', itemsError);
+      console.error('Error creating items:');
       throw itemsError;
     }
 
-    console.log(`✅ NARA-Incentive submission created: ${submission.id} with ${items.length} items`);
+    console.log(`NARA-Incentive submission created with ${items.length} items`);
     res.status(201).json({ id: submission.id, itemsCount: items.length });
   } catch (error: any) {
-    console.error('Error creating NARA-Incentive submission:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error creating NARA-Incentive submission:');
+    sendInternalError(res);
   }
 });
 
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const { glId } = req.query;
     const freshClient = createFreshClient();
@@ -72,14 +75,16 @@ router.get('/', async (req: Request, res: Response) => {
       `)
       .order('created_at', { ascending: false });
 
-    if (glId) {
+    if (req.user?.role !== 'admin') {
+      query = query.eq('gebietsleiter_id', getAuthenticatedGlId(req.user));
+    } else if (glId) {
       query = query.eq('gebietsleiter_id', glId as string);
     }
 
     const { data, error } = await query;
 
     if (error) {
-      console.error('Error fetching NARA-Incentive submissions:', error);
+      console.error('Error fetching NARA-Incentive submissions:');
       throw error;
     }
 
@@ -115,12 +120,12 @@ router.get('/', async (req: Request, res: Response) => {
 
     res.json(submissions);
   } catch (error: any) {
-    console.error('Error fetching NARA-Incentive submissions:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching NARA-Incentive submissions:');
+    sendInternalError(res);
   }
 });
 
-router.delete('/:id', async (req: Request, res: Response) => {
+router.delete('/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -131,15 +136,15 @@ router.delete('/:id', async (req: Request, res: Response) => {
       .eq('id', id);
 
     if (error) {
-      console.error('Error deleting NARA-Incentive submission:', error);
+      console.error('Error deleting NARA-Incentive submission:');
       throw error;
     }
 
-    console.log(`🗑️ NARA-Incentive submission deleted: ${id}`);
+    console.log('NARA-Incentive submission deleted');
     res.json({ success: true });
   } catch (error: any) {
-    console.error('Error deleting NARA-Incentive submission:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error deleting NARA-Incentive submission:');
+    sendInternalError(res);
   }
 });
 

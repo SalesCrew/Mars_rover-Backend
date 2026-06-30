@@ -1,9 +1,133 @@
 import { Router, Request, Response } from 'express';
 import { supabase, createFreshClient } from '../config/supabase';
-import bcrypt from 'bcrypt';
 import { aggregateSubmissions } from './wellen';
+import { AuthRequest, requireAdmin, requireSelfOrAdmin } from '../middleware/auth';
+import { sendInternalError } from '../utils/httpErrors';
 
 const router = Router();
+const GL_PROFILE_PICTURES_BUCKET = 'gl-profile-pictures';
+const LEGACY_PROFILE_PICTURES_BUCKET = 'wellen-images';
+const GL_PROFILE_PICTURE_SIGNED_URL_SECONDS = 60 * 60;
+const GL_PROFILE_PICTURE_ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const GL_PROFILE_PICTURE_MAX_BYTES = 5 * 1024 * 1024;
+
+const logGebietsleiterDbError = (context: string, error: any) => {
+  console.error(`${context}: ${error?.code || 'database_error'}`);
+};
+
+const extractStoragePathFromValue = (value: string | null | undefined, bucket: string): string | null => {
+  if (!value) return null;
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+
+  const objectSegments = [
+    `/storage/v1/object/public/${bucket}/`,
+    `/storage/v1/object/sign/${bucket}/`
+  ];
+
+  for (const segment of objectSegments) {
+    const index = trimmed.indexOf(segment);
+    if (index >= 0) {
+      const pathWithQuery = trimmed.slice(index + segment.length);
+      const [pathOnly] = pathWithQuery.split('?');
+      return decodeURIComponent(pathOnly);
+    }
+  }
+
+  if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://') && !trimmed.startsWith('blob:')) {
+    return trimmed;
+  }
+
+  return null;
+};
+
+const signProfilePictureUrl = async (
+  client: ReturnType<typeof createFreshClient>,
+  value: string | null | undefined
+): Promise<string | null> => {
+  if (!value) return null;
+
+  const privatePath = extractStoragePathFromValue(value, GL_PROFILE_PICTURES_BUCKET);
+  if (privatePath) {
+    const { data, error } = await client.storage
+      .from(GL_PROFILE_PICTURES_BUCKET)
+      .createSignedUrl(privatePath, GL_PROFILE_PICTURE_SIGNED_URL_SECONDS);
+
+    if (!error && data?.signedUrl) {
+      return data.signedUrl;
+    }
+  }
+
+  const legacyPath = extractStoragePathFromValue(value, LEGACY_PROFILE_PICTURES_BUCKET);
+  if (legacyPath?.startsWith('profile-pictures/')) {
+    const { data, error } = await client.storage
+      .from(LEGACY_PROFILE_PICTURES_BUCKET)
+      .createSignedUrl(legacyPath, GL_PROFILE_PICTURE_SIGNED_URL_SECONDS);
+
+    if (!error && data?.signedUrl) {
+      return data.signedUrl;
+    }
+  }
+
+  return value;
+};
+
+const signProfilePictureRows = async <T extends { profile_picture_url?: string | null }>(
+  client: ReturnType<typeof createFreshClient>,
+  rows: T[]
+): Promise<T[]> => Promise.all(rows.map(async (row) => ({
+  ...row,
+  profile_picture_url: await signProfilePictureUrl(client, row.profile_picture_url)
+})));
+
+const removeProfilePictureObject = async (
+  client: ReturnType<typeof createFreshClient>,
+  value: string | null | undefined
+): Promise<void> => {
+  const privatePath = extractStoragePathFromValue(value, GL_PROFILE_PICTURES_BUCKET);
+  if (privatePath) {
+    const { error } = await client.storage.from(GL_PROFILE_PICTURES_BUCKET).remove([privatePath]);
+    if (error) console.error('Error removing private profile picture object');
+    return;
+  }
+
+  const legacyPath = extractStoragePathFromValue(value, LEGACY_PROFILE_PICTURES_BUCKET);
+  if (legacyPath?.startsWith('profile-pictures/')) {
+    const { error } = await client.storage.from(LEGACY_PROFILE_PICTURES_BUCKET).remove([legacyPath]);
+    if (error) console.error('Error removing legacy profile picture object');
+  }
+};
+
+const isMissingBucketError = (error: any): boolean => {
+  const message = storageErrorMessage(error);
+  return message.includes('bucket not found') || message.includes('bucket_not_found') || message.includes('404');
+};
+
+const storageErrorMessage = (error: unknown): string => {
+  const value = error as { message?: string; statusCode?: string | number; status?: string | number };
+  return `${value?.message || ''} ${value?.statusCode || ''} ${value?.status || ''}`.toLowerCase();
+};
+
+const ensureProfilePicturesBucket = async (client: ReturnType<typeof createFreshClient>): Promise<void> => {
+  const { error } = await client.storage.createBucket(GL_PROFILE_PICTURES_BUCKET, {
+    public: false,
+    allowedMimeTypes: GL_PROFILE_PICTURE_ALLOWED_MIME_TYPES,
+    fileSizeLimit: GL_PROFILE_PICTURE_MAX_BYTES
+  });
+
+  if (error) {
+    const message = storageErrorMessage(error);
+    if (!message.includes('already exists') && !message.includes('already_exist') && !message.includes('409')) {
+      throw error;
+    }
+
+    await client.storage.updateBucket(GL_PROFILE_PICTURES_BUCKET, {
+      public: false,
+      allowedMimeTypes: GL_PROFILE_PICTURE_ALLOWED_MIME_TYPES,
+      fileSizeLimit: GL_PROFILE_PICTURE_MAX_BYTES
+    });
+  }
+};
 
 const DASHBOARD_SUBMISSIONS_PAGE_SIZE = 1000;
 const DASHBOARD_ID_CHUNK_SIZE = 50;
@@ -176,9 +300,9 @@ async function calculateDashboardRevenue(
  * GET /api/gebietsleiter
  * Get all active gebietsleiter
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', requireAdmin, async (req: Request, res: Response) => {
   try {
-    console.log('📋 Fetching all gebietsleiter...');
+    console.log('Fetching all gebietsleiter...');
     
     const freshClient = createFreshClient();
     
@@ -189,15 +313,16 @@ router.get('/', async (req: Request, res: Response) => {
       .order('created_at', { ascending: false });
 
     if (error) {
-      console.error('Supabase error:', error);
+      logGebietsleiterDbError('Error fetching gebietsleiter rows', error);
       throw error;
     }
 
     console.log(`✅ Fetched ${data?.length || 0} gebietsleiter`);
-    res.json(data || []);
+    const signedRows = await signProfilePictureRows(freshClient, data || []);
+    res.json(signedRows);
   } catch (error: any) {
-    console.error('Error fetching gebietsleiter:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching gebietsleiter');
+    sendInternalError(res);
   }
 });
 
@@ -205,10 +330,10 @@ router.get('/', async (req: Request, res: Response) => {
  * GET /api/gebietsleiter/:id
  * Get a single gebietsleiter by ID
  */
-router.get('/:id', async (req: Request, res: Response) => {
+router.get('/:id', requireSelfOrAdmin(req => req.params.id), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    console.log(`📋 Fetching gebietsleiter ${id}...`);
+    console.log('Fetching gebietsleiter profile');
     
     const freshClient = createFreshClient();
 
@@ -219,7 +344,7 @@ router.get('/:id', async (req: Request, res: Response) => {
       .single();
 
     if (error) {
-      console.error('Supabase error:', error);
+      logGebietsleiterDbError('Error fetching gebietsleiter row', error);
       throw error;
     }
 
@@ -227,11 +352,12 @@ router.get('/:id', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Gebietsleiter not found' });
     }
 
-    console.log(`✅ Fetched gebietsleiter ${id}`);
-    res.json(data);
+    console.log('Fetched gebietsleiter profile');
+    const [signedRow] = await signProfilePictureRows(freshClient, [data]);
+    res.json(signedRow);
   } catch (error: any) {
-    console.error('Error fetching gebietsleiter:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching gebietsleiter');
+    sendInternalError(res);
   }
 });
 
@@ -239,30 +365,46 @@ router.get('/:id', async (req: Request, res: Response) => {
  * POST /api/gebietsleiter/upload-profile-picture
  * Upload a profile picture to Supabase Storage
  */
-router.post('/upload-profile-picture', async (req: Request, res: Response) => {
+router.post('/upload-profile-picture', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { base64, contentType, fileName } = req.body;
     if (!base64) return res.status(400).json({ error: 'Missing base64 image data' });
 
     const buffer = Buffer.from(base64, 'base64');
-    const ext = (fileName?.split('.').pop() || contentType?.split('/')[1] || 'jpg').toLowerCase();
+    const normalizedContentType = contentType || 'image/jpeg';
+    if (!GL_PROFILE_PICTURE_ALLOWED_MIME_TYPES.includes(normalizedContentType)) {
+      return res.status(400).json({ error: 'Unsupported profile picture type' });
+    }
+
+    if (buffer.length > GL_PROFILE_PICTURE_MAX_BYTES) {
+      return res.status(400).json({ error: 'Profile picture is too large' });
+    }
+
+    const ext = (fileName?.split('.').pop() || normalizedContentType.split('/')[1] || 'jpg').toLowerCase();
     const storagePath = `profile-pictures/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
 
     const freshClient = createFreshClient();
-    const { error: uploadError } = await freshClient.storage
-      .from('wellen-images')
-      .upload(storagePath, buffer, { contentType: contentType || 'image/jpeg', upsert: true });
+    let { error: uploadError } = await freshClient.storage
+      .from(GL_PROFILE_PICTURES_BUCKET)
+      .upload(storagePath, buffer, { contentType: normalizedContentType, upsert: true });
+
+    if (uploadError && isMissingBucketError(uploadError)) {
+      await ensureProfilePicturesBucket(freshClient);
+      ({ error: uploadError } = await freshClient.storage
+        .from(GL_PROFILE_PICTURES_BUCKET)
+        .upload(storagePath, buffer, { contentType: normalizedContentType, upsert: true }));
+    }
 
     if (uploadError) {
-      console.error('Upload error:', uploadError);
+      console.error('Upload error');
       return res.status(500).json({ error: 'Failed to upload image' });
     }
 
-    const { data: urlData } = freshClient.storage.from('wellen-images').getPublicUrl(storagePath);
-    res.json({ url: urlData.publicUrl });
+    const signedUrl = await signProfilePictureUrl(freshClient, storagePath);
+    res.json({ path: storagePath, url: signedUrl });
   } catch (error: any) {
-    console.error('Error uploading profile picture:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error uploading profile picture');
+    sendInternalError(res);
   }
 });
 
@@ -270,9 +412,9 @@ router.post('/upload-profile-picture', async (req: Request, res: Response) => {
  * POST /api/gebietsleiter
  * Create a new gebietsleiter with Supabase Auth account
  */
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requireAdmin, async (req: Request, res: Response) => {
   try {
-    console.log('➕ Creating new gebietsleiter with Supabase Auth...');
+    console.log('Creating new gebietsleiter with Supabase Auth...');
     
     const { name, address, postalCode, city, phone, email, password, profilePictureUrl, isTest } = req.body;
 
@@ -287,7 +429,7 @@ router.post('/', async (req: Request, res: Response) => {
     const lastName = nameParts.slice(1).join(' ') || '';
 
     // Step 1: Create user in Supabase Auth
-    console.log('🔐 Creating Supabase Auth user...');
+    console.log('Creating Supabase Auth user...');
     const { data: authData, error: authError } = await supabase.auth.admin.createUser({
       email,
       password,
@@ -295,23 +437,23 @@ router.post('/', async (req: Request, res: Response) => {
     });
 
     if (authError || !authData.user) {
-      console.error('Supabase Auth error:', authError);
+      console.error('Gebietsleiter auth user creation failed');
       
       // Check for duplicate email in Auth
       if (authError?.message?.includes('already')) {
         return res.status(409).json({ error: 'Email already exists in authentication system' });
       }
       
-      return res.status(400).json({ error: authError?.message || 'Failed to create auth user' });
+      return res.status(400).json({ error: 'Failed to create auth user' });
     }
 
     const authUserId = authData.user.id;
-    console.log(`✅ Created Supabase Auth user: ${authUserId}`);
+    console.log('Created Supabase Auth user');
     
     const freshClient = createFreshClient();
 
     // Step 2: Create entry in users table with role 'gl'
-    console.log('👤 Creating users table entry...');
+    console.log('Creating users table entry...');
     const { error: userError } = await freshClient
       .from('users')
       .insert({
@@ -323,7 +465,7 @@ router.post('/', async (req: Request, res: Response) => {
       });
 
     if (userError) {
-      console.error('Users table error:', userError);
+      console.error('Users table error');
       // Try to clean up the auth user if users table insert fails
       await supabase.auth.admin.deleteUser(authUserId);
       throw userError;
@@ -332,7 +474,7 @@ router.post('/', async (req: Request, res: Response) => {
     console.log('✅ Created users table entry');
 
     // Step 3: Insert into gebietsleiter table
-    console.log('📋 Creating gebietsleiter table entry...');
+    console.log('Creating gebietsleiter table entry...');
     const { data, error } = await freshClient
       .from('gebietsleiter')
       .insert({
@@ -351,7 +493,7 @@ router.post('/', async (req: Request, res: Response) => {
       .single();
 
     if (error) {
-      console.error('Gebietsleiter table error:', error);
+      console.error('Gebietsleiter table error');
       
       // Clean up on failure
       await freshClient.from('users').delete().eq('id', authUserId);
@@ -365,11 +507,12 @@ router.post('/', async (req: Request, res: Response) => {
       throw error;
     }
 
-    console.log(`✅ Created gebietsleiter ${data?.id} with full Supabase Auth integration`);
-    res.status(201).json(data);
+    console.log('Created gebietsleiter with full Supabase Auth integration');
+    const [signedRow] = await signProfilePictureRows(freshClient, [data]);
+    res.status(201).json(signedRow);
   } catch (error: any) {
-    console.error('Error creating gebietsleiter:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error creating gebietsleiter');
+    sendInternalError(res);
   }
 });
 
@@ -377,10 +520,10 @@ router.post('/', async (req: Request, res: Response) => {
  * PUT /api/gebietsleiter/:id
  * Update a gebietsleiter
  */
-router.put('/:id', async (req: Request, res: Response) => {
+router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    console.log(`✏️ Updating gebietsleiter ${id}...`);
+    console.log('Updating gebietsleiter profile');
     
     const freshClient = createFreshClient();
 
@@ -397,10 +540,15 @@ router.put('/:id', async (req: Request, res: Response) => {
     if (profilePictureUrl !== undefined) updateData.profile_picture_url = profilePictureUrl;
     if (isTest !== undefined) updateData.is_test = isTest === true;
     
-    // Hash password if provided
     if (password) {
-      const saltRounds = 10;
-      updateData.password_hash = await bcrypt.hash(password, saltRounds);
+      const { error: passwordError } = await supabase.auth.admin.updateUserById(id, {
+        password,
+      });
+
+      if (passwordError) {
+        console.error('Error updating gebietsleiter auth credential');
+        return res.status(500).json({ error: 'Failed to update password' });
+      }
     }
 
     const { data, error } = await freshClient
@@ -411,7 +559,7 @@ router.put('/:id', async (req: Request, res: Response) => {
       .single();
 
     if (error) {
-      console.error('Supabase error:', error);
+      logGebietsleiterDbError('Error updating gebietsleiter row', error);
       
       // Check for unique constraint violation (duplicate email)
       if (error.code === '23505') {
@@ -421,11 +569,12 @@ router.put('/:id', async (req: Request, res: Response) => {
       throw error;
     }
 
-    console.log(`✅ Updated gebietsleiter ${id}`);
-    res.json(data);
+    console.log('Updated gebietsleiter profile');
+    const [signedRow] = await signProfilePictureRows(freshClient, [data]);
+    res.json(signedRow);
   } catch (error: any) {
-    console.error('Error updating gebietsleiter:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error updating gebietsleiter');
+    sendInternalError(res);
   }
 });
 
@@ -433,10 +582,10 @@ router.put('/:id', async (req: Request, res: Response) => {
  * DELETE /api/gebietsleiter/:id
  * Deactivate a gebietsleiter - deletes auth user but keeps data for progress tracking
  */
-router.delete('/:id', async (req: Request, res: Response) => {
+router.delete('/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    console.log(`🗑️ Deactivating gebietsleiter ${id}...`);
+    console.log('Deactivating gebietsleiter profile');
     
     const freshClient = createFreshClient();
 
@@ -445,41 +594,53 @@ router.delete('/:id', async (req: Request, res: Response) => {
     const { error: authError } = await supabase.auth.admin.deleteUser(id);
     
     if (authError) {
-      console.error('Error deleting auth user:', authError);
+      console.error('Error deleting auth user');
       // Continue even if auth deletion fails - the user might already be deleted
       // or might not have an auth account
     } else {
-      console.log(`✅ Deleted auth user ${id}`);
+      console.log('Deleted auth user for gebietsleiter profile');
     }
 
-    // 2. Mark the GL as inactive instead of deleting the data
-    // This preserves progress tracking data
+    const { data: existingGl, error: existingGlError } = await freshClient
+      .from('gebietsleiter')
+      .select('profile_picture_url')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (existingGlError) {
+      logGebietsleiterDbError('Error loading gebietsleiter before deactivation', existingGlError);
+      throw existingGlError;
+    }
+
+    await removeProfilePictureObject(freshClient, existingGl?.profile_picture_url);
+
+    // 2. Mark the GL as inactive and pseudonymize personal profile fields.
+    // This preserves historical foreign keys/progress tracking without retaining contact data.
     const { error: updateError } = await freshClient
       .from('gebietsleiter')
       .update({ 
         is_active: false,
-        email: `deleted_${Date.now()}_${id.substring(0, 8)}@deleted.local` // Change email to prevent conflicts
+        name: `Deleted GL ${id.substring(0, 8)}`,
+        address: '',
+        postal_code: '',
+        city: '',
+        phone: '',
+        email: `deleted_${Date.now()}_${id.substring(0, 8)}@deleted.local`,
+        profile_picture_url: null,
+        password_hash: 'DEACTIVATED'
       })
       .eq('id', id);
 
     if (updateError) {
-      console.error('Supabase error marking GL as inactive:', updateError);
-      // If update fails, try to delete as fallback (old behavior)
-      const { error: deleteError } = await freshClient
-        .from('gebietsleiter')
-        .delete()
-        .eq('id', id);
-      
-      if (deleteError) {
-        throw deleteError;
-      }
+      logGebietsleiterDbError('Error marking GL as inactive', updateError);
+      throw updateError;
     }
 
-    console.log(`✅ Deactivated gebietsleiter ${id} - data preserved for progress tracking`);
+    console.log('Deactivated gebietsleiter profile - data preserved for progress tracking');
     res.status(204).send();
   } catch (error: any) {
-    console.error('Error deactivating gebietsleiter:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error deactivating gebietsleiter');
+    sendInternalError(res);
   }
 });
 
@@ -487,61 +648,58 @@ router.delete('/:id', async (req: Request, res: Response) => {
  * POST /api/gebietsleiter/:id/change-password
  * Change password for a gebietsleiter using Supabase Auth
  */
-router.post('/:id/change-password', async (req: Request, res: Response) => {
+router.post('/:id/change-password', requireSelfOrAdmin(req => req.params.id), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { currentPassword, newPassword } = req.body;
+    const targetUserId = req.user?.role === 'admin' ? id : req.user?.id;
     
-    console.log(`🔐 Password change request for gebietsleiter ${id}...`);
+    console.log('Credential change request for gebietsleiter');
     
-    const freshClient = createFreshClient();
-
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ error: 'Current password and new password are required' });
     }
 
-    if (newPassword.length < 6) {
-      return res.status(400).json({ error: 'New password must be at least 6 characters long' });
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters long' });
     }
 
-    // Get the gebietsleiter email
-    const { data: gl, error: glError } = await freshClient
-      .from('gebietsleiter')
-      .select('email')
-      .eq('id', id)
-      .single();
+    if (!targetUserId) {
+      return res.status(400).json({ error: 'Gebietsleiter not found' });
+    }
 
-    if (glError || !gl) {
-      console.error('GL lookup error:', glError);
+    const { data: authUser, error: authError } = await supabase.auth.admin.getUserById(targetUserId);
+    if (authError || !authUser?.user?.email) {
+      console.error('Auth user lookup error');
       return res.status(404).json({ error: 'Gebietsleiter not found' });
     }
 
     // Verify current password by attempting to sign in
     const { error: signInError } = await supabase.auth.signInWithPassword({
-      email: gl.email,
+      email: authUser.user.email,
       password: currentPassword
     });
 
     if (signInError) {
-      console.error('Current password verification failed:', signInError.message);
+      console.error('Current credential verification failed');
       return res.status(401).json({ error: 'Aktuelles Passwort ist falsch' });
     }
 
     // Update the password using admin API
-    const { error: updateError } = await supabase.auth.admin.updateUserById(id, {
+    const { error: updateError } = await supabase.auth.admin.updateUserById(targetUserId, {
       password: newPassword
     });
 
     if (updateError) {
-      console.error('Password update error:', updateError);
+      console.error('Credential update error');
       return res.status(500).json({ error: 'Failed to update password' });
     }
 
-    console.log(`✅ Password changed successfully for gebietsleiter ${id}`);
+    console.log('Credential changed successfully for gebietsleiter account');
     res.json({ success: true, message: 'Password changed successfully' });
   } catch (error: any) {
-    console.error('Error changing password:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error changing credential');
+    sendInternalError(res);
   }
 });
 
@@ -549,10 +707,10 @@ router.post('/:id/change-password', async (req: Request, res: Response) => {
  * GET /api/gebietsleiter/:id/dashboard-stats
  * Get dashboard statistics for a specific GL
  */
-router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
+router.get('/:id/dashboard-stats', requireSelfOrAdmin(req => req.params.id), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    console.log(`📊 Fetching dashboard stats for GL ${id}...`);
+    console.log('Fetching dashboard stats for GL profile');
     
     const freshClient = createFreshClient();
 
@@ -617,7 +775,7 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
       .eq('is_active', true)
       .gt('current_visits', 0);
 
-    console.log(`✅ Dashboard stats for GL ${id}: yearTotal=${glYearTotal}, vorverkauf=${vorverkaufCount}, vorbestellung=${vorbestellungCount}, markets=${marketsVisited}/${totalAssignedMarkets}`);
+    console.log(`Dashboard stats calculated: vorverkauf=${vorverkaufCount}, vorbestellung=${vorbestellungCount}, markets=${marketsVisited}/${totalAssignedMarkets}`);
 
     res.json({
       yearTotal: Math.round(glYearTotal),
@@ -628,8 +786,8 @@ router.get('/:id/dashboard-stats', async (req: Request, res: Response) => {
       totalMarkets: totalAssignedMarkets || 0
     });
   } catch (error: any) {
-    console.error('❌ Error fetching dashboard stats:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching dashboard stats');
+    sendInternalError(res);
   }
 });
 
@@ -661,10 +819,10 @@ const extractKWNumber = (kwString: string): number => {
  * - Vorverkauf last week: +40 pts
  * - Vorverkauf active: +20 pts
  */
-router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
+router.get('/:id/suggested-markets', requireSelfOrAdmin(req => req.params.id), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    console.log(`📍 Fetching smart suggested markets for GL ${id}...`);
+    console.log('Fetching smart suggested markets for GL profile');
     
     const freshClient = createFreshClient();
 
@@ -680,7 +838,7 @@ router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
       .eq('is_active', true);
 
     if (!glMarkets || glMarkets.length === 0) {
-      console.log(`⚠️ No markets assigned to GL ${id}`);
+      console.log('No markets assigned to GL profile');
       return res.json([]);
     }
 
@@ -844,11 +1002,11 @@ router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
       return b.lastVisitWeeks - a.lastVisitWeeks;
     });
 
-    console.log(`✅ Found ${suggestions.length} suggested markets for GL ${id}, returning top 15`);
+    console.log(`Found ${suggestions.length} suggested markets, returning top 15`);
     res.json(suggestions.slice(0, 15));
   } catch (error: any) {
-    console.error('❌ Error fetching suggested markets:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching suggested markets');
+    sendInternalError(res);
   }
 });
 
@@ -856,10 +1014,10 @@ router.get('/:id/suggested-markets', async (req: Request, res: Response) => {
  * GET /api/gebietsleiter/:id/profile-stats
  * Get profile statistics for a GL
  */
-router.get('/:id/profile-stats', async (req: Request, res: Response) => {
+router.get('/:id/profile-stats', requireSelfOrAdmin(req => req.params.id), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    console.log(`📊 Fetching profile stats for GL ${id}...`);
+    console.log('Fetching profile stats for GL profile');
     
     const freshClient = createFreshClient();
 
@@ -1023,8 +1181,8 @@ router.get('/:id/profile-stats', async (req: Request, res: Response) => {
       topMarkets
     });
   } catch (error: any) {
-    console.error('❌ Error fetching profile stats:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching profile stats');
+    sendInternalError(res);
   }
 });
 
@@ -1033,11 +1191,11 @@ router.get('/:id/profile-stats', async (req: Request, res: Response) => {
 // ============================================================================
 
 // Check if GL has read a specific onboarding feature
-router.get('/:id/onboarding/:featureKey', async (req: Request, res: Response) => {
+router.get('/:id/onboarding/:featureKey', requireSelfOrAdmin(req => req.params.id), async (req: Request, res: Response) => {
   try {
     const { id, featureKey } = req.params;
     
-    console.log(`📖 Checking onboarding status for GL ${id}, feature: ${featureKey}`);
+    console.log(`Checking GL onboarding status for feature: ${featureKey}`);
     
     const freshClient = createFreshClient();
     
@@ -1052,17 +1210,17 @@ router.get('/:id/onboarding/:featureKey', async (req: Request, res: Response) =>
     
     res.json({ hasRead: !!data });
   } catch (error: any) {
-    console.error('❌ Error checking onboarding status:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error checking onboarding status');
+    sendInternalError(res);
   }
 });
 
 // Mark an onboarding feature as read
-router.post('/:id/onboarding/:featureKey', async (req: Request, res: Response) => {
+router.post('/:id/onboarding/:featureKey', requireSelfOrAdmin(req => req.params.id), async (req: Request, res: Response) => {
   try {
     const { id, featureKey } = req.params;
     
-    console.log(`✅ Marking onboarding as read for GL ${id}, feature: ${featureKey}`);
+    console.log(`Marking GL onboarding as read for feature: ${featureKey}`);
     
     const freshClient = createFreshClient();
     
@@ -1080,12 +1238,11 @@ router.post('/:id/onboarding/:featureKey', async (req: Request, res: Response) =
     
     res.json({ success: true });
   } catch (error: any) {
-    console.error('❌ Error marking onboarding as read:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error marking onboarding as read');
+    sendInternalError(res);
   }
 });
 
 export default router;
-
 
 

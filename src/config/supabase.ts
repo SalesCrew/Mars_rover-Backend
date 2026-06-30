@@ -5,15 +5,62 @@ import path from 'path';
 // Load environment variables from backend/.env (only for local dev)
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
-const supabaseUrl = process.env.SUPABASE_URL || '';
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || '';
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseServiceKey =
+  process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+const missingSupabaseEnv = [
+  !supabaseUrl ? 'SUPABASE_URL' : null,
+  !supabaseServiceKey ? 'SUPABASE_SERVICE_KEY or SUPABASE_SERVICE_ROLE_KEY' : null
+].filter(Boolean);
 
-if (!supabaseUrl || !supabaseServiceKey) {
-  console.error('⚠️ Supabase credentials not configured!');
+if (missingSupabaseEnv.length > 0) {
+  throw new Error(
+    `Missing required server-only Supabase environment variables: ${missingSupabaseEnv.join(', ')}`
+  );
 }
 
+const decodeJwtPayload = (token: string): Record<string, any> | null => {
+  const [, payload] = token.split('.');
+  if (!payload) return null;
+
+  try {
+    const normalizedPayload = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const paddedPayload = normalizedPayload.padEnd(
+      normalizedPayload.length + ((4 - (normalizedPayload.length % 4)) % 4),
+      '='
+    );
+    return JSON.parse(Buffer.from(paddedPayload, 'base64').toString('utf8'));
+  } catch {
+    return null;
+  }
+};
+
+const validateServerOnlySupabaseKey = (key: string): void => {
+  if (key.startsWith('sb_publishable_')) {
+    throw new Error(
+      'SUPABASE_SERVICE_KEY or SUPABASE_SERVICE_ROLE_KEY must be a server-only Supabase secret/service-role key, not a publishable key'
+    );
+  }
+
+  if (key.startsWith('sb_secret_')) {
+    return;
+  }
+
+  const jwtPayload = decodeJwtPayload(key);
+  if (!jwtPayload || jwtPayload.role !== 'service_role') {
+    throw new Error(
+      'SUPABASE_SERVICE_KEY or SUPABASE_SERVICE_ROLE_KEY must be a server-only Supabase secret/service-role key'
+    );
+  }
+};
+
+const resolvedSupabaseUrl = supabaseUrl as string;
+const resolvedSupabaseServiceKey = supabaseServiceKey as string;
+
+validateServerOnlySupabaseKey(resolvedSupabaseServiceKey);
+
 // Create Supabase client with cache-busting headers
-export const supabase = createClient(supabaseUrl, supabaseServiceKey, {
+export const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseServiceKey, {
   auth: {
     autoRefreshToken: false,
     persistSession: false
@@ -31,7 +78,7 @@ export const supabase = createClient(supabaseUrl, supabaseServiceKey, {
 
 // Function to create a fresh client for critical queries (bypasses any potential caching)
 export const createFreshClient = (): SupabaseClient => {
-  return createClient(supabaseUrl, supabaseServiceKey, {
+  return createClient(resolvedSupabaseUrl, resolvedSupabaseServiceKey, {
     auth: {
       autoRefreshToken: false,
       persistSession: false
@@ -48,4 +95,3 @@ export const createFreshClient = (): SupabaseClient => {
     }
   });
 };
-

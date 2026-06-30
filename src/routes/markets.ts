@@ -1,7 +1,72 @@
 import { Router, Request, Response } from 'express';
 import { supabase, createFreshClient } from '../config/supabase';
+import { AuthRequest, getAuthenticatedGlId, requireAdmin } from '../middleware/auth';
+import { sendInternalError } from '../utils/httpErrors';
 
 const router = Router();
+
+const MARKET_WRITE_FIELDS = [
+  'id',
+  'internal_id',
+  'name',
+  'address',
+  'city',
+  'postal_code',
+  'chain',
+  'phone',
+  'email',
+  'gebietsleiter_id',
+  'gebietsleiter_name',
+  'gebietsleiter_email',
+  'channel',
+  'banner',
+  'branch',
+  'maingroup',
+  'subgroup',
+  'frequency',
+  'current_visits',
+  'visit_day',
+  'visit_duration',
+  'last_visit_date',
+  'customer_type',
+  'is_active',
+  'is_completed',
+  'latitude',
+  'longitude',
+  'market_tel',
+  'market_email',
+  'mars_fil'
+] as const;
+
+const MARKET_SELECT_COLUMNS = 'id, internal_id, name, address, city, postal_code, chain, phone, email, gebietsleiter_id, gebietsleiter_name, gebietsleiter_email, channel, banner, branch, maingroup, subgroup, frequency, current_visits, visit_day, visit_duration, last_visit_date, customer_type, is_active, is_completed, latitude, longitude, market_tel, market_email, mars_fil';
+const MARKET_HISTORY_WELLEN_SUBMISSION_SELECT = 'id, welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, created_at, wellen(name), gebietsleiter(name)';
+const MARKET_HISTORY_VORVERKAUF_SUBMISSION_SELECT = 'id, gebietsleiter_id, notes, created_at, gebietsleiter(name), vorverkauf_wellen(name)';
+const MARKET_HISTORY_VORVERKAUF_PRODUCT_SELECT = 'quantity, reason, products(name)';
+const MARKET_HISTORY_VORVERKAUF_ENTRY_SELECT = 'id, gebietsleiter_id, reason, notes, created_at, gebietsleiter(name)';
+const MARKET_HISTORY_VORVERKAUF_ITEM_SELECT = 'quantity, item_type, products(name)';
+
+const logMarketDbError = (context: string, error: any) => {
+  console.error(`${context}: ${error?.code || 'database_error'}`);
+};
+
+const relatedName = (value: any): string | undefined => {
+  const row = Array.isArray(value) ? value[0] : value;
+  return typeof row?.name === 'string' ? row.name : undefined;
+};
+
+const pickMarketWriteFields = (input: unknown): Record<string, any> => {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return {};
+  }
+
+  const source = input as Record<string, any>;
+  return MARKET_WRITE_FIELDS.reduce<Record<string, any>>((payload, field) => {
+    if (Object.prototype.hasOwnProperty.call(source, field) && source[field] !== undefined) {
+      payload[field] = source[field];
+    }
+    return payload;
+  }, {});
+};
 
 /**
  * GET /api/markets
@@ -22,12 +87,12 @@ router.get('/', async (req: Request, res: Response) => {
     while (hasMore) {
       const { data, error } = await freshClient
         .from('markets')
-        .select('*')
+        .select(MARKET_SELECT_COLUMNS)
         .order('name', { ascending: true })
         .range(from, from + pageSize - 1);
 
       if (error) {
-        console.error('Supabase error:', error);
+        logMarketDbError('Error fetching markets page', error);
         throw error;
       }
 
@@ -43,8 +108,8 @@ router.get('/', async (req: Request, res: Response) => {
     console.log(`✅ Fetched ${allMarkets.length} markets`);
     res.json(allMarkets);
   } catch (error: any) {
-    console.error('Error fetching markets:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching markets:');
+    sendInternalError(res);
   }
 });
 
@@ -54,7 +119,7 @@ router.get('/', async (req: Request, res: Response) => {
  * Uses fuzzy matching (case insensitive, ignores dashes, extra spaces, etc.)
  * MUST be defined BEFORE /:id routes to avoid being caught by parameter matching
  */
-router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
+router.post('/backfill-gl-ids', requireAdmin, async (req: Request, res: Response) => {
   try {
     console.log('🔄 Starting GL ID backfill...');
     
@@ -91,7 +156,6 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
       if (gl.email) {
         glEmailMap.set(gl.email.toLowerCase().trim(), { id: gl.id, name: gl.name, email: gl.email });
       }
-      console.log(`  GL: "${gl.name}" -> normalized: "${normalizedName}", email: "${gl.email}"`);
     }
 
     // Fetch markets with no gebietsleiter_id (they might have gebietsleiter_name or gebietsleiter_email)
@@ -116,18 +180,12 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
       if (market.gebietsleiter_name) {
         const normalizedMarketGL = normalizeName(market.gebietsleiter_name);
         matchedGL = glNameMap.get(normalizedMarketGL);
-        if (matchedGL) {
-          console.log(`  ✓ Matched by name: "${market.gebietsleiter_name}" -> GL ${matchedGL.name}`);
-        }
       }
       
       // Second try: match by email if name didn't match
       if (!matchedGL && market.gebietsleiter_email) {
         const normalizedEmail = market.gebietsleiter_email.toLowerCase().trim();
         matchedGL = glEmailMap.get(normalizedEmail);
-        if (matchedGL) {
-          console.log(`  ✓ Matched by email: "${market.gebietsleiter_email}" -> GL ${matchedGL.name}`);
-        }
       }
 
       if (matchedGL) {
@@ -141,7 +199,7 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
           .eq('id', market.id);
 
         if (updateError) {
-          console.error(`  ❌ Failed to update market ${market.id}:`, updateError);
+          console.error(`  ❌ Failed to update market ${market.id}:`);
         } else {
           updated++;
         }
@@ -156,7 +214,7 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
 
     console.log(`✅ Backfill complete: ${updated} updated, ${notFound} not matched`);
     if (unmatchedNames.size > 0) {
-      console.log(`⚠️ Unmatched GL names:`, Array.from(unmatchedNames));
+      console.log(`Unmatched GL name count: ${unmatchedNames.size}`);
     }
 
     // Fetch detailed info for unmatched markets
@@ -187,8 +245,8 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
       unmatchedMarkets
     });
   } catch (error: any) {
-    console.error('❌ Error during GL ID backfill:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Error during GL ID backfill:');
+    sendInternalError(res);
   }
 });
 
@@ -197,7 +255,7 @@ router.post('/backfill-gl-ids', async (req: Request, res: Response) => {
  * Find markets that might be duplicates (same normalized content but different IDs)
  * MUST be defined BEFORE /:id routes to avoid being caught by parameter matching
  */
-router.get('/find-duplicates', async (req: Request, res: Response) => {
+router.get('/find-duplicates', requireAdmin, async (req: Request, res: Response) => {
   try {
     console.log('🔍 Scanning for duplicate markets...');
     
@@ -297,8 +355,8 @@ router.get('/find-duplicates', async (req: Request, res: Response) => {
       duplicates: duplicates
     });
   } catch (error: any) {
-    console.error('Error finding duplicates:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error finding duplicates:');
+    sendInternalError(res);
   }
 });
 
@@ -315,12 +373,12 @@ router.get('/:id', async (req: Request, res: Response) => {
 
     const { data, error } = await freshClient
       .from('markets')
-      .select('*')
+      .select(MARKET_SELECT_COLUMNS)
       .eq('id', id)
       .single();
 
     if (error) {
-      console.error('Supabase error:', error);
+      logMarketDbError('Error fetching market row', error);
       throw error;
     }
 
@@ -331,8 +389,8 @@ router.get('/:id', async (req: Request, res: Response) => {
     console.log(`✅ Fetched market ${id}`);
     res.json(data);
   } catch (error: any) {
-    console.error('Error fetching market:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching market:');
+    sendInternalError(res);
   }
 });
 
@@ -340,28 +398,33 @@ router.get('/:id', async (req: Request, res: Response) => {
  * POST /api/markets
  * Create a new market
  */
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requireAdmin, async (req: Request, res: Response) => {
   try {
     console.log('➕ Creating new market...');
     
     const freshClient = createFreshClient();
     
+    const marketPayload = pickMarketWriteFields(req.body);
+    if (Object.keys(marketPayload).length === 0) {
+      return res.status(400).json({ error: 'No valid market fields provided' });
+    }
+
     const { data, error } = await freshClient
       .from('markets')
-      .insert(req.body)
-      .select()
+      .insert(marketPayload)
+      .select(MARKET_SELECT_COLUMNS)
       .single();
 
     if (error) {
-      console.error('Supabase error:', error);
+      logMarketDbError('Error creating market row', error);
       throw error;
     }
 
     console.log(`✅ Created market ${data?.id}`);
     res.status(201).json(data);
   } catch (error: any) {
-    console.error('Error creating market:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error creating market:');
+    sendInternalError(res);
   }
 });
 
@@ -369,7 +432,7 @@ router.post('/', async (req: Request, res: Response) => {
  * POST /api/markets/import-mars-fil
  * Bulk update only mars_fil by matching market internal_id
  */
-router.post('/import-mars-fil', async (req: Request, res: Response) => {
+router.post('/import-mars-fil', requireAdmin, async (req: Request, res: Response) => {
   try {
     const entries: Array<{ id: string; mars_fil: string }> = req.body;
 
@@ -393,8 +456,8 @@ router.post('/import-mars-fil', async (req: Request, res: Response) => {
     console.log(`✅ Updated mars_fil for ${updated} markets`);
     res.json({ success: updated, failed: entries.length - updated });
   } catch (error: any) {
-    console.error('Error updating mars_fil:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error updating mars_fil:');
+    sendInternalError(res);
   }
 });
 
@@ -402,7 +465,7 @@ router.post('/import-mars-fil', async (req: Request, res: Response) => {
  * POST /api/markets/import
  * Bulk import markets
  */
-router.post('/import', async (req: Request, res: Response) => {
+router.post('/import', requireAdmin, async (req: Request, res: Response) => {
   try {
     const markets = req.body;
 
@@ -414,16 +477,24 @@ router.post('/import', async (req: Request, res: Response) => {
     
     const freshClient = createFreshClient();
 
+    const marketPayloads = markets
+      .map(pickMarketWriteFields)
+      .filter((market) => Object.keys(market).length > 0);
+
+    if (marketPayloads.length === 0) {
+      return res.status(400).json({ error: 'No valid market rows provided' });
+    }
+
     const { data, error } = await freshClient
       .from('markets')
-      .upsert(markets, { 
+      .upsert(marketPayloads, {
         onConflict: 'id',
         ignoreDuplicates: false 
       })
-      .select();
+      .select(MARKET_SELECT_COLUMNS);
 
     if (error) {
-      console.error('Supabase error:', error);
+      logMarketDbError('Error importing market rows', error);
       throw error;
     }
 
@@ -433,8 +504,8 @@ router.post('/import', async (req: Request, res: Response) => {
       failed: markets.length - (data?.length || 0),
     });
   } catch (error: any) {
-    console.error('Error importing markets:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error importing markets:');
+    sendInternalError(res);
   }
 });
 
@@ -442,30 +513,37 @@ router.post('/import', async (req: Request, res: Response) => {
  * PUT /api/markets/:id
  * Update a market
  */
-router.put('/:id', async (req: Request, res: Response) => {
+router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     console.log(`✏️ Updating market ${id}...`);
     
     const freshClient = createFreshClient();
 
+    const marketPayload = pickMarketWriteFields(req.body);
+    delete marketPayload.id;
+
+    if (Object.keys(marketPayload).length === 0) {
+      return res.status(400).json({ error: 'No valid market fields provided' });
+    }
+
     const { data, error } = await freshClient
       .from('markets')
-      .update(req.body)
+      .update(marketPayload)
       .eq('id', id)
-      .select()
+      .select(MARKET_SELECT_COLUMNS)
       .single();
 
     if (error) {
-      console.error('Supabase error:', error);
+      logMarketDbError('Error updating market row', error);
       throw error;
     }
 
     console.log(`✅ Updated market ${id}`);
     res.json(data);
   } catch (error: any) {
-    console.error('Error updating market:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error updating market:');
+    sendInternalError(res);
   }
 });
 
@@ -473,10 +551,11 @@ router.put('/:id', async (req: Request, res: Response) => {
  * POST /api/markets/:id/visit
  * Record a visit to a market (increments current_visits if not already visited today)
  */
-router.post('/:id/visit', async (req: Request, res: Response) => {
+router.post('/:id/visit', async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { gl_id } = req.body; // Optional: track which GL visited
+    const { gl_id } = req.body; // Optional for admins: track which GL visited
+    const effectiveGlId = req.user?.role === 'admin' ? gl_id : getAuthenticatedGlId(req.user);
     
     console.log(`📍 Recording visit for market ${id}...`);
     
@@ -490,7 +569,7 @@ router.post('/:id/visit', async (req: Request, res: Response) => {
       .single();
 
     if (fetchError) {
-      console.error('Error fetching market:', fetchError);
+      console.error('Error fetching market:');
       throw fetchError;
     }
 
@@ -522,11 +601,11 @@ router.post('/:id/visit', async (req: Request, res: Response) => {
         last_visit_date: today
       })
       .eq('id', id)
-      .select()
+      .select(MARKET_SELECT_COLUMNS)
       .single();
 
     if (updateError) {
-      console.error('Error updating market visit:', updateError);
+      console.error('Error updating market visit:');
       throw updateError;
     }
 
@@ -534,7 +613,7 @@ router.post('/:id/visit', async (req: Request, res: Response) => {
       .from('market_visits')
       .upsert({
         market_id: id,
-        gebietsleiter_id: gl_id || null,
+        gebietsleiter_id: effectiveGlId || null,
         visit_date: today,
         source: 'manual'
       }, { onConflict: 'market_id,visit_date', ignoreDuplicates: true });
@@ -547,8 +626,8 @@ router.post('/:id/visit', async (req: Request, res: Response) => {
       incremented: true
     });
   } catch (error: any) {
-    console.error('Error recording market visit:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error recording market visit:');
+    sendInternalError(res);
   }
 });
 
@@ -556,11 +635,12 @@ router.post('/:id/visit', async (req: Request, res: Response) => {
  * GET /api/markets/:id/history
  * Get all activities/history for a specific market
  */
-router.get('/:id/history', async (req: Request, res: Response) => {
+router.get('/:id/history', async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const glId = req.query.gl_id as string | undefined;
-    console.log(`📜 Fetching history for market ${id}${glId ? ` (GL: ${glId})` : ''}...`);
+    const requestedGlId = req.query.gl_id as string | undefined;
+    const glId = req.user?.role === 'admin' ? requestedGlId : getAuthenticatedGlId(req.user);
+    console.log('Fetching market history');
     
     const freshClient = createFreshClient();
     const activities: any[] = [];
@@ -568,7 +648,7 @@ router.get('/:id/history', async (req: Request, res: Response) => {
     // 1. Get Vorbesteller submissions from wellen_submissions table (individual actions)
     let wellenQuery = freshClient
       .from('wellen_submissions')
-      .select('*, wellen(name), gebietsleiter(name)')
+      .select(MARKET_HISTORY_WELLEN_SUBMISSION_SELECT)
       .eq('market_id', id)
       .order('created_at', { ascending: false });
     if (glId) wellenQuery = wellenQuery.eq('gebietsleiter_id', glId);
@@ -618,10 +698,10 @@ router.get('/:id/history', async (req: Request, res: Response) => {
           id: s.id,
           type: 'vorbesteller',
           date: s.created_at,
-          glName: s.gebietsleiter?.name || 'Unbekannt',
+          glName: relatedName(s.gebietsleiter) || 'Unbekannt',
           glId: s.gebietsleiter_id,
           details: {
-            welleName: s.wellen?.name || 'Unbekannt',
+            welleName: relatedName(s.wellen) || 'Unbekannt',
             itemType: s.item_type,
             itemName,
             quantity: s.quantity
@@ -662,10 +742,10 @@ router.get('/:id/history', async (req: Request, res: Response) => {
           id: subs.map((s: any) => s.id).join(','),
           type: 'vorbesteller',
           date: firstSub.created_at,
-          glName: firstSub.gebietsleiter?.name || 'Unbekannt',
+          glName: relatedName(firstSub.gebietsleiter) || 'Unbekannt',
           glId: firstSub.gebietsleiter_id,
           details: {
-            welleName: firstSub.wellen?.name || 'Unbekannt',
+            welleName: relatedName(firstSub.wellen) || 'Unbekannt',
             itemType: 'palette',
             itemName: parentPalette?.name || 'Palette',
             parentId: firstSub.product?.palette_id,
@@ -709,10 +789,10 @@ router.get('/:id/history', async (req: Request, res: Response) => {
           id: subs.map((s: any) => s.id).join(','),
           type: 'vorbesteller',
           date: firstSub.created_at,
-          glName: firstSub.gebietsleiter?.name || 'Unbekannt',
+          glName: relatedName(firstSub.gebietsleiter) || 'Unbekannt',
           glId: firstSub.gebietsleiter_id,
           details: {
-            welleName: firstSub.wellen?.name || 'Unbekannt',
+            welleName: relatedName(firstSub.wellen) || 'Unbekannt',
             itemType: 'schuette',
             itemName: parentSchutte?.name || 'Schütte',
             parentId: firstSub.product?.schuette_id,
@@ -727,7 +807,7 @@ router.get('/:id/history', async (req: Request, res: Response) => {
     // 2. Get Vorverkauf submissions
     let vvQuery = freshClient
       .from('vorverkauf_submissions')
-      .select('*, gebietsleiter(name), vorverkauf_wellen(name)')
+      .select(MARKET_HISTORY_VORVERKAUF_SUBMISSION_SELECT)
       .eq('market_id', id)
       .order('created_at', { ascending: false });
     if (glId) vvQuery = vvQuery.eq('gebietsleiter_id', glId);
@@ -738,19 +818,19 @@ router.get('/:id/history', async (req: Request, res: Response) => {
       for (const sub of vorverkaufData) {
         const { data: products } = await freshClient
           .from('vorverkauf_submission_products')
-          .select('*, products(name)')
+          .select(MARKET_HISTORY_VORVERKAUF_PRODUCT_SELECT)
           .eq('submission_id', sub.id);
         
         activities.push({
           id: sub.id,
           type: 'vorverkauf',
           date: sub.created_at,
-          glName: sub.gebietsleiter?.name || 'Unbekannt',
+          glName: relatedName(sub.gebietsleiter) || 'Unbekannt',
           glId: sub.gebietsleiter_id,
           details: {
-            welleName: sub.vorverkauf_wellen?.name || 'Vorverkauf',
+            welleName: relatedName(sub.vorverkauf_wellen) || 'Vorverkauf',
             products: (products || []).map((p: any) => ({
-              name: p.products?.name || 'Produkt',
+              name: relatedName(p.products) || 'Produkt',
               quantity: p.quantity,
               reason: p.reason
             })),
@@ -763,7 +843,7 @@ router.get('/:id/history', async (req: Request, res: Response) => {
     // 3. Get Produkttausch entries (vorverkauf_entries)
     let ptQuery = freshClient
       .from('vorverkauf_entries')
-      .select('*, gebietsleiter(name)')
+      .select(MARKET_HISTORY_VORVERKAUF_ENTRY_SELECT)
       .eq('market_id', id)
       .order('created_at', { ascending: false });
     if (glId) ptQuery = ptQuery.eq('gebietsleiter_id', glId);
@@ -774,19 +854,19 @@ router.get('/:id/history', async (req: Request, res: Response) => {
         // Get items for this entry
         const { data: items } = await freshClient
           .from('vorverkauf_items')
-          .select('*, products(name)')
+          .select(MARKET_HISTORY_VORVERKAUF_ITEM_SELECT)
           .eq('vorverkauf_entry_id', entry.id);
         
         activities.push({
           id: entry.id,
           type: 'produkttausch',
           date: entry.created_at,
-          glName: entry.gebietsleiter?.name || 'Unbekannt',
+          glName: relatedName(entry.gebietsleiter) || 'Unbekannt',
           glId: entry.gebietsleiter_id,
           details: {
             reason: entry.reason,
             items: (items || []).map((i: any) => ({
-              name: i.products?.name || 'Produkt',
+              name: relatedName(i.products) || 'Produkt',
               quantity: i.quantity,
               itemType: i.item_type
             })),
@@ -862,8 +942,8 @@ router.get('/:id/history', async (req: Request, res: Response) => {
     console.log(`✅ Fetched ${activities.length} history entries for market ${id}`);
     res.json(activities);
   } catch (error: any) {
-    console.error('Error fetching market history:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching market history:');
+    sendInternalError(res);
   }
 });
 
@@ -871,10 +951,11 @@ router.get('/:id/history', async (req: Request, res: Response) => {
  * GET /api/markets/:id/visit-crm
  * Get compact GL-scoped CRM context for a market visit overlay.
  */
-router.get('/:id/visit-crm', async (req: Request, res: Response) => {
+router.get('/:id/visit-crm', async (req: AuthRequest, res: Response) => {
   try {
     const { id: marketId } = req.params;
-    const glId = String(req.query.gl_id || '').trim();
+    const requestedGlId = String(req.query.gl_id || '').trim();
+    const glId = req.user?.role === 'admin' ? requestedGlId : (getAuthenticatedGlId(req.user) || '');
     const SECTION_LIMIT = 20;
 
     if (!glId) {
@@ -1452,8 +1533,8 @@ router.get('/:id/visit-crm', async (req: Request, res: Response) => {
       sections
     });
   } catch (error: any) {
-    console.error('Error fetching market visit CRM context:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error fetching market visit CRM context:');
+    sendInternalError(res);
   }
 });
 
@@ -1461,7 +1542,7 @@ router.get('/:id/visit-crm', async (req: Request, res: Response) => {
  * DELETE /api/markets/:id
  * Delete a market
  */
-router.delete('/:id', async (req: Request, res: Response) => {
+router.delete('/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     console.log(`🗑️ Deleting market ${id}...`);
@@ -1474,15 +1555,15 @@ router.delete('/:id', async (req: Request, res: Response) => {
       .eq('id', id);
 
     if (error) {
-      console.error('Supabase error:', error);
+      logMarketDbError('Error deleting market row', error);
       throw error;
     }
 
     console.log(`✅ Deleted market ${id}`);
     res.status(204).send();
   } catch (error: any) {
-    console.error('Error deleting market:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error deleting market:');
+    sendInternalError(res);
   }
 });
 
@@ -1492,7 +1573,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
  * Sources: vorverkauf_submissions, vorverkauf_entries, wellen_submissions
  * Same market + same day = 1 visit
  */
-router.post('/sync-visits', async (_req: Request, res: Response) => {
+router.post('/sync-visits', requireAdmin, async (_req: Request, res: Response) => {
   try {
     console.log('🔄 Syncing market visits from historical data...');
     
@@ -1578,10 +1659,9 @@ router.post('/sync-visits', async (_req: Request, res: Response) => {
       totalUniqueVisits: updates.reduce((sum, u) => sum + u.visits, 0)
     });
   } catch (error: any) {
-    console.error('Error syncing market visits:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error syncing market visits:');
+    sendInternalError(res);
   }
 });
 
 export default router;
-

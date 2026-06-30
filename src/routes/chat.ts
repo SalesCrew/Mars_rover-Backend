@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
 import https from 'https';
 import { createFreshClient } from '../config/supabase';
+import { AuthRequest, getAuthenticatedGlId } from '../middleware/auth';
+import { sendInternalError } from '../utils/httpErrors';
 
 const router = Router();
 
@@ -488,10 +490,69 @@ async function fetchGLContext(glId: string, authUserId: string): Promise<string>
 
 // ─── OpenAI call ──────────────────────────────────────────────────────────────
 
+async function resolveAdminChatContextIds(authUserId?: string, glId?: string): Promise<{ authUserId: string; glId: string } | null> {
+  const trimmedAuthUserId = String(authUserId || '').trim();
+  const trimmedGlId = String(glId || '').trim();
+
+  if (!trimmedAuthUserId && !trimmedGlId) {
+    return null;
+  }
+
+  const client = createFreshClient();
+
+  if (trimmedAuthUserId) {
+    const { data: userProfile, error } = await client
+      .from('users')
+      .select('id, gebietsleiter_id')
+      .eq('id', trimmedAuthUserId)
+      .maybeSingle();
+
+    if (error || !userProfile) {
+      return null;
+    }
+
+    const resolvedGlId = String(userProfile.gebietsleiter_id || userProfile.id);
+    if (trimmedGlId && trimmedGlId !== resolvedGlId) {
+      return null;
+    }
+
+    return { authUserId: String(userProfile.id), glId: resolvedGlId };
+  }
+
+  const { data: userProfiles, error } = await client
+    .from('users')
+    .select('id, gebietsleiter_id')
+    .eq('role', 'gl')
+    .or(`id.eq.${trimmedGlId},gebietsleiter_id.eq.${trimmedGlId}`)
+    .limit(1);
+
+  const userProfile = userProfiles?.[0];
+  if (error || !userProfile) {
+    return null;
+  }
+
+  return {
+    authUserId: String(userProfile.id),
+    glId: String(userProfile.gebietsleiter_id || userProfile.id)
+  };
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
 }
+
+const MAX_CHAT_MESSAGES = 20;
+const MAX_CHAT_MESSAGE_LENGTH = 4000;
+
+const isValidChatMessage = (message: unknown): message is ChatMessage => {
+  const candidate = message as Partial<ChatMessage>;
+  return !!candidate &&
+    ['user', 'assistant', 'system'].includes(candidate.role || '') &&
+    typeof candidate.content === 'string' &&
+    candidate.content.trim().length > 0 &&
+    candidate.content.length <= MAX_CHAT_MESSAGE_LENGTH;
+};
 
 function callOpenAI(apiKey: string, messages: ChatMessage[], dataContext: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -540,12 +601,20 @@ function callOpenAI(apiKey: string, messages: ChatMessage[], dataContext: string
 
 // ─── Route ────────────────────────────────────────────────────────────────────
 
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', async (req: AuthRequest, res: Response) => {
   try {
     const { messages, authUserId, glId }: { messages: ChatMessage[]; authUserId?: string; glId?: string } = req.body;
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: 'messages array is required' });
+    }
+
+    if (messages.length > MAX_CHAT_MESSAGES) {
+      return res.status(400).json({ error: `messages array must contain at most ${MAX_CHAT_MESSAGES} entries` });
+    }
+
+    if (!messages.every(isValidChatMessage)) {
+      return res.status(400).json({ error: 'Each message must include a valid role and content' });
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
@@ -555,19 +624,26 @@ router.post('/', async (req: Request, res: Response) => {
 
     // Fetch live data context if GL IDs are present
     let dataContext = '';
-    if (authUserId && glId) {
+    const authenticatedGlId = getAuthenticatedGlId(req.user);
+    const contextIds = req.user?.role === 'admin'
+      ? await resolveAdminChatContextIds(authUserId, glId)
+      : authenticatedGlId
+        ? { authUserId: authenticatedGlId, glId: authenticatedGlId }
+        : null;
+
+    if (contextIds) {
       try {
-        dataContext = await fetchGLContext(glId, authUserId);
+        dataContext = await fetchGLContext(contextIds.glId, contextIds.authUserId);
       } catch (err: any) {
-        console.warn('⚠️ Could not fetch GL context:', err.message);
+        console.warn('Could not fetch GL context');
       }
     }
 
     const reply = await callOpenAI(apiKey, messages, dataContext);
     res.json({ reply });
   } catch (error: any) {
-    console.error('❌ Chat error:', error.message);
-    res.status(500).json({ error: error.message || 'Chat request failed' });
+    console.error('Chat error');
+    sendInternalError(res, 'Chat request failed');
   }
 });
 

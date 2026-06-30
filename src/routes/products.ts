@@ -1,7 +1,10 @@
 import express from 'express';
-import { supabase, createFreshClient } from '../config/supabase.js';
+import { createFreshClient } from '../config/supabase.js';
+import { AuthRequest, requireAdmin } from '../middleware/auth';
+import { sendInternalError } from '../utils/httpErrors';
 
 const router = express.Router();
+const PRODUCT_SELECT_COLUMNS = 'id, name, department, product_type, weight, content, pallet_size, price, sku, artikel_nr, palette_products, is_active, is_deleted';
 
 // Transform from DB format to API format
 const transformProductFromDB = (dbProduct: any) => ({
@@ -38,14 +41,14 @@ const transformProductToDB = (product: any) => ({
 
 // GET /api/products - Get all active (non-deleted) products
 // Optional query param: ?includeArchived=true — returns all products including archived ones
-router.get('/', async (req, res) => {
+router.get('/', async (req: AuthRequest, res) => {
   try {
     const freshClient = createFreshClient();
-    const includeArchived = req.query.includeArchived === 'true';
+    const includeArchived = req.user?.role === 'admin' && req.query.includeArchived === 'true';
 
     let query = freshClient
       .from('products')
-      .select('*')
+      .select(PRODUCT_SELECT_COLUMNS)
       .order('name', { ascending: true });
 
     if (!includeArchived) {
@@ -55,43 +58,48 @@ router.get('/', async (req, res) => {
     const { data, error } = await query;
 
     if (error) {
-      console.error('Error fetching products:', error);
-      return res.status(500).json({ error: 'Failed to fetch products' });
+      console.error('Error fetching products:');
+      return sendInternalError(res);
     }
 
     const products = (data || []).map(transformProductFromDB);
     res.json(products);
   } catch (error) {
-    console.error('Error in GET /products:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Error in GET /products:');
+    sendInternalError(res);
   }
 });
 
 // GET /api/products/:id - Get single product
-router.get('/:id', async (req, res) => {
+router.get('/:id', async (req: AuthRequest, res) => {
   try {
     const freshClient = createFreshClient();
 
-    const { data, error } = await freshClient
+    let query = freshClient
       .from('products')
-      .select('*')
-      .eq('id', req.params.id)
-      .single();
+      .select(PRODUCT_SELECT_COLUMNS)
+      .eq('id', req.params.id);
+
+    if (req.user?.role !== 'admin') {
+      query = query.eq('is_deleted', false);
+    }
+
+    const { data, error } = await query.single();
 
     if (error) {
-      console.error('Error fetching product:', error);
+      console.error('Error fetching product:');
       return res.status(404).json({ error: 'Product not found' });
     }
 
     res.json(transformProductFromDB(data));
   } catch (error) {
-    console.error('Error in GET /products/:id:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Error in GET /products/:id:');
+    sendInternalError(res);
   }
 });
 
 // POST /api/products - Create products (bulk insert)
-router.post('/', async (req, res) => {
+router.post('/', requireAdmin, async (req, res) => {
   try {
     const freshClient = createFreshClient();
 
@@ -101,23 +109,23 @@ router.post('/', async (req, res) => {
     const { data, error } = await freshClient
       .from('products')
       .insert(dbProducts)
-      .select();
+      .select(PRODUCT_SELECT_COLUMNS);
 
     if (error) {
-      console.error('Error creating products:', error);
-      return res.status(500).json({ error: 'Failed to create products', details: error });
+      console.error('Error creating products:');
+      return sendInternalError(res);
     }
 
     const createdProducts = (data || []).map(transformProductFromDB);
     res.status(201).json(createdProducts);
   } catch (error) {
-    console.error('Error in POST /products:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Error in POST /products:');
+    sendInternalError(res);
   }
 });
 
 // PUT /api/products/:id - Update product
-router.put('/:id', async (req, res) => {
+router.put('/:id', requireAdmin, async (req, res) => {
   try {
     const freshClient = createFreshClient();
 
@@ -138,24 +146,24 @@ router.put('/:id', async (req, res) => {
       .from('products')
       .update(updates)
       .eq('id', req.params.id)
-      .select()
+      .select(PRODUCT_SELECT_COLUMNS)
       .single();
 
     if (error) {
-      console.error('Error updating product:', error);
-      return res.status(500).json({ error: 'Failed to update product' });
+      console.error('Error updating product:');
+      return sendInternalError(res);
     }
 
     res.json(transformProductFromDB(data));
   } catch (error) {
-    console.error('Error in PUT /products/:id:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Error in PUT /products/:id:');
+    sendInternalError(res);
   }
 });
 
 // PATCH /api/products/:id/archive - Soft-delete a product (sets is_deleted=true, row is never removed)
 // Hard deletion is intentionally not supported to preserve historical submission data.
-router.patch('/:id/archive', async (req, res) => {
+router.patch('/:id/archive', requireAdmin, async (req, res) => {
   try {
     const freshClient = createFreshClient();
 
@@ -163,19 +171,19 @@ router.patch('/:id/archive', async (req, res) => {
       .from('products')
       .update({ is_deleted: true })
       .eq('id', req.params.id)
-      .select()
+      .select(PRODUCT_SELECT_COLUMNS)
       .single();
 
     if (error) {
-      console.error('Error archiving product:', error);
-      return res.status(500).json({ error: 'Failed to archive product' });
+      console.error('Error archiving product:');
+      return sendInternalError(res);
     }
 
-    console.log(`✅ Product archived (soft-deleted): ${req.params.id}`);
+    console.log('Product archived (soft-deleted)');
     res.json(transformProductFromDB(data));
   } catch (error) {
-    console.error('Error in PATCH /products/:id/archive:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Error in PATCH /products/:id/archive:');
+    sendInternalError(res);
   }
 });
 

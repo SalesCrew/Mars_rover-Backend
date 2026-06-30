@@ -3,6 +3,14 @@
 
 import { SupabaseClient } from '@supabase/supabase-js';
 
+const EXPORT_WELLEN_SUBMISSION_SELECT = 'id, welle_id, gebietsleiter_id, market_id, item_type, item_id, quantity, value_per_unit, parent_palette_id, delivery_photo_url, created_at';
+const EXPORT_MARKET_SELECT = 'id, internal_id, name, chain, address, city, postal_code, gebietsleiter_name, gebietsleiter_email, gebietsleiter_id, frequency, current_visits, last_visit_date, is_active, phone, email, channel, banner, subgroup, created_at';
+const EXPORT_VORVERKAUF_ENTRY_SELECT = 'id, gebietsleiter_id, market_id, reason, notes, status, created_at';
+const EXPORT_VORVERKAUF_ITEM_SELECT = 'id, vorverkauf_entry_id, product_id, quantity, item_type';
+const EXPORT_ACTION_HISTORY_SELECT = 'id, action_type, market_id, market_chain, market_address, market_postal_code, market_city, target_gl, previous_gl, performed_by, notes, timestamp';
+const EXPORT_GEBIETSLEITER_SELECT = 'id, name, address, postal_code, city, phone, email, profile_picture_url, is_active, is_test, created_at, updated_at';
+const PRIVATE_STORAGE_URL_EXPORT_VALUE = '';
+
 // Normalize product names for robust matching across exports and copied Excel names.
 const normalizeNameStrict = (name: string): string =>
   name
@@ -222,7 +230,7 @@ export async function transformWellenSubmissions(
   while (subHasMore) {
     let query = client
       .from('wellen_submissions')
-      .select('*')
+      .select(EXPORT_WELLEN_SUBMISSION_SELECT)
       .order('created_at', { ascending: false })
       .range(subFrom, subFrom + subPageSize - 1);
 
@@ -433,8 +441,8 @@ export async function transformWellenSubmissions(
             quantity: 1,
             value_per_unit: totalValue,
             total_value: totalValue,
-            photo_url: sub.photo_url || '',
-            delivery_photo_url: sub.delivery_photo_url || '',
+            photo_url: PRIVATE_STORAGE_URL_EXPORT_VALUE,
+            delivery_photo_url: PRIVATE_STORAGE_URL_EXPORT_VALUE,
             _isParent: true,
             _groupId: groupKey
           };
@@ -501,8 +509,8 @@ export async function transformWellenSubmissions(
             quantity: 1,
             value_per_unit: totalValue,
             total_value: totalValue,
-            photo_url: sub.photo_url || '',
-            delivery_photo_url: sub.delivery_photo_url || '',
+            photo_url: PRIVATE_STORAGE_URL_EXPORT_VALUE,
+            delivery_photo_url: PRIVATE_STORAGE_URL_EXPORT_VALUE,
             _isMultiline: true,
             _productDetails: groupSubmissions.map(s => ({
               created_at: s.created_at,
@@ -582,8 +590,8 @@ export async function transformWellenSubmissions(
           quantity: sub.quantity,
           value_per_unit: valuePerUnit,
           total_value: (sub.quantity * valuePerUnit),
-          photo_url: sub.photo_url || '',
-          delivery_photo_url: sub.delivery_photo_url || '',
+          photo_url: PRIVATE_STORAGE_URL_EXPORT_VALUE,
+          delivery_photo_url: PRIVATE_STORAGE_URL_EXPORT_VALUE,
           einzelprodukt_ve: einzelproduktVe !== null ? einzelproduktVe : '',
           quantity_in_ve: quantityInVe !== null ? +quantityInVe.toFixed(2) : '',
         };
@@ -624,7 +632,7 @@ export async function transformMarkets(
   while (mktHasMore) {
     let query = client
       .from('markets')
-      .select('*')
+      .select(EXPORT_MARKET_SELECT)
       .order('name', { ascending: true })
       .range(mktFrom, mktFrom + mktPageSize - 1);
 
@@ -702,7 +710,7 @@ export async function transformVorverkaufEntries(
   while (entHasMore) {
     let query = client
       .from('vorverkauf_entries')
-      .select('*')
+      .select(EXPORT_VORVERKAUF_ENTRY_SELECT)
       .order('created_at', { ascending: false })
       .range(entFrom, entFrom + entPageSize - 1);
 
@@ -737,7 +745,7 @@ export async function transformVorverkaufEntries(
   const [glData, marketData, itemsData] = await Promise.all([
     client.from('gebietsleiter').select('id, name, email').in('id', glIds),
     client.from('markets').select('id, name, chain, city, address, postal_code').in('id', marketIds),
-    client.from('vorverkauf_items').select('*').in('vorverkauf_entry_id', entryIds)
+    client.from('vorverkauf_items').select(EXPORT_VORVERKAUF_ITEM_SELECT).in('vorverkauf_entry_id', entryIds)
   ]);
 
   const rawItems = itemsData.data || [];
@@ -867,7 +875,7 @@ export async function transformActionHistory(
 
   let query = client
     .from('action_history')
-    .select('*')
+    .select(EXPORT_ACTION_HISTORY_SELECT)
     .order('timestamp', { ascending: false });
 
   if (filters?.dateRange?.start) {
@@ -919,7 +927,7 @@ export async function transformGebietsleiter(
 
   let glQuery = client
     .from('gebietsleiter')
-    .select('*')
+    .select(EXPORT_GEBIETSLEITER_SELECT)
     .eq('is_active', true)
     .order('name', { ascending: true });
 
@@ -1018,7 +1026,7 @@ export async function transformGebietsleiter(
       paletten_value: paletteValues.get(gl.id) || 0,
       schuetten_value: schutteValues.get(gl.id) || 0,
       created_at: gl.created_at,
-      profile_picture_url: gl.profile_picture_url || ''
+      profile_picture_url: PRIVATE_STORAGE_URL_EXPORT_VALUE
     };
 
     const filteredRow: ExportRow = {};

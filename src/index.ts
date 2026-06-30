@@ -21,12 +21,59 @@ import mapsRouter from './routes/maps';
 import wochenCheckRouter from './routes/wochenCheck';
 import chatRouter from './routes/chat';
 import productsUpdateRouter from './routes/productsUpdate';
+import { authenticateToken, requireAdmin } from './middleware/auth';
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = parseInt(process.env.PORT || '3001', 10);
+const isProduction = process.env.NODE_ENV === 'production';
+const allowLocalCors = !isProduction || process.env.ALLOW_LOCAL_CORS === 'true';
+const localCorsOrigins = allowLocalCors ? [
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5173',
+] : [];
+const configuredCorsOrigins = [
+  ...(process.env.CORS_ORIGINS || '').split(','),
+  process.env.FRONTEND_URL || '',
+  'https://mars-rover-mu.vercel.app',
+  ...localCorsOrigins,
+].map(origin => origin.trim().replace(/\/+$/, '')).filter(Boolean);
+const allowedCorsOrigins = Array.from(new Set(configuredCorsOrigins));
+const sanitizeLoggedPath = (value: string): string =>
+  value
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi, ':uuid')
+    .replace(/\/\d{6,}(?=\/|$)/g, '/:number');
 
 // Middleware
-app.use(cors());
+app.disable('x-powered-by');
+app.use((_, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    const normalizedOrigin = origin.replace(/\/+$/, '');
+    if (allowedCorsOrigins.includes(normalizedOrigin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error('Not allowed by CORS'));
+  },
+  allowedHeaders: ['Authorization', 'Content-Type'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  exposedHeaders: ['Content-Disposition'],
+}));
 app.use(express.json({ limit: '50mb' }));
 
 // Health checks FIRST (before any other routes) - Railway checks these
@@ -50,17 +97,22 @@ app.get('/api/health', (_req, res) => {
 // Request logging for API routes
 app.use((req, _res, next) => {
   const now = new Date().toISOString();
-  console.log('Request: ' + now + ' | ' + req.method + ' ' + req.url);
+  console.log('Request: ' + now + ' | ' + req.method + ' ' + sanitizeLoggedPath(req.path));
   next();
 });
 
 // API Routes
 console.log('Registering auth routes...');
 app.use('/api/auth', authRouter);
+
+// All business-data routes below use a service-role Supabase client, so the
+// Express layer must verify the caller before any route can touch data.
+app.use('/api', authenticateToken);
+
 console.log('Registering markets routes...');
 app.use('/api/markets', marketsRouter);
 console.log('Registering action-history routes...');
-app.use('/api/action-history', actionHistoryRouter);
+app.use('/api/action-history', requireAdmin, actionHistoryRouter);
 console.log('Registering gebietsleiter routes...');
 app.use('/api/gebietsleiter', gebietsleiterRouter);
 console.log('Registering products routes...');
@@ -72,11 +124,11 @@ app.use('/api/vorverkauf', vorverkaufRouter);
 console.log('Registering vorverkauf-wellen routes...');
 app.use('/api/vorverkauf-wellen', vorverkaufWellenRouter);
 console.log('Registering activities routes...');
-app.use('/api/activities', activitiesRouter);
+app.use('/api/activities', requireAdmin, activitiesRouter);
 console.log('Registering bug-reports routes...');
 app.use('/api/bug-reports', bugReportsRouter);
 console.log('Registering export routes...');
-app.use('/api/export', exportRouter);
+app.use('/api/export', requireAdmin, exportRouter);
 console.log('Registering fragebogen routes...');
 app.use('/api/fragebogen', fragebogenRouter);
 console.log('Registering nara-incentive routes...');
@@ -88,7 +140,7 @@ app.use('/api/wochen-check', wochenCheckRouter);
 console.log('Registering chat routes...');
 app.use('/api/chat', chatRouter);
 console.log('Registering products-update routes...');
-app.use('/api/products-update', productsUpdateRouter);
+app.use('/api/products-update', requireAdmin, productsUpdateRouter);
 
 // Start server
 const server = app.listen(PORT, '0.0.0.0', () => {
