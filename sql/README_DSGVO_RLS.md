@@ -35,7 +35,7 @@ Current Supabase changelog review for this hardening pass: checked on 2026-06-30
   - `wellen-photos`
 - Intentionally leaves `wellen-images` public because current UI paths still use public URLs for wave/admin image assets, and leaves `question-images` public because Fragebogen question images are admin-managed UI assets returned as public URLs. New Wellen/Fotowelle evidence photo uploads use the private `wellen-photos` bucket and backend signed URLs; legacy evidence photo paths in `wellen-images` are still signed/read for backward compatibility. New GL profile-picture uploads use the private `gl-profile-pictures` bucket and backend signed URLs. The upload route can create that bucket as private if it is missing; this SQL still verifies and locks the bucket privacy flag during the controlled database hardening step.
 - Redacts private image storage fields from custom Excel exports. Evidence/profile images should be viewed through authenticated backend signed URLs, not distributed as raw Storage object paths in spreadsheets.
-- Enables and verifies RLS on `storage.objects`, removes old writable direct object policies for `anon`/`authenticated`, and then applies the restrictive Storage object policy, so bucket/object access remains policy-controlled.
+- Verifies that `storage.objects` already has RLS enabled. Hosted Supabase owns `storage.objects` with the internal storage role, so this migration does not alter Storage object policies; it hardens app bucket privacy through `storage.buckets` instead.
 
 ## Apply Rules
 
@@ -68,7 +68,7 @@ npm run dsgvo:audit:static
 
 The audit also fails common UTF-8 mojibake markers in backend source, SQL, audit scripts, frontend source, and setup docs. This keeps German labels, export strings, and operational logs readable after scripted edits or Windows shell rewrites.
 
-The audit also compares backend Supabase `.from('...')` database object references against the actual hardened table list and protected-view list in `dsgvo_rls_hardening.sql`. If a new table or view is added to the backend, the audit fails until the RLS/grant/view handling is reviewed and added to the SQL. Storage buckets are handled separately because bucket privacy is controlled through `storage.buckets` and Storage object policies.
+The audit also compares backend Supabase `.from('...')` database object references against the actual hardened table list and protected-view list in `dsgvo_rls_hardening.sql`. If a new table or view is added to the backend, the audit fails until the RLS/grant/view handling is reviewed and added to the SQL. Storage buckets are handled separately because bucket privacy is controlled through `storage.buckets`.
 
 Dynamic Supabase `.from(table)` helper calls are separately bounded. The audit permits only reviewed helper locations and requires every caller of `requireOwnedRowOrAdmin`, `fetchRowsByIdsInChunks`, `fetchValueMap`, `fetchRowsByIdChunks`, and `fetchAdminRowsByIdChunks` to pass literal table names. This prevents future user-controlled or computed table names from bypassing the static RLS/object coverage review.
 
@@ -162,7 +162,7 @@ If rollback is needed because the backend fails after deployment, restore from b
 
 ## Catalog-Only Verification
 
-`dsgvo_rls_verify_metadata.sql` currently emits 31 catalog-only checks. These read metadata, not business rows:
+`dsgvo_rls_verify_metadata.sql` currently emits 28 catalog-only checks. These read metadata, not business rows:
 
 ```sql
 select schemaname, tablename, rowsecurity
@@ -207,8 +207,6 @@ Expected high-level result:
 - Every reviewed Storage bucket exists before public/private flags are evaluated.
 - The sensitive photo buckets are private.
 - `storage.objects` has RLS enabled.
-- No direct writable `storage.objects` policies remain for `anon` or `authenticated`, except the reviewed restrictive bucket-boundary policy.
-- The reviewed Storage object policy remains `RESTRICTIVE`, scoped only to `anon`/`authenticated`, and bounded to `question-images`/`wellen-images`; private photo/evidence buckets must not appear in its `USING` or `WITH CHECK` predicate.
 - `wellen-photos` is private for new Wellen/Fotowelle evidence photos.
 - `wellen-images` and `question-images` remain the only reviewed public Storage buckets for UI/admin image assets and legacy compatibility until all of those UI/API paths use signed URLs; any other public bucket is a verifier failure.
 

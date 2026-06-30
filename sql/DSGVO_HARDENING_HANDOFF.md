@@ -6,7 +6,7 @@ This is the concise index for the MarsPets+ DSGVO/RLS hardening package. It is n
 
 - `dsgvo_rls_hardening.sql`: transactional Supabase RLS/grant/Storage hardening.
 - `dsgvo_rls_preflight_metadata_snapshot.sql`: catalog-only rollback/preflight snapshot; runs in a read-only transaction with bounded local timeouts.
-- `dsgvo_rls_verify_metadata.sql`: catalog-only verifier; runs in a read-only transaction with bounded local timeouts and currently emits 31 checks.
+- `dsgvo_rls_verify_metadata.sql`: catalog-only verifier; runs in a read-only transaction with bounded local timeouts and currently emits 28 checks.
 - `DSGVO_PRODUCTION_APPLY_CHECKLIST.md`: short production operator checklist.
 - `DSGVO_PRODUCTION_EVIDENCE_TEMPLATE.md`: fill-in production change record template; keep business rows, personal data, photo paths, tokens, and service keys out of it.
 - `../scripts/dsgvo-local-audit.ps1`: local static/build guardrail.
@@ -28,7 +28,7 @@ This builds backend/frontend and checks route auth, reviewed route allowlist dri
 3. Run `dsgvo_rls_preflight_metadata_snapshot.sql` and save the full output.
 4. Apply `dsgvo_rls_hardening.sql` as one transaction.
 5. Run `dsgvo_rls_verify_metadata.sql`.
-6. Confirm all 31 verifier checks return `status = 'pass'`.
+6. Confirm all 28 verifier checks return `status = 'pass'`.
 
 ## Hard Boundaries
 
@@ -46,4 +46,4 @@ This builds backend/frontend and checks route auth, reviewed route allowlist dri
 - The matching backend/frontend deployment is live.
 - The preflight snapshot is saved.
 - The hardening SQL is applied.
-- The metadata verifier output proves all 31 checks pass.
+- The metadata verifier output proves all 28 checks pass.

@@ -541,37 +541,10 @@ values
   ('wellen-images', 'wellen-images', true)
 on conflict (id) do update set public = excluded.public;
 
-do $$
-declare
-  p record;
-begin
-  if to_regclass('storage.objects') is not null then
-    execute 'alter table storage.objects enable row level security';
-    execute 'drop policy if exists dsgvo_bug_screenshots_no_direct_object_access on storage.objects';
-    execute 'drop policy if exists dsgvo_private_app_photo_buckets_no_direct_object_access on storage.objects';
-
-    for p in
-      select policyname
-      from pg_policies
-      where schemaname = 'storage'
-        and tablename = 'objects'
-        and cmd <> 'SELECT'
-        and roles && array['anon', 'authenticated', 'public', 'PUBLIC']::name[]
-    loop
-      execute format('drop policy if exists %I on storage.objects', p.policyname);
-    end loop;
-
-    execute $sql$
-      create policy dsgvo_private_app_photo_buckets_no_direct_object_access
-      on storage.objects
-      as restrictive
-      for all
-      to anon, authenticated
-      using (bucket_id in ('question-images', 'wellen-images'))
-      with check (bucket_id in ('question-images', 'wellen-images'))
-    $sql$;
-  end if;
-end $$;
+-- storage.objects is owned by Supabase's internal storage role in hosted projects.
+-- This migration role cannot alter or replace those object policies. Bucket
+-- privacy is hardened above, and backend access to private buckets goes through
+-- service-role signed URLs.
 
 do $$
 declare

@@ -53,7 +53,7 @@ Paste or attach the full metadata-only output outside this template if it is lon
 - Failing checks:
 - Result saved at:
 
-Expected result: exactly 31 checks and every row has `status = 'pass'`.
+Expected result: exactly 28 checks and every row has `status = 'pass'`.
 
 ## Rollback Decision
 

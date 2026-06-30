@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 
 $backendRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 $frontendRoot = Resolve-Path (Join-Path $backendRoot '..')
-$expectedMetadataVerifierCheckCount = 31
+$expectedMetadataVerifierCheckCount = 28
 
 function Assert-NoMatches {
   param(
@@ -1982,14 +1982,6 @@ function Assert-RlsVerifierCoversHardeningViewsFunctionsAndBuckets {
     }
   }
 
-  if ($hardeningText -match 'alter table storage\.objects enable row level security' -and $verifierText -notmatch 'storage_objects_rls_enabled') {
-    $violations += 'verifier storage.objects RLS check missing'
-  }
-
-  if ($hardeningText -match 'dsgvo_private_app_photo_buckets_no_direct_object_access' -and $verifierText -notmatch 'no_direct_anon_authenticated_storage_write_policies') {
-    $violations += 'verifier direct Storage write policy check missing'
-  }
-
   if ($violations.Count -gt 0) {
     Write-Host 'FAIL metadata verifier covers hardening views, functions, and buckets'
     $violations | ForEach-Object { Write-Host ("  " + $_) }
@@ -2821,27 +2813,10 @@ try {
     -Label 'storage reviewed public buckets are explicit' `
     -Path 'sql/dsgvo_rls_hardening.sql' `
     -Patterns @(
-      'alter table storage\.objects enable row level security',
-      "cmd <> 'SELECT'",
-      "roles && array\['anon', 'authenticated', 'public', 'PUBLIC'\]::name\[\]",
-      "drop policy if exists %I on storage\.objects",
-      "bucket_id in \('question-images', 'wellen-images'\)",
+      "storage\.buckets \(id, name, public\)",
       "\('question-images', 'question-images', true\)",
-      "\('wellen-images', 'wellen-images', true\)"
-    )
-
-  Assert-FileContainsPatterns `
-    -Label 'metadata verifier checks reviewed Storage policy shape' `
-    -Path 'sql/dsgvo_rls_verify_metadata.sql' `
-    -Patterns @(
-      'reviewed_storage_policy_shape_restricted',
-      "permissive <> 'RESTRICTIVE'",
-      "cmd <> 'ALL'",
-      "roles @> array\['anon', 'authenticated'\]::name\[\]",
-      'missing_public_bucket_using_boundary',
-      'missing_public_bucket_check_boundary',
-      'private_bucket_in_using_boundary',
-      'private_bucket_in_check_boundary'
+      "\('wellen-images', 'wellen-images', true\)",
+      'storage\.objects is owned by Supabase'
     )
 
   Assert-FileContainsPatterns `
@@ -3019,7 +2994,7 @@ try {
       'Script: `dsgvo_rls_preflight_metadata_snapshot\.sql`',
       'Script: `dsgvo_rls_hardening\.sql`',
       'Script: `dsgvo_rls_verify_metadata\.sql`',
-      'Expected result: exactly 31 checks',
+      'Expected result: exactly 28 checks',
       'No production business-data smoke tests run'
     )
 
@@ -3032,7 +3007,7 @@ try {
       'dsgvo_rls_verify_metadata\.sql',
       'DSGVO_PRODUCTION_EVIDENCE_TEMPLATE\.md',
       'read-only transaction with bounded local timeouts',
-      'currently emits 31 checks',
+      'currently emits 28 checks',
       'npm run dsgvo:audit',
       'bounded dynamic Supabase `\.from\(table\)` helper calls',
       'Do not query production business rows for smoke tests',
@@ -3043,7 +3018,7 @@ try {
       'The matching backend/frontend deployment is live',
       'The preflight snapshot is saved',
       'The hardening SQL is applied',
-      'The metadata verifier output proves all 31 checks pass'
+      'The metadata verifier output proves all 28 checks pass'
     )
 
   Assert-FileContainsPatterns `

@@ -23,7 +23,7 @@ Stop before applying SQL if any item is false:
 4. Save the full preflight output with the backup/change record.
 5. Apply `dsgvo_rls_hardening.sql` as one transaction. The script sets `lock_timeout` and `statement_timeout`; if it times out, stop and inspect/reschedule instead of retrying in a loop.
 6. Run `dsgvo_rls_verify_metadata.sql`. It is metadata-only and runs in a read-only transaction with bounded local runtime timeouts.
-7. Confirm the verifier emits 31 checks and every verifier result has `status = 'pass'`.
+7. Confirm the verifier emits 28 checks and every verifier result has `status = 'pass'`.
 8. Keep the preflight output, verifier output, backend deployment id, frontend deployment id, and backup id together in the change record.
 9. Complete the copied evidence template without adding business rows, personal data, photo paths, tokens, or service keys.
 

@@ -498,78 +498,6 @@ select
 from policy_shape_violations
 where issue is not null;
 
-with expected_storage_policies(policyname) as (
-  values
-    ('dsgvo_private_app_photo_buckets_no_direct_object_access')
-)
-select
-  'expected_storage_policies_present' as check_name,
-  case when count(*) = 0 then 'pass' else 'fail' end as status,
-  coalesce(
-    json_agg(e.policyname order by e.policyname),
-    '[]'::json
-  ) as missing_storage_policies
-from expected_storage_policies e
-where to_regclass('storage.objects') is not null
-  and not exists (
-    select 1
-    from pg_policies p
-    where p.schemaname = 'storage'
-      and p.tablename = 'objects'
-      and p.policyname = e.policyname
-  );
-
-with storage_policy as (
-  select
-    policyname,
-    permissive,
-    cmd,
-    roles,
-    qual,
-    with_check
-  from pg_policies
-  where schemaname = 'storage'
-    and tablename = 'objects'
-    and policyname = 'dsgvo_private_app_photo_buckets_no_direct_object_access'
-),
-storage_policy_violations as (
-  select
-    case
-      when permissive <> 'RESTRICTIVE' then 'not_restrictive'
-      when cmd <> 'ALL' then 'unexpected_command'
-      when not (roles @> array['anon', 'authenticated']::name[] and cardinality(roles) = 2) then 'unexpected_roles'
-      when coalesce(qual, '') not like '%question-images%' or coalesce(qual, '') not like '%wellen-images%' then 'missing_public_bucket_using_boundary'
-      when coalesce(with_check, '') not like '%question-images%' or coalesce(with_check, '') not like '%wellen-images%' then 'missing_public_bucket_check_boundary'
-      when coalesce(qual, '') like '%bug-screenshots%'
-        or coalesce(qual, '') like '%fragebogen-response-images%'
-        or coalesce(qual, '') like '%gl-profile-pictures%'
-        or coalesce(qual, '') like '%vorbesteller-lieferung%'
-        or coalesce(qual, '') like '%wellen-photos%' then 'private_bucket_in_using_boundary'
-      when coalesce(with_check, '') like '%bug-screenshots%'
-        or coalesce(with_check, '') like '%fragebogen-response-images%'
-        or coalesce(with_check, '') like '%gl-profile-pictures%'
-        or coalesce(with_check, '') like '%vorbesteller-lieferung%'
-        or coalesce(with_check, '') like '%wellen-photos%' then 'private_bucket_in_check_boundary'
-      else null
-    end as issue,
-    policyname,
-    permissive,
-    cmd,
-    roles,
-    qual,
-    with_check
-  from storage_policy
-)
-select
-  'reviewed_storage_policy_shape_restricted' as check_name,
-  case when count(*) = 0 then 'pass' else 'fail' end as status,
-  coalesce(
-    json_agg(json_build_object('policyname', policyname, 'issue', issue, 'permissive', permissive, 'cmd', cmd, 'roles', roles, 'qual', qual, 'with_check', with_check) order by issue),
-    '[]'::json
-  ) as failing_storage_policy_shapes
-from storage_policy_violations
-where issue is not null;
-
 with protected_views(view_name) as (
   values
     ('fb_modules_overview'),
@@ -1050,23 +978,6 @@ select
 from pg_tables
 where schemaname = 'storage'
   and tablename = 'objects';
-
-select
-  'no_direct_anon_authenticated_storage_write_policies' as check_name,
-  case when count(*) = 0 then 'pass' else 'fail' end as status,
-  coalesce(
-    json_agg(json_build_object('policyname', policyname, 'roles', roles, 'cmd', cmd, 'permissive', permissive) order by policyname),
-    '[]'::json
-  ) as writable_storage_policies
-from pg_policies
-where schemaname = 'storage'
-  and tablename = 'objects'
-  and cmd <> 'SELECT'
-  and roles && array['anon', 'authenticated', 'public', 'PUBLIC']::name[]
-  and not (
-    policyname = 'dsgvo_private_app_photo_buckets_no_direct_object_access'
-    and permissive = 'RESTRICTIVE'
-  );
 
 select
   'no_unreviewed_public_storage_buckets' as check_name,
