@@ -146,7 +146,7 @@ const FB_QUESTION_SELECT = 'id, type, question_text, instruction, is_template, o
 const FB_MODULE_SELECT = 'id, name, description, archived, is_deleted, deleted_at, created_by, created_at, updated_at';
 const FB_MODULE_RULE_SELECT = 'id, module_id, trigger_local_id, trigger_answer, operator, trigger_answer_max, action, target_local_ids, created_at, updated_at';
 const FB_FRAGEBOGEN_SELECT = 'id, name, description, start_date, end_date, status, archived, is_deleted, deleted_at, created_by, created_at, updated_at';
-const FB_RESPONSE_SELECT = 'id, fragebogen_id, gebietsleiter_id, market_id, zeiterfassung_submission_id, status, started_at, completed_at, created_at, updated_at';
+const FB_RESPONSE_SELECT = 'id, fragebogen_id, gebietsleiter_id, market_id, zeiterfassung_submission_id, status, started_at, completed_at';
 const FB_DAY_TRACKING_SELECT = 'id, gebietsleiter_id, tracking_date, day_start_time, day_end_time, skipped_first_fahrzeit, km_stand_start, km_stand_end, total_fahrzeit, total_besuchszeit, total_unterbrechung, total_arbeitszeit, markets_visited, status, created_at, updated_at';
 const FB_ZEITERFASSUNG_SELECT = 'id, gebietsleiter_id, market_id, market_start_time, market_end_time, besuchszeit_von, besuchszeit_bis, besuchszeit_diff, fahrzeit_von, fahrzeit_bis, fahrzeit_diff, calculated_fahrzeit, visit_order, kommentar, created_at, updated_at';
 const FB_ZUSATZ_ZEITERFASSUNG_SELECT = 'id, gebietsleiter_id, market_id, entry_date, reason, reason_label, zeit_von, zeit_bis, zeit_diff, kommentar, schulung_ort, is_work_time_deduction, created_at, updated_at';
@@ -2866,8 +2866,37 @@ router.post('/responses', async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // One-time visibility rule: once completed by this GL for this market,
-    // this fragebogen must not be started again.
+    const findExistingResponse = async () => {
+      const { data: rows, error: lookupError } = await freshClient
+        .from('fb_responses')
+        .select(FB_RESPONSE_SELECT)
+        .eq('fragebogen_id', fragebogen_id)
+        .eq('gebietsleiter_id', effectiveGlId)
+        .eq('market_id', market_id)
+        .order('started_at', { ascending: false });
+
+      if (lookupError) throw lookupError;
+
+      const existingRows = rows || [];
+      return {
+        completed: existingRows.find((row: any) => row.status === 'completed') || null,
+        inProgress: existingRows.find((row: any) => row.status === 'in_progress') || null,
+      };
+    };
+
+    // Production still has the legacy unique_response constraint in some DBs.
+    // Reuse an open run first so retries/resumes do not fail on duplicate insert.
+    const existingBeforeInsert = await findExistingResponse();
+    if (existingBeforeInsert.completed) {
+      return res.status(409).json({
+        error: 'Fragebogen already completed for this market by this GL'
+      });
+    }
+    if (existingBeforeInsert.inProgress) {
+      console.log('Reusing existing in-progress response run');
+      return res.status(200).json(existingBeforeInsert.inProgress);
+    }
+
     const { data: completedRows, error: completedLookupError } = await freshClient
       .from('fb_responses')
       .select('id')
@@ -2899,31 +2928,18 @@ router.post('/responses', async (req: AuthRequest, res: Response) => {
     if (error) {
       // Legacy compatibility path: some environments still have unique_response
       // on (fragebogen_id, gebietsleiter_id, market_id), which blocks inserts.
-      if (error.code === '23505' && String(error.message || '').includes('unique_response')) {
-        const { data: existing, error: existingError } = await freshClient
-          .from('fb_responses')
-          .select(FB_RESPONSE_SELECT)
-          .eq('fragebogen_id', fragebogen_id)
-          .eq('gebietsleiter_id', effectiveGlId)
-          .eq('market_id', market_id)
-          .maybeSingle();
-
-        if (existingError) throw existingError;
-        if (!existing) throw error;
-
-        // Never reopen completed runs under one-time visibility behavior.
-        if (existing.status === 'completed') {
+      if (error.code === '23505') {
+        const existingAfterConflict = await findExistingResponse();
+        if (existingAfterConflict.completed) {
           return res.status(409).json({
             error: 'Fragebogen already completed for this market by this GL'
           });
         }
 
-        if (existing.status === 'in_progress') {
-    console.log('Reusing legacy unique in-progress response run');
-          return res.status(200).json(existing);
+        if (existingAfterConflict.inProgress) {
+          console.log('Reusing duplicate-conflict in-progress response run');
+          return res.status(200).json(existingAfterConflict.inProgress);
         }
-
-        throw error;
       }
       throw error;
     }
@@ -2931,7 +2947,12 @@ router.post('/responses', async (req: AuthRequest, res: Response) => {
     console.log('Started response run');
     res.status(201).json(data);
   } catch (error: any) {
-    console.error('Error creating response');
+    console.error('Error creating response:', {
+      code: error?.code,
+      message: error?.message,
+      details: error?.details,
+      hint: error?.hint,
+    });
     sendInternalError(res);
   }
 });
