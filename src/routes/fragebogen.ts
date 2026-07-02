@@ -152,6 +152,9 @@ const FB_ZEITERFASSUNG_SELECT = 'id, gebietsleiter_id, market_id, market_start_t
 const FB_ZUSATZ_ZEITERFASSUNG_SELECT = 'id, gebietsleiter_id, market_id, entry_date, reason, reason_label, zeit_von, zeit_bis, zeit_diff, kommentar, schulung_ort, is_work_time_deduction, created_at, updated_at';
 const WELLEN_SUBMISSION_FRAGEBOGEN_SELECT = 'id, welle_id, gebietsleiter_id, market_id, item_type, item_id, quantity, value_per_unit, photo_url, created_at, wellen:welle_id ( goal_type )';
 const VORVERKAUF_ENTRY_FRAGEBOGEN_SELECT = 'id, gebietsleiter_id, market_id, reason, notes, status, created_at';
+
+const getFragebogenUserOwnerId = (req: AuthRequest, requestedId?: string): string | undefined =>
+  req.user?.role === 'admin' ? requestedId : req.user?.id;
 const FB_QUESTIONS_USAGE_SELECT = 'id, type, question_text, is_template, archived, created_at, module_usage_count, answer_count';
 const FB_MODULES_OVERVIEW_SELECT = 'id, name, description, archived, created_at, updated_at, question_count, rules_count, fragebogen_usage_count';
 const FB_FRAGEBOGEN_OVERVIEW_SELECT = 'id, name, description, start_date, end_date, status, archived, created_at, updated_at, module_count, market_count, response_count, completed_response_count';
@@ -574,7 +577,7 @@ router.post('/responses/upload-photo', async (req: AuthRequest, res: Response) =
       question_id,
       filename
     } = req.body || {};
-    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
+    const effectiveGlId = getFragebogenUserOwnerId(req, gebietsleiter_id);
 
     if (!image || typeof image !== 'string') {
       return res.status(400).json({ error: 'image (base64) is required' });
@@ -721,7 +724,7 @@ router.post('/responses/photo-url', async (req: AuthRequest, res: Response) => {
       if (!responseRow) {
         return res.status(404).json({ error: 'Response not found' });
       }
-      if (String(responseRow.gebietsleiter_id || '') !== getAuthenticatedGlId(req.user)) {
+      if (String(responseRow.gebietsleiter_id || '') !== req.user?.id) {
         return res.status(403).json({ error: 'Access denied' });
       }
     }
@@ -2531,7 +2534,7 @@ router.get('/responses/completed-map', async (req: AuthRequest, res: Response) =
   try {
     const freshClient = createFreshClient();
     const { gebietsleiter_id, market_id, fragebogen_ids } = req.query;
-    const effectiveGlId = req.user?.role === 'admin' ? String(gebietsleiter_id || '') : getAuthenticatedGlId(req.user);
+    const effectiveGlId = getFragebogenUserOwnerId(req, String(gebietsleiter_id || ''));
 
     if (!effectiveGlId || !market_id) {
       return res.status(400).json({
@@ -2855,7 +2858,7 @@ router.post('/responses', async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { fragebogen_id, gebietsleiter_id, market_id, zeiterfassung_submission_id } = req.body;
-    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
+    const effectiveGlId = getFragebogenUserOwnerId(req, gebietsleiter_id);
     
     if (!fragebogen_id || !effectiveGlId || !market_id) {
       return res.status(400).json({ 
@@ -2943,7 +2946,7 @@ router.put('/responses/:id', requireOwnedRowOrAdmin('fb_responses'), async (req:
     const { id } = req.params;
     const freshClient = createFreshClient();
     const { answers, requester_gebietsleiter_id } = req.body;
-    const effectiveRequesterGlId = req.user?.role === 'admin' ? requester_gebietsleiter_id : getAuthenticatedGlId(req.user);
+    const effectiveRequesterGlId = getFragebogenUserOwnerId(req, requester_gebietsleiter_id);
     
     if (!answers || !Array.isArray(answers)) {
       return res.status(400).json({ error: 'answers array is required' });
@@ -3282,7 +3285,7 @@ router.delete('/responses/:id', requireOwnedRowOrAdmin('fb_responses'), async (r
   try {
     const { id } = req.params;
     const { requester_gebietsleiter_id } = req.body || {};
-    const effectiveRequesterGlId = req.user?.role === 'admin' ? requester_gebietsleiter_id : getAuthenticatedGlId(req.user);
+    const effectiveRequesterGlId = getFragebogenUserOwnerId(req, requester_gebietsleiter_id);
     const freshClient = createFreshClient();
 
     if (!effectiveRequesterGlId || typeof effectiveRequesterGlId !== 'string') {
@@ -3403,7 +3406,7 @@ router.post('/zeiterfassung', async (req: AuthRequest, res: Response) => {
       kommentar,
       food_prozent
     } = req.body;
-    const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
+    const effectiveGlId = getFragebogenUserOwnerId(req, gebietsleiter_id);
     
     // Validate required fields
     if (!effectiveGlId || !market_id) {

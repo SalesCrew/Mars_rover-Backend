@@ -28,6 +28,13 @@ const normalizeProfile = (authUser: { id: string; email?: string | null }, profi
 export const getAuthenticatedGlId = (user?: AuthUser): string | undefined =>
   user?.gebietsleiter_id || user?.id;
 
+const getAuthorizedOwnerIds = (user?: AuthUser): Set<string> => {
+  const ids = [user?.id, getAuthenticatedGlId(user)]
+    .filter((id): id is string => Boolean(id))
+    .map(String);
+  return new Set(ids);
+};
+
 const isActiveGlProfile = async (glId: string): Promise<boolean> => {
   const freshClient = createFreshClient();
   const { data, error } = await freshClient
@@ -174,7 +181,8 @@ export const requireOwnedRowOrAdmin = (
         return res.status(404).json({ error: 'Record not found' });
       }
 
-      if (String((data as Record<string, any>)[ownerColumn]) !== getAuthenticatedGlId(req.user)) {
+      const rowOwnerId = String((data as Record<string, any>)[ownerColumn] || '');
+      if (!getAuthorizedOwnerIds(req.user).has(rowOwnerId)) {
         return res.status(403).json({ error: 'Access denied' });
       }
 
