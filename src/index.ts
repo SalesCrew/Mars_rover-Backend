@@ -20,7 +20,7 @@ import naraIncentiveRouter from './routes/naraIncentive';
 import mapsRouter from './routes/maps';
 import wochenCheckRouter from './routes/wochenCheck';
 import chatRouter from './routes/chat';
-import productsUpdateRouter from './routes/productsUpdate';
+import productsUpdateRouter, { startProductUpdateScheduler } from './routes/productsUpdate';
 import { authenticateToken, requireAdmin } from './middleware/auth';
 
 const app = express();
@@ -145,6 +145,7 @@ app.use('/api/products-update', requireAdmin, productsUpdateRouter);
 // Start server
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('Backend server running on port ' + PORT);
+  startProductUpdateScheduler();
 });
 
 // Graceful shutdown handling
