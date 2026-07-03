@@ -295,6 +295,16 @@ function normalizeDistributionTargetFilter(value: unknown): DistributionTargetFi
   return 'all';
 }
 
+function getIsoWeekParts(date: Date): { weekYear: number; week: number } {
+  const target = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const day = target.getUTCDay() || 7;
+  target.setUTCDate(target.getUTCDate() + 4 - day);
+  const weekYear = target.getUTCFullYear();
+  const yearStart = new Date(Date.UTC(weekYear, 0, 1));
+  const week = Math.ceil((((target.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+  return { weekYear, week };
+}
+
 function sanitizePhotoNameSegment(value: string, maxLength: number = 80): string {
   return String(value || '')
     .trim()
@@ -5546,11 +5556,16 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
         if (Number.isNaN(date.getTime())) return null;
         const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
         const monthLabel = `${String(date.getMonth() + 1).padStart(2, '0')}.${date.getFullYear()}`;
+        const { weekYear, week } = getIsoWeekParts(date);
+        const weekKey = `${weekYear}-W${String(week).padStart(2, '0')}`;
+        const weekLabel = `KW ${String(week).padStart(2, '0')} ${weekYear}`;
         const question = questionById.get(answer.question_id);
 
         return {
           monthKey,
           monthLabel,
+          weekKey,
+          weekLabel,
           fragebogenName: fragebogenById.get(resp.fragebogen_id)?.name || resp.fragebogen_id,
           questionId: answer.question_id,
           questionLabel: question?.question_text || answer.question_id,
@@ -5567,6 +5582,8 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
       .filter(Boolean) as Array<{
         monthKey: string;
         monthLabel: string;
+        weekKey: string;
+        weekLabel: string;
         fragebogenName: string;
         questionId: string;
         questionLabel: string;
