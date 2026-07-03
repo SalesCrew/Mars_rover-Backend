@@ -288,11 +288,16 @@ async function fetchPagedDistributionAnswers(
 }
 
 type DistributionTargetFilter = 'all' | 'distribution' | 'quality';
+type DistributionQuestionTargetFlags = { distributionsziel: boolean; qualitaetsziel: boolean };
 
 function normalizeDistributionTargetFilter(value: unknown): DistributionTargetFilter {
   const raw = String(value || 'all').trim().toLowerCase();
   if (raw === 'distribution' || raw === 'quality') return raw;
   return 'all';
+}
+
+function isPerfectStoreModuleName(value: unknown): boolean {
+  return String(value || '').toLowerCase().includes('perfect store');
 }
 
 function getIsoWeekParts(date: Date): { weekYear: number; week: number } {
@@ -5507,6 +5512,54 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
       return res.status(400).json({ error: `Nur Ja/Nein-Fragen erlaubt: ${invalidQuestion.question_text}` });
     }
 
+    const questionTargets = new Map<string, DistributionQuestionTargetFlags>(
+      (questionRows || []).map((q: any) => [
+        q.id,
+        {
+          distributionsziel: q.distributionsziel === true,
+          qualitaetsziel: q.qualitaetsziel === true
+        }
+      ])
+    );
+
+    const { data: selectedFragebogenModules, error: selectedFragebogenModulesError } = await freshClient
+      .from('fb_fragebogen_modules')
+      .select('module_id, module:fb_modules!module_id (name)')
+      .in('fragebogen_id', fragebogenIds);
+
+    if (selectedFragebogenModulesError) throw selectedFragebogenModulesError;
+
+    const moduleNameById = new Map(
+      (selectedFragebogenModules || []).map((row: any) => {
+        const module = Array.isArray(row.module) ? row.module[0] : row.module;
+        return [row.module_id, module?.name || ''];
+      })
+    );
+    const moduleIdsForTargetFallback = Array.from(new Set((selectedFragebogenModules || []).map((row: any) => row.module_id).filter(Boolean)));
+
+    if (moduleIdsForTargetFallback.length > 0) {
+      const { data: moduleQuestionRows, error: moduleQuestionRowsError } = await freshClient
+        .from('fb_module_questions')
+        .select('module_id, question_id, order_index')
+        .in('module_id', moduleIdsForTargetFallback)
+        .in('question_id', questionIds);
+
+      if (moduleQuestionRowsError) throw moduleQuestionRowsError;
+
+      (moduleQuestionRows || []).forEach((row: any) => {
+        const flags = questionTargets.get(row.question_id);
+        if (!flags || !isPerfectStoreModuleName(moduleNameById.get(row.module_id))) return;
+
+        const orderIndex = Number(row.order_index || 0);
+        if (orderIndex >= 1 && orderIndex <= 10) {
+          flags.distributionsziel = true;
+        }
+        if (orderIndex >= 11 && orderIndex <= 12) {
+          flags.qualitaetsziel = true;
+        }
+      });
+    }
+
     const responses = await fetchPagedDistributionResponses(freshClient, fragebogenIds);
 
     const completedResponses = (responses || []).filter((r: any) => r.market_id && r.completed_at);
@@ -5560,6 +5613,7 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
         const weekKey = `${weekYear}-W${String(week).padStart(2, '0')}`;
         const weekLabel = `KW ${String(week).padStart(2, '0')} ${weekYear}`;
         const question = questionById.get(answer.question_id);
+        const targets = questionTargets.get(answer.question_id);
 
         return {
           monthKey,
@@ -5569,8 +5623,8 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
           fragebogenName: fragebogenById.get(resp.fragebogen_id)?.name || resp.fragebogen_id,
           questionId: answer.question_id,
           questionLabel: question?.question_text || answer.question_id,
-          distributionsziel: question?.distributionsziel === true,
-          qualitaetsziel: question?.qualitaetsziel === true,
+          distributionsziel: targets?.distributionsziel === true,
+          qualitaetsziel: targets?.qualitaetsziel === true,
           answerBoolean: Boolean(answer.answer_boolean),
           answerLabel: answer.answer_boolean ? 'Ja' : 'Nein',
           marketName: market?.name || resp.market_id,
@@ -5607,10 +5661,9 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
       selectedQuestionIds: questionIds,
       selectedTargetFilter: targetFilter,
       selectedQuestions: (questionRows || []).map((q: any) => ({
+        ...questionTargets.get(q.id),
         id: q.id,
-        label: q.question_text || q.id,
-        distributionsziel: q.distributionsziel === true,
-        qualitaetsziel: q.qualitaetsziel === true
+        label: q.question_text || q.id
       })),
       rows
     };
