@@ -142,7 +142,7 @@ const FOTOFRAGEN_LOOKUP_CHUNK_SIZE = 250;
 const DISTRIBUTION_RESPONSE_PAGE_SIZE = 1000;
 const DISTRIBUTION_ANSWER_PAGE_SIZE = 1000;
 const DISTRIBUTION_LOOKUP_CHUNK_SIZE = 250;
-const FB_QUESTION_SELECT = 'id, type, question_text, instruction, is_template, options, likert_scale, matrix_config, numeric_constraints, slider_config, images, archived, is_deleted, deleted_at, created_by, created_at, updated_at';
+const FB_QUESTION_SELECT = 'id, type, question_text, instruction, is_template, options, likert_scale, matrix_config, numeric_constraints, slider_config, images, distributionsziel, qualitaetsziel, archived, is_deleted, deleted_at, created_by, created_at, updated_at';
 const FB_MODULE_SELECT = 'id, name, description, archived, is_deleted, deleted_at, created_by, created_at, updated_at';
 const FB_MODULE_RULE_SELECT = 'id, module_id, trigger_local_id, trigger_answer, operator, trigger_answer_max, action, target_local_ids, created_at, updated_at';
 const FB_FRAGEBOGEN_SELECT = 'id, name, description, start_date, end_date, status, archived, is_deleted, deleted_at, created_by, created_at, updated_at';
@@ -155,7 +155,7 @@ const VORVERKAUF_ENTRY_FRAGEBOGEN_SELECT = 'id, gebietsleiter_id, market_id, rea
 
 const getFragebogenUserOwnerId = (req: AuthRequest, requestedId?: string): string | undefined =>
   req.user?.role === 'admin' ? requestedId : req.user?.id;
-const FB_QUESTIONS_USAGE_SELECT = 'id, type, question_text, is_template, archived, created_at, module_usage_count, answer_count';
+const FB_QUESTIONS_USAGE_SELECT = 'id, type, question_text, is_template, distributionsziel, qualitaetsziel, archived, created_at, module_usage_count, answer_count';
 const FB_MODULES_OVERVIEW_SELECT = 'id, name, description, archived, created_at, updated_at, question_count, rules_count, fragebogen_usage_count';
 const FB_FRAGEBOGEN_OVERVIEW_SELECT = 'id, name, description, start_date, end_date, status, archived, created_at, updated_at, module_count, market_count, response_count, completed_response_count';
 
@@ -285,6 +285,20 @@ async function fetchPagedDistributionAnswers(
   }
 
   return rows;
+}
+
+type DistributionTargetFilter = 'all' | 'distribution' | 'quality';
+
+function normalizeDistributionTargetFilter(value: unknown): DistributionTargetFilter {
+  const raw = String(value || 'all').trim().toLowerCase();
+  if (raw === 'distribution' || raw === 'quality') return raw;
+  return 'all';
+}
+
+function matchesDistributionTargetFilter(question: any, filter: DistributionTargetFilter): boolean {
+  if (filter === 'distribution') return question?.distributionsziel === true;
+  if (filter === 'quality') return question?.qualitaetsziel === true;
+  return true;
 }
 
 function sanitizePhotoNameSegment(value: string, maxLength: number = 80): string {
@@ -948,6 +962,8 @@ router.post('/questions', requireAdmin, async (req: Request, res: Response) => {
       matrix_config,
       numeric_constraints,
       slider_config,
+      distributionsziel,
+      qualitaetsziel,
       created_by
     } = req.body;
     
@@ -1009,6 +1025,8 @@ router.post('/questions', requireAdmin, async (req: Request, res: Response) => {
         numeric_constraints: numeric_constraints || null,
         slider_config: slider_config || null,
         images: req.body.images || [],
+        distributionsziel: distributionsziel === true,
+        qualitaetsziel: qualitaetsziel === true,
         created_by: created_by || null
       })
       .select(FB_QUESTION_SELECT)
@@ -5450,10 +5468,11 @@ router.get('/fragebogen/:id/export.xlsx', requireAdmin, async (req: Request, res
 router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Request, res: Response) => {
   try {
     const fragebogenIds: string[] = Array.from(new Set((req.body?.fragebogen_ids || []).filter(Boolean)));
-    const questionIds: string[] = Array.from(new Set((req.body?.question_ids || []).filter(Boolean)));
+    let questionIds: string[] = Array.from(new Set((req.body?.question_ids || []).filter(Boolean)));
     const selectedChains: string[] = Array.from(
       new Set((req.body?.chains || []).map((c: string) => String(c).trim()).filter(Boolean))
     );
+    const targetFilter = normalizeDistributionTargetFilter(req.body?.target_filter);
 
     if (fragebogenIds.length === 0) {
       return res.status(400).json({ error: 'Mindestens ein Fragebogen muss ausgewählt werden.' });
@@ -5469,7 +5488,12 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
       return res.status(400).json({ error: 'Keine gültigen Fragebögen gefunden.' });
     }
 
-    const questionRows = await fetchRowsByIdChunks(freshClient, 'fb_questions', 'id,question_text,type', questionIds);
+    const questionRows = await fetchRowsByIdChunks(
+      freshClient,
+      'fb_questions',
+      'id,question_text,type,distributionsziel,qualitaetsziel',
+      questionIds
+    );
     if (!questionRows || questionRows.length !== questionIds.length) {
       return res.status(400).json({ error: 'Mindestens eine ausgewählte Frage wurde nicht gefunden.' });
     }
@@ -5478,6 +5502,14 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
     if (invalidQuestion) {
       return res.status(400).json({ error: `Nur Ja/Nein-Fragen erlaubt: ${invalidQuestion.question_text}` });
     }
+
+    const filteredQuestionRows = (questionRows || []).filter((q: any) => matchesDistributionTargetFilter(q, targetFilter));
+    if (filteredQuestionRows.length === 0) {
+      const targetLabel = targetFilter === 'distribution' ? 'Distributionsziel' : targetFilter === 'quality' ? 'Quali-Ziel' : 'Ja/Nein';
+      return res.status(400).json({ error: `Keine passenden ${targetLabel}-Fragen in der Auswahl gefunden.` });
+    }
+
+    questionIds = filteredQuestionRows.map((q: any) => q.id);
 
     const responses = await fetchPagedDistributionResponses(freshClient, fragebogenIds);
 
@@ -5497,7 +5529,7 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
     const marketById = new Map((marketRows || []).map((m: any) => [m.id, m]));
     const glById = new Map((glRows || []).map((u: any) => [u.id, `${u.first_name || ''} ${u.last_name || ''}`.trim() || 'Unbekannt']));
     const fragebogenById = new Map((fragebogenRows || []).map((f: any) => [f.id, f]));
-    const questionById = new Map((questionRows || []).map((q: any) => [q.id, q]));
+    const questionById = new Map((filteredQuestionRows || []).map((q: any) => [q.id, q]));
 
     const allowedResponseIds = completedResponses
       .filter((r: any) => {
@@ -5565,7 +5597,7 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
       })),
       selectedChains,
       selectedQuestionIds: questionIds,
-      selectedQuestions: (questionRows || []).map((q: any) => ({
+      selectedQuestions: (filteredQuestionRows || []).map((q: any) => ({
         id: q.id,
         label: q.question_text || q.id
       })),
