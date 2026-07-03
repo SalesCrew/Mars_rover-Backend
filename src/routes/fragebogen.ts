@@ -295,12 +295,6 @@ function normalizeDistributionTargetFilter(value: unknown): DistributionTargetFi
   return 'all';
 }
 
-function matchesDistributionTargetFilter(question: any, filter: DistributionTargetFilter): boolean {
-  if (filter === 'distribution') return question?.distributionsziel === true;
-  if (filter === 'quality') return question?.qualitaetsziel === true;
-  return true;
-}
-
 function sanitizePhotoNameSegment(value: string, maxLength: number = 80): string {
   return String(value || '')
     .trim()
@@ -5503,14 +5497,6 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
       return res.status(400).json({ error: `Nur Ja/Nein-Fragen erlaubt: ${invalidQuestion.question_text}` });
     }
 
-    const filteredQuestionRows = (questionRows || []).filter((q: any) => matchesDistributionTargetFilter(q, targetFilter));
-    if (filteredQuestionRows.length === 0) {
-      const targetLabel = targetFilter === 'distribution' ? 'Distributionsziel' : targetFilter === 'quality' ? 'Quali-Ziel' : 'Ja/Nein';
-      return res.status(400).json({ error: `Keine passenden ${targetLabel}-Fragen in der Auswahl gefunden.` });
-    }
-
-    questionIds = filteredQuestionRows.map((q: any) => q.id);
-
     const responses = await fetchPagedDistributionResponses(freshClient, fragebogenIds);
 
     const completedResponses = (responses || []).filter((r: any) => r.market_id && r.completed_at);
@@ -5529,7 +5515,7 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
     const marketById = new Map((marketRows || []).map((m: any) => [m.id, m]));
     const glById = new Map((glRows || []).map((u: any) => [u.id, `${u.first_name || ''} ${u.last_name || ''}`.trim() || 'Unbekannt']));
     const fragebogenById = new Map((fragebogenRows || []).map((f: any) => [f.id, f]));
-    const questionById = new Map((filteredQuestionRows || []).map((q: any) => [q.id, q]));
+    const questionById = new Map((questionRows || []).map((q: any) => [q.id, q]));
 
     const allowedResponseIds = completedResponses
       .filter((r: any) => {
@@ -5560,13 +5546,16 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
         if (Number.isNaN(date.getTime())) return null;
         const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
         const monthLabel = `${String(date.getMonth() + 1).padStart(2, '0')}.${date.getFullYear()}`;
+        const question = questionById.get(answer.question_id);
 
         return {
           monthKey,
           monthLabel,
           fragebogenName: fragebogenById.get(resp.fragebogen_id)?.name || resp.fragebogen_id,
           questionId: answer.question_id,
-          questionLabel: questionById.get(answer.question_id)?.question_text || answer.question_id,
+          questionLabel: question?.question_text || answer.question_id,
+          distributionsziel: question?.distributionsziel === true,
+          qualitaetsziel: question?.qualitaetsziel === true,
           answerBoolean: Boolean(answer.answer_boolean),
           answerLabel: answer.answer_boolean ? 'Ja' : 'Nein',
           marketName: market?.name || resp.market_id,
@@ -5581,6 +5570,8 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
         fragebogenName: string;
         questionId: string;
         questionLabel: string;
+        distributionsziel: boolean;
+        qualitaetsziel: boolean;
         answerBoolean: boolean;
         answerLabel: string;
         marketName: string;
@@ -5597,9 +5588,12 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
       })),
       selectedChains,
       selectedQuestionIds: questionIds,
-      selectedQuestions: (filteredQuestionRows || []).map((q: any) => ({
+      selectedTargetFilter: targetFilter,
+      selectedQuestions: (questionRows || []).map((q: any) => ({
         id: q.id,
-        label: q.question_text || q.id
+        label: q.question_text || q.id,
+        distributionsziel: q.distributionsziel === true,
+        qualitaetsziel: q.qualitaetsziel === true
       })),
       rows
     };
