@@ -5568,7 +5568,7 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
 
     const [marketRows, glRows] = await Promise.all([
       marketIds.length > 0
-        ? fetchRowsByIdChunks(freshClient, 'markets', 'id,name,chain', marketIds)
+        ? fetchRowsByIdChunks(freshClient, 'markets', 'id,name,chain,internal_id', marketIds)
         : Promise.resolve([] as any[]),
       glIds.length > 0
         ? fetchRowsByIdChunks(freshClient, 'users', 'id,first_name,last_name', glIds)
@@ -5628,6 +5628,7 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
           answerBoolean: Boolean(answer.answer_boolean),
           answerLabel: answer.answer_boolean ? 'Ja' : 'Nein',
           marketName: market?.name || resp.market_id,
+          marketInternalId: market?.internal_id || '',
           chain,
           glName: glById.get(resp.gebietsleiter_id) || 'Unbekannt',
           responseId: answer.response_id
@@ -5646,6 +5647,7 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
         answerBoolean: boolean;
         answerLabel: string;
         marketName: string;
+        marketInternalId: string;
         chain: string;
         glName: string;
         responseId: string;
