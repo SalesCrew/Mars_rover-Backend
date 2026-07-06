@@ -142,6 +142,8 @@ const FOTOFRAGEN_LOOKUP_CHUNK_SIZE = 250;
 const DISTRIBUTION_RESPONSE_PAGE_SIZE = 1000;
 const DISTRIBUTION_ANSWER_PAGE_SIZE = 1000;
 const DISTRIBUTION_LOOKUP_CHUNK_SIZE = 250;
+const FRAGEBOGEN_STATUS_PAGE_SIZE = 1000;
+const FRAGEBOGEN_STATUS_LOOKUP_CHUNK_SIZE = 250;
 const FB_QUESTION_SELECT = 'id, type, question_text, instruction, is_template, options, likert_scale, matrix_config, numeric_constraints, slider_config, images, distributionsziel, qualitaetsziel, archived, is_deleted, deleted_at, created_by, created_at, updated_at';
 const FB_MODULE_SELECT = 'id, name, description, archived, is_deleted, deleted_at, created_by, created_at, updated_at';
 const FB_MODULE_RULE_SELECT = 'id, module_id, trigger_local_id, trigger_answer, operator, trigger_answer_max, action, target_local_ids, created_at, updated_at';
@@ -166,6 +168,146 @@ function chunkIds<T>(items: T[], chunkSize: number): T[][] {
     chunks.push(items.slice(i, i + chunkSize));
   }
   return chunks;
+}
+
+type FragebogenStatusMarketRow = {
+  id: string;
+  internal_id: string | null;
+  name: string | null;
+  chain: string | null;
+  address: string | null;
+  postal_code: string | null;
+  city: string | null;
+  gebietsleiter_id?: string | null;
+  gebietsleiter_name?: string | null;
+  is_active?: boolean | null;
+};
+
+type FragebogenStatusAssignmentRow = {
+  fragebogen_id: string;
+  market_id: string;
+};
+
+type FragebogenStatusResponseRow = {
+  id: string;
+  fragebogen_id: string;
+  market_id: string;
+  gebietsleiter_id: string;
+  status: string;
+  completed_at: string | null;
+  user?: { id: string; first_name: string | null; last_name: string | null } | null;
+};
+
+async function fetchPagedMarketsForGl(
+  freshClient: ReturnType<typeof createFreshClient>,
+  glId: string
+): Promise<FragebogenStatusMarketRow[]> {
+  const rows: FragebogenStatusMarketRow[] = [];
+
+  for (let offset = 0; ; offset += FRAGEBOGEN_STATUS_PAGE_SIZE) {
+    const { data, error } = await freshClient
+      .from('markets')
+      .select('id, internal_id, name, chain, address, postal_code, city, gebietsleiter_id, gebietsleiter_name, is_active')
+      .eq('gebietsleiter_id', glId)
+      .or('is_active.is.null,is_active.eq.true')
+      .order('chain', { ascending: true })
+      .order('name', { ascending: true })
+      .range(offset, offset + FRAGEBOGEN_STATUS_PAGE_SIZE - 1);
+
+    if (error) throw error;
+
+    const pageRows = (data || []) as FragebogenStatusMarketRow[];
+    rows.push(...pageRows);
+    if (pageRows.length < FRAGEBOGEN_STATUS_PAGE_SIZE) break;
+  }
+
+  return rows;
+}
+
+async function fetchPagedFragebogenMarketAssignments(
+  freshClient: ReturnType<typeof createFreshClient>,
+  filters: { fragebogenIds?: string[]; fragebogenId?: string; marketIds: string[] }
+): Promise<FragebogenStatusAssignmentRow[]> {
+  const marketIds = Array.from(new Set((filters.marketIds || []).filter(Boolean)));
+  if (marketIds.length === 0) return [];
+
+  const fragebogenIds = Array.from(new Set((filters.fragebogenIds || []).filter(Boolean)));
+  if (!filters.fragebogenId && fragebogenIds.length === 0) return [];
+
+  const rows: FragebogenStatusAssignmentRow[] = [];
+  const marketChunks = chunkIds(marketIds, FRAGEBOGEN_STATUS_LOOKUP_CHUNK_SIZE);
+  const fragebogenChunks = filters.fragebogenId
+    ? [[filters.fragebogenId]]
+    : chunkIds(fragebogenIds, FRAGEBOGEN_STATUS_LOOKUP_CHUNK_SIZE);
+
+  for (const fragebogenChunk of fragebogenChunks) {
+    for (const marketChunk of marketChunks) {
+      for (let offset = 0; ; offset += FRAGEBOGEN_STATUS_PAGE_SIZE) {
+        const { data, error } = await freshClient
+          .from('fb_fragebogen_markets')
+          .select('fragebogen_id, market_id')
+          .in('fragebogen_id', fragebogenChunk)
+          .in('market_id', marketChunk)
+          .order('fragebogen_id', { ascending: true })
+          .order('market_id', { ascending: true })
+          .range(offset, offset + FRAGEBOGEN_STATUS_PAGE_SIZE - 1);
+
+        if (error) throw error;
+
+        const pageRows = (data || []) as FragebogenStatusAssignmentRow[];
+        rows.push(...pageRows);
+        if (pageRows.length < FRAGEBOGEN_STATUS_PAGE_SIZE) break;
+      }
+    }
+  }
+
+  return rows;
+}
+
+async function fetchPagedCompletedFragebogenResponses(
+  freshClient: ReturnType<typeof createFreshClient>,
+  filters: { fragebogenIds?: string[]; fragebogenId?: string; marketIds: string[]; glId?: string }
+): Promise<FragebogenStatusResponseRow[]> {
+  const marketIds = Array.from(new Set((filters.marketIds || []).filter(Boolean)));
+  if (marketIds.length === 0) return [];
+
+  const fragebogenIds = Array.from(new Set((filters.fragebogenIds || []).filter(Boolean)));
+  if (!filters.fragebogenId && fragebogenIds.length === 0) return [];
+
+  const rows: FragebogenStatusResponseRow[] = [];
+  const marketChunks = chunkIds(marketIds, FRAGEBOGEN_STATUS_LOOKUP_CHUNK_SIZE);
+  const fragebogenChunks = filters.fragebogenId
+    ? [[filters.fragebogenId]]
+    : chunkIds(fragebogenIds, FRAGEBOGEN_STATUS_LOOKUP_CHUNK_SIZE);
+  const selectColumns = 'id, fragebogen_id, market_id, gebietsleiter_id, status, completed_at';
+
+  for (const fragebogenChunk of fragebogenChunks) {
+    for (const marketChunk of marketChunks) {
+      for (let offset = 0; ; offset += FRAGEBOGEN_STATUS_PAGE_SIZE) {
+        let query = freshClient
+          .from('fb_responses')
+          .select(selectColumns)
+          .in('fragebogen_id', fragebogenChunk)
+          .in('market_id', marketChunk)
+          .eq('status', 'completed')
+          .order('completed_at', { ascending: false })
+          .range(offset, offset + FRAGEBOGEN_STATUS_PAGE_SIZE - 1);
+
+        if (filters.glId) {
+          query = query.eq('gebietsleiter_id', filters.glId);
+        }
+
+        const { data, error } = await query;
+        if (error) throw error;
+
+        const pageRows = (data || []) as FragebogenStatusResponseRow[];
+        rows.push(...pageRows);
+        if (pageRows.length < FRAGEBOGEN_STATUS_PAGE_SIZE) break;
+      }
+    }
+  }
+
+  return rows;
 }
 
 async function fetchPagedFragebogenResponses(
@@ -2038,6 +2180,263 @@ router.get('/fragebogen', async (req: Request, res: Response) => {
     res.json(enrichedFragebogen);
   } catch (error: any) {
     console.error('Error fetching fragebogen:');
+    sendInternalError(res);
+  }
+});
+
+/**
+ * GET /api/fragebogen/fragebogen/status/gl/:glId
+ * Batched Ampelsystem overview for the logged-in GL.
+ */
+router.get('/fragebogen/status/gl/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: Request, res: Response) => {
+  try {
+    const { glId } = req.params;
+    const freshClient = createFreshClient();
+    await refreshFragebogenStatuses(freshClient);
+
+    const [markets, activeFragebogenResult] = await Promise.all([
+      fetchPagedMarketsForGl(freshClient, glId),
+      freshClient
+        .from('fb_fragebogen')
+        .select('id, name, description, start_date, end_date, status')
+        .eq('status', 'active')
+        .eq('archived', false)
+        .or('is_deleted.is.null,is_deleted.eq.false')
+        .order('start_date', { ascending: true })
+        .order('name', { ascending: true })
+    ]);
+
+    if (activeFragebogenResult.error) throw activeFragebogenResult.error;
+
+    const fragebogenRows = activeFragebogenResult.data || [];
+    const marketIds = markets.map((market) => market.id).filter(Boolean);
+    const fragebogenIds = fragebogenRows.map((fragebogen) => fragebogen.id).filter(Boolean);
+
+    const [assignments, completedResponses] = await Promise.all([
+      fetchPagedFragebogenMarketAssignments(freshClient, {
+        fragebogenIds,
+        marketIds
+      }),
+      fetchPagedCompletedFragebogenResponses(freshClient, {
+        fragebogenIds,
+        marketIds,
+        glId
+      })
+    ]);
+
+    const assignedFragebogenIds = new Set(assignments.map((assignment) => assignment.fragebogen_id).filter(Boolean));
+    const visibleFragebogenRows = fragebogenRows.filter((fragebogen: any) => assignedFragebogenIds.has(fragebogen.id));
+    const fragebogenById = new Map(visibleFragebogenRows.map((fragebogen: any) => [fragebogen.id, fragebogen]));
+    const completedByMarketAndFragebogen = new Map<string, { responseId: string; completedAt: string | null }>();
+
+    for (const response of completedResponses) {
+      const key = `${response.market_id}|${response.fragebogen_id}`;
+      const current = completedByMarketAndFragebogen.get(key);
+      if (!current || String(response.completed_at || '') > String(current.completedAt || '')) {
+        completedByMarketAndFragebogen.set(key, {
+          responseId: response.id,
+          completedAt: response.completed_at
+        });
+      }
+    }
+
+    const assignmentsByMarket = new Map<string, FragebogenStatusAssignmentRow[]>();
+    for (const assignment of assignments) {
+      const rows = assignmentsByMarket.get(assignment.market_id) || [];
+      rows.push(assignment);
+      assignmentsByMarket.set(assignment.market_id, rows);
+    }
+
+    const marketsPayload = markets.map((market) => {
+      const rows = (assignmentsByMarket.get(market.id) || [])
+        .filter((assignment) => fragebogenById.has(assignment.fragebogen_id))
+        .sort((a, b) => {
+          const aFragebogen: any = fragebogenById.get(a.fragebogen_id);
+          const bFragebogen: any = fragebogenById.get(b.fragebogen_id);
+          return String(aFragebogen?.start_date || '').localeCompare(String(bFragebogen?.start_date || ''))
+            || String(aFragebogen?.name || '').localeCompare(String(bFragebogen?.name || ''));
+        });
+
+      const statuses = rows.map((assignment) => {
+        const fragebogen: any = fragebogenById.get(assignment.fragebogen_id);
+        const completed = completedByMarketAndFragebogen.get(`${market.id}|${assignment.fragebogen_id}`) || null;
+
+        return {
+          fragebogenId: assignment.fragebogen_id,
+          fragebogenName: fragebogen?.name || '',
+          completed: Boolean(completed),
+          completedAt: completed?.completedAt || null,
+          responseId: completed?.responseId || null
+        };
+      });
+
+      return {
+        id: market.id,
+        internalId: market.internal_id || '',
+        name: market.name || '',
+        chain: market.chain || '',
+        address: market.address || '',
+        postalCode: market.postal_code || '',
+        city: market.city || '',
+        statuses
+      };
+    });
+
+    const completedAssignments = marketsPayload.reduce(
+      (sum, market) => sum + market.statuses.filter((status) => status.completed).length,
+      0
+    );
+    const totalAssignments = marketsPayload.reduce((sum, market) => sum + market.statuses.length, 0);
+
+    res.json({
+      fragebogen: visibleFragebogenRows.map((fragebogen: any) => ({
+        id: fragebogen.id,
+        name: fragebogen.name,
+        description: fragebogen.description,
+        startDate: fragebogen.start_date,
+        endDate: fragebogen.end_date,
+        status: fragebogen.status
+      })),
+      markets: marketsPayload,
+      summary: {
+        totalMarkets: marketsPayload.length,
+        totalAssignments,
+        completedAssignments,
+        openAssignments: Math.max(totalAssignments - completedAssignments, 0)
+      }
+    });
+  } catch (error: any) {
+    console.error('Error fetching GL fragebogen status overview:');
+    sendInternalError(res);
+  }
+});
+
+/**
+ * GET /api/fragebogen/fragebogen/:id/market-status
+ * Admin Ampelsystem market completion list for one Fragebogen.
+ */
+router.get('/fragebogen/:id/market-status', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const freshClient = createFreshClient();
+    await refreshFragebogenStatuses(freshClient);
+
+    const { data: fragebogen, error: fragebogenError } = await freshClient
+      .from('fb_fragebogen')
+      .select('id, name, description, start_date, end_date, status')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (fragebogenError) throw fragebogenError;
+    if (!fragebogen) {
+      return res.status(404).json({ error: 'Fragebogen not found' });
+    }
+
+    const assignmentRows: FragebogenStatusAssignmentRow[] = [];
+    for (let offset = 0; ; offset += FRAGEBOGEN_STATUS_PAGE_SIZE) {
+      const { data, error } = await freshClient
+        .from('fb_fragebogen_markets')
+        .select('fragebogen_id, market_id')
+        .eq('fragebogen_id', id)
+        .order('market_id', { ascending: true })
+        .range(offset, offset + FRAGEBOGEN_STATUS_PAGE_SIZE - 1);
+
+      if (error) throw error;
+
+      const pageRows = (data || []) as FragebogenStatusAssignmentRow[];
+      assignmentRows.push(...pageRows);
+      if (pageRows.length < FRAGEBOGEN_STATUS_PAGE_SIZE) break;
+    }
+
+    const marketIds = Array.from(new Set(assignmentRows.map((row) => row.market_id).filter(Boolean)));
+    const marketRows = marketIds.length > 0
+      ? await fetchRowsByIdChunks(
+          freshClient,
+          'markets',
+          'id, internal_id, name, chain, address, postal_code, city, gebietsleiter_id, gebietsleiter_name, is_active',
+          marketIds
+        ) as FragebogenStatusMarketRow[]
+      : [];
+    const completedResponses = await fetchPagedCompletedFragebogenResponses(freshClient, {
+      fragebogenId: id,
+      marketIds
+    });
+
+    const marketById = new Map(marketRows.map((market) => [market.id, market]));
+    const completedByMarket = new Map<string, { responseId: string; completedAt: string | null; completedBy: string; responseCount: number }>();
+
+    for (const response of completedResponses) {
+      const user = response.user;
+      const completedBy = [user?.first_name, user?.last_name].filter(Boolean).join(' ').trim();
+      const current = completedByMarket.get(response.market_id);
+
+      if (!current) {
+        completedByMarket.set(response.market_id, {
+          responseId: response.id,
+          completedAt: response.completed_at,
+          completedBy,
+          responseCount: 1
+        });
+        continue;
+      }
+
+      current.responseCount += 1;
+      if (String(response.completed_at || '') > String(current.completedAt || '')) {
+        current.responseId = response.id;
+        current.completedAt = response.completed_at;
+        current.completedBy = completedBy;
+      }
+    }
+
+    const marketsPayload = marketIds
+      .map((marketId) => {
+        const market = marketById.get(marketId);
+        const completed = completedByMarket.get(marketId) || null;
+
+        return {
+          id: marketId,
+          internalId: market?.internal_id || '',
+          name: market?.name || marketId,
+          chain: market?.chain || '',
+          address: market?.address || '',
+          postalCode: market?.postal_code || '',
+          city: market?.city || '',
+          gebietsleiterId: market?.gebietsleiter_id || '',
+          gebietsleiterName: market?.gebietsleiter_name || '',
+          isActive: market?.is_active !== false,
+          completed: Boolean(completed),
+          completedAt: completed?.completedAt || null,
+          completedBy: completed?.completedBy || '',
+          responseId: completed?.responseId || null,
+          responseCount: completed?.responseCount || 0
+        };
+      })
+      .sort((a, b) =>
+        String(a.chain || '').localeCompare(String(b.chain || ''))
+        || String(a.name || '').localeCompare(String(b.name || ''))
+        || String(a.internalId || '').localeCompare(String(b.internalId || ''))
+      );
+
+    const completedMarkets = marketsPayload.filter((market) => market.completed).length;
+
+    res.json({
+      fragebogen: {
+        id: fragebogen.id,
+        name: fragebogen.name,
+        description: fragebogen.description,
+        startDate: fragebogen.start_date,
+        endDate: fragebogen.end_date,
+        status: fragebogen.status
+      },
+      markets: marketsPayload,
+      summary: {
+        totalMarkets: marketsPayload.length,
+        completedMarkets,
+        openMarkets: Math.max(marketsPayload.length - completedMarkets, 0)
+      }
+    });
+  } catch (error: any) {
+    console.error('Error fetching fragebogen market status:');
     sendInternalError(res);
   }
 });
