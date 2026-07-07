@@ -28,7 +28,7 @@ const WELLEN_PHOTO_MAX_BYTES = 8 * 1024 * 1024;
 const WELLE_SELECT_COLUMNS = 'id, name, description, start_date, end_date, status, types, goal_type, goal_percentage, goal_value, image_url, foto_enabled, foto_only, foto_header, foto_description, no_limit_welle, is_deleted, created_at, updated_at';
 const WELLE_DISPLAY_SELECT_COLUMNS = 'id, welle_id, name, target_number, item_value, display_order, description, image_url, picture_url, ve, ve_size, vpe';
 const WELLE_KARTONWARE_SELECT_COLUMNS = 'id, welle_id, name, target_number, item_value, kartonware_order, description, image_url, picture_url, ve, ve_size, vpe';
-const WELLE_EINZELPRODUKT_SELECT_COLUMNS = 'id, welle_id, name, target_number, item_value, einzelprodukt_order, description, image_url, picture_url, ve, ve_size, vpe';
+const WELLE_EINZELPRODUKT_SELECT_COLUMNS = 'id, welle_id, name, target_number, item_value, einzelprodukt_order, description, image_url, picture_url, artikel_nr, ve, ve_size, vpe';
 const WELLE_PHOTO_TAG_SELECT_COLUMNS = 'id, welle_id, tag_name, tag_type, tag_order, created_at';
 const WELLE_PALETTE_SELECT_COLUMNS = 'id, welle_id, name, description, image_url, picture_url, size, palette_order';
 const WELLE_PALETTE_PRODUCT_SELECT_COLUMNS = 'id, palette_id, name, value_per_ve, ve, ean, product_order';
@@ -37,6 +37,12 @@ const WELLE_SCHUETTE_PRODUCT_SELECT_COLUMNS = 'id, schuette_id, name, value_per_
 const WELLE_KW_DAY_SELECT_COLUMNS = 'id, welle_id, kw, days, kw_order';
 const WELLEN_SUBMISSION_SELECT_COLUMNS = 'id, welle_id, gebietsleiter_id, market_id, item_type, item_id, quantity, value_per_unit, photo_url, created_at';
 const WELLEN_PHOTO_SELECT_COLUMNS = 'id, welle_id, gebietsleiter_id, market_id, photo_url, tags, comment, submission_batch_id, created_at';
+
+const parseOptionalPositiveInt = (value: unknown): number | null => {
+  if (value === null || value === undefined || String(value).trim() === '') return null;
+  const parsed = parseInt(String(value).replace(/^VE\s*:\s*/i, '').trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
 
 function extractStoragePathFromValue(value: string, bucket: string): string | null {
   const trimmed = String(value || '').trim();
@@ -266,23 +272,33 @@ export function aggregateSubmissions(submissions: any[]): Array<{
 async function resolveEinzelproduktMap(
   client: ReturnType<typeof createFreshClient>,
   einzelproduktIds: string[]
-): Promise<Map<string, { name: string; itemValue: number }>> {
-  const result = new Map<string, { name: string; itemValue: number }>();
+): Promise<Map<string, { name: string; itemValue: number; artikelNr: string | null; ve: number | string | null }>> {
+  const result = new Map<string, { name: string; itemValue: number; artikelNr: string | null; ve: number | string | null }>();
   if (einzelproduktIds.length === 0) return result;
 
   const [waveRes, masterRes] = await Promise.all([
-    client.from('wellen_einzelprodukte').select('id, name, item_value').in('id', einzelproduktIds),
+    client.from('wellen_einzelprodukte').select('id, name, item_value, artikel_nr, ve, ve_size, vpe').in('id', einzelproduktIds),
     // No is_deleted filter — historical submissions must remain readable after archive
-    client.from('products').select('id, name, price').in('id', einzelproduktIds)
+    client.from('products').select('id, name, price, artikel_nr, content, pallet_size').in('id', einzelproduktIds)
   ]);
 
   // Master products go in first (lower priority)
   for (const p of (masterRes.data || [])) {
-    result.set(p.id, { name: p.name, itemValue: parseFloat(p.price) || 0 });
+    result.set(p.id, {
+      name: p.name,
+      itemValue: parseFloat(p.price) || 0,
+      artikelNr: p.artikel_nr || null,
+      ve: parseOptionalPositiveInt(p.content) ?? p.pallet_size ?? null
+    });
   }
   // Wave-local entries overwrite if present (higher priority)
   for (const e of (waveRes.data || [])) {
-    result.set(e.id, { name: e.name, itemValue: e.item_value || 0 });
+    result.set(e.id, {
+      name: e.name,
+      itemValue: e.item_value || 0,
+      artikelNr: e.artikel_nr || null,
+      ve: e.ve ?? e.ve_size ?? e.vpe ?? null
+    });
   }
 
   return result;
@@ -1871,6 +1887,7 @@ router.get('/', async (req: Request, res: Response) => {
               .reduce((sum, p) => sum + p.current_number, 0),
             picture: e.picture_url,
             itemValue: e.item_value,
+            artikelNr: e.artikel_nr || null,
             ve: e.ve ?? e.ve_size ?? e.vpe ?? null
           })),
           kwDays: (kwDays || []).map(kw => ({
@@ -2644,7 +2661,9 @@ router.get('/:id', async (req: Request, res: Response) => {
           .filter(p => p.item_type === 'einzelprodukt' && p.item_id === e.id)
           .reduce((sum, p) => sum + p.current_number, 0),
         picture: e.picture_url,
-        itemValue: e.item_value
+        itemValue: e.item_value,
+        artikelNr: e.artikel_nr || null,
+        ve: e.ve ?? e.ve_size ?? e.vpe ?? null
       })),
       kwDays: (kwDays || []).map(kw => ({
         kw: kw.kw,
@@ -2803,6 +2822,8 @@ router.post('/', requireAdmin, async (req: Request, res: Response) => {
         target_number: e.targetNumber,
         item_value: e.itemValue || null,
         picture_url: e.picture || null,
+        artikel_nr: e.artikelNr || e.artikel_nr || null,
+        ve: parseOptionalPositiveInt(e.ve),
         einzelprodukt_order: index
       }));
 
@@ -3116,13 +3137,20 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
         const existingId = existingEinzelproduktMap.get(e.name);
         
         if (existingId) {
-          // Update existing einzelprodukt (preserves ID for progress)
-          await freshClient.from('wellen_einzelprodukte').update({
+          const einzelproduktUpdate: any = {
             target_number: e.targetNumber,
             item_value: e.itemValue || null,
             picture_url: e.picture || null,
             einzelprodukt_order: index
-          }).eq('id', existingId);
+          };
+          if ('artikelNr' in e || 'artikel_nr' in e) {
+            einzelproduktUpdate.artikel_nr = e.artikelNr || e.artikel_nr || null;
+          }
+          if ('ve' in e) {
+            einzelproduktUpdate.ve = parseOptionalPositiveInt(e.ve);
+          }
+          // Update existing einzelprodukt (preserves ID for progress)
+          await freshClient.from('wellen_einzelprodukte').update(einzelproduktUpdate).eq('id', existingId);
         } else {
           // Insert new einzelprodukt
           await freshClient.from('wellen_einzelprodukte').insert({
@@ -3131,6 +3159,8 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
             target_number: e.targetNumber,
             item_value: e.itemValue || null,
             picture_url: e.picture || null,
+            artikel_nr: e.artikelNr || e.artikel_nr || null,
+            ve: parseOptionalPositiveInt(e.ve),
             einzelprodukt_order: index
           });
         }
@@ -3625,6 +3655,8 @@ router.get('/:welleId/gl-submissions/:glId', requireSelfOrAdmin(req => req.param
         marketChain: market?.chain || '',
         itemType: entry.item_type,
         itemName: item?.name || 'Unknown',
+        artikelNr: item?.artikelNr || null,
+        ve: item?.ve ?? null,
         quantity: entry.quantity,
         valuePerUnit: item?.item_value ?? item?.itemValue ?? entry.value_per_unit ?? 0,
         value: entry.quantity * (item?.item_value ?? item?.itemValue ?? entry.value_per_unit ?? 0),
@@ -3902,6 +3934,8 @@ router.get('/:id/all-progress', requireAdmin, async (req: Request, res: Response
         marketCity: market?.city || '',
         itemType: entry.item_type as 'display' | 'kartonware' | 'einzelprodukt',
         itemName: item?.name || 'Unknown',
+        artikelNr: item?.artikelNr || null,
+        ve: item?.ve ?? null,
         quantity: entry.quantity,
         value: entry.quantity * (item?.item_value ?? item?.itemValue ?? entry.value_per_unit ?? 0),
         timestamp: entry.created_at,
@@ -4650,7 +4684,15 @@ router.get('/:id/markets-status', requireAdmin, async (req: Request, res: Respon
               itemName = e?.name || 'Einzelprodukt';
               itemValue = (e?.itemValue || 0) * s.quantity;
             }
-            items.push({ type: s.item_type, name: itemName, quantity: s.quantity, value: itemValue });
+            const einzelprodukt = s.item_type === 'einzelprodukt' ? einzelprodukteMap.get(s.item_id) : null;
+            items.push({
+              type: s.item_type,
+              name: itemName,
+              quantity: s.quantity,
+              value: itemValue,
+              artikelNr: einzelprodukt?.artikelNr || null,
+              ve: einzelprodukt?.ve ?? null
+            });
           }
           
           // Group palette products by parent palette - direct ID match only
@@ -5161,12 +5203,12 @@ router.get('/market/:marketId/pending-photos', async (req: AuthRequest, res: Res
     ]);
 
     // Build lookups
-    const itemDetails: Record<string, { name: string; parentId?: string }> = {};
+    const itemDetails: Record<string, { name: string; parentId?: string; artikelNr?: string | null; ve?: number | string | null }> = {};
     const parentNames: Record<string, string> = {};
 
     (displays.data || []).forEach((d: any) => { itemDetails[d.id] = { name: d.name }; });
     (kartonware.data || []).forEach((k: any) => { itemDetails[k.id] = { name: k.name }; });
-    einzelprodukteMap.forEach((e, id) => { itemDetails[id] = { name: e.name }; });
+    einzelprodukteMap.forEach((e, id) => { itemDetails[id] = { name: e.name, artikelNr: e.artikelNr, ve: e.ve }; });
     (paletteProducts.data || []).forEach((p: any) => { itemDetails[p.id] = { name: p.name, parentId: p.palette_id }; });
     (schutteProducts.data || []).forEach((s: any) => { itemDetails[s.id] = { name: s.name, parentId: s.schuette_id }; });
     
@@ -5231,6 +5273,8 @@ router.get('/market/:marketId/pending-photos', async (req: AuthRequest, res: Res
           id: sub.id,
           itemName,
           itemType: sub.item_type,
+          artikelNr: details?.artikelNr || null,
+          ve: details?.ve ?? null,
           quantity: sub.quantity,
           welleName: sub.wellen?.name || 'Unbekannt',
           createdAt: sub.created_at
