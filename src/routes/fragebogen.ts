@@ -149,7 +149,7 @@ const FB_MODULE_SELECT = 'id, name, description, archived, is_deleted, deleted_a
 const FB_MODULE_RULE_SELECT = 'id, module_id, trigger_local_id, trigger_answer, operator, trigger_answer_max, action, target_local_ids, created_at, updated_at';
 const FB_FRAGEBOGEN_SELECT = 'id, name, description, start_date, end_date, status, archived, is_deleted, deleted_at, created_by, created_at, updated_at';
 const FB_RESPONSE_SELECT = 'id, fragebogen_id, gebietsleiter_id, market_id, zeiterfassung_submission_id, status, started_at, completed_at';
-const FB_DAY_TRACKING_SELECT = 'id, gebietsleiter_id, tracking_date, day_start_time, day_end_time, skipped_first_fahrzeit, km_stand_start, km_stand_end, total_fahrzeit, total_besuchszeit, total_unterbrechung, total_arbeitszeit, markets_visited, status, created_at, updated_at';
+const FB_DAY_TRACKING_SELECT = 'id, gebietsleiter_id, tracking_date, day_start_time, day_end_time, skipped_first_fahrzeit, km_stand_start, km_stand_start_deferred, km_stand_end, total_fahrzeit, total_besuchszeit, total_unterbrechung, total_arbeitszeit, markets_visited, status, created_at, updated_at';
 const FB_ZEITERFASSUNG_SELECT = 'id, gebietsleiter_id, market_id, market_start_time, market_end_time, besuchszeit_von, besuchszeit_bis, besuchszeit_diff, fahrzeit_von, fahrzeit_bis, fahrzeit_diff, calculated_fahrzeit, visit_order, kommentar, created_at';
 const FB_ZUSATZ_ZEITERFASSUNG_SELECT = 'id, gebietsleiter_id, market_id, entry_date, reason, reason_label, zeit_von, zeit_bis, zeit_diff, kommentar, schulung_ort, is_work_time_deduction, created_at, updated_at';
 const WELLEN_SUBMISSION_FRAGEBOGEN_SELECT = 'id, welle_id, gebietsleiter_id, market_id, item_type, item_id, quantity, value_per_unit, photo_url, created_at, wellen:welle_id ( goal_type )';
@@ -4691,6 +4691,53 @@ const getCurrentTimeString = (): string => {
   return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
 };
 
+const hasKmStandInput = (value: unknown): boolean =>
+  value !== undefined && value !== null && String(value).trim() !== '';
+
+const parseKmStandInput = (value: unknown): number | null => {
+  if (!hasKmStandInput(value)) return null;
+
+  let normalized = String(value).trim().replace(/\s/g, '');
+  if (normalized.includes(',') && normalized.includes('.')) {
+    normalized = normalized.replace(/\./g, '').replace(',', '.');
+  } else if (/^\d{1,3}(\.\d{3})+$/.test(normalized)) {
+    normalized = normalized.replace(/\./g, '');
+  } else {
+    normalized = normalized.replace(',', '.');
+  }
+
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+};
+
+const normalizeExistingKm = (value: unknown): number | null => {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const DAY_TRACKING_ENFORCEMENT_START = '2026-07-07T00:00:00.000Z';
+
+const findPendingActiveDay = async (
+  freshClient: ReturnType<typeof createFreshClient>,
+  glId: string,
+  beforeDate: string
+) => {
+  const { data, error } = await freshClient
+    .from('fb_day_tracking')
+    .select(FB_DAY_TRACKING_SELECT)
+    .eq('gebietsleiter_id', glId)
+    .eq('status', 'active')
+    .lt('tracking_date', beforeDate)
+    .gte('created_at', DAY_TRACKING_ENFORCEMENT_START)
+    .order('tracking_date', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+};
+
 // GET ALL DAY TRACKING (for admin)
 router.get('/day-tracking-all', requireAdmin, async (req: Request, res: Response) => {
   try {
@@ -4721,6 +4768,24 @@ router.post('/day-tracking/start', requireSelfOrAdmin(req => req.body.gebietslei
     
     const today = new Date().toISOString().split('T')[0];
     const dayStartTime = start_time || getCurrentTimeString();
+    if (!isValidTimeInput(dayStartTime)) {
+      return res.status(400).json({ error: 'start_time is invalid', code: 'INVALID_START_TIME' });
+    }
+
+    const pendingDay = await findPendingActiveDay(freshClient, effectiveGlId, today);
+    if (pendingDay) {
+      return res.status(409).json({
+        error: `Bitte schliesse zuerst den offenen Tag vom ${pendingDay.tracking_date} ab.`,
+        code: 'PENDING_DAY_CLOSURE',
+        dayTracking: pendingDay
+      });
+    }
+
+    const hasStartKm = hasKmStandInput(km_stand_start);
+    const parsedStartKm = parseKmStandInput(km_stand_start);
+    if (hasStartKm && parsedStartKm === null) {
+      return res.status(400).json({ error: 'km_stand_start is invalid', code: 'INVALID_KM_START' });
+    }
     
     // Check if a record already exists for today
     const { data: existing } = await freshClient
@@ -4740,10 +4805,12 @@ router.post('/day-tracking/start', requireSelfOrAdmin(req => req.body.gebietslei
       day_start_time: dayStartTime,
       skipped_first_fahrzeit: skip_fahrzeit || false,
       status: 'active',
-      markets_visited: 0
+      markets_visited: 0,
+      km_stand_start_deferred: !hasStartKm
     };
-    if (km_stand_start !== undefined && km_stand_start !== null && km_stand_start !== '') {
-      upsertData.km_stand_start = parseFloat(km_stand_start);
+    if (parsedStartKm !== null) {
+      upsertData.km_stand_start = parsedStartKm;
+      upsertData.km_stand_start_deferred = false;
     }
     
     // Create or update day tracking record
@@ -4769,17 +4836,75 @@ router.post('/day-tracking/start', requireSelfOrAdmin(req => req.body.gebietslei
 router.patch('/day-tracking/update-times', requireSelfOrAdmin(req => req.body.gebietsleiter_id), async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
-    const { gebietsleiter_id, date, day_start_time, day_end_time } = req.body;
+    const { gebietsleiter_id, date, day_start_time, day_end_time, km_stand_start, km_stand_end } = req.body;
     const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
     
     if (!effectiveGlId || !date) {
       return res.status(400).json({ error: 'gebietsleiter_id and date are required' });
+    }
+
+    if (day_start_time !== undefined && !isValidTimeInput(day_start_time)) {
+      return res.status(400).json({ error: 'day_start_time is invalid', code: 'INVALID_START_TIME' });
+    }
+    if (day_end_time !== undefined && !isValidTimeInput(day_end_time)) {
+      return res.status(400).json({ error: 'day_end_time is invalid', code: 'INVALID_END_TIME' });
+    }
+
+    const { data: existing, error: fetchError } = await freshClient
+      .from('fb_day_tracking')
+      .select(FB_DAY_TRACKING_SELECT)
+      .eq('gebietsleiter_id', effectiveGlId)
+      .eq('tracking_date', date)
+      .maybeSingle();
+
+    if (fetchError) throw fetchError;
+    if (!existing) {
+      return res.status(404).json({ error: 'No day tracking found for date' });
+    }
+
+    const hasStartKm = hasKmStandInput(km_stand_start);
+    const hasEndKm = hasKmStandInput(km_stand_end);
+    const parsedStartKm = parseKmStandInput(km_stand_start);
+    const parsedEndKm = parseKmStandInput(km_stand_end);
+
+    if (hasStartKm && parsedStartKm === null) {
+      return res.status(400).json({ error: 'km_stand_start is invalid', code: 'INVALID_KM_START' });
+    }
+    if (hasEndKm && parsedEndKm === null) {
+      return res.status(400).json({ error: 'km_stand_end is invalid', code: 'INVALID_KM_END' });
+    }
+
+    const nextStartKm = hasStartKm ? parsedStartKm : normalizeExistingKm(existing.km_stand_start);
+    const nextEndKm = hasEndKm ? parsedEndKm : normalizeExistingKm(existing.km_stand_end);
+
+    if (day_start_time !== undefined && nextStartKm === null) {
+      return res.status(400).json({
+        error: 'Bitte gib den KM-Stand zur Startzeit ein.',
+        code: 'KM_START_REQUIRED'
+      });
+    }
+    if (day_end_time !== undefined && nextEndKm === null) {
+      return res.status(400).json({
+        error: 'Bitte gib den KM-Stand zur Endzeit ein.',
+        code: 'KM_END_REQUIRED'
+      });
+    }
+    if (nextStartKm !== null && nextEndKm !== null && nextEndKm < nextStartKm) {
+      return res.status(400).json({
+        error: 'Der End-KM-Stand darf nicht kleiner als der Start-KM-Stand sein.',
+        code: 'KM_END_BEFORE_START'
+      });
     }
     
     // Build update object with only provided fields
     const updateData: Record<string, any> = {};
     if (day_start_time !== undefined) updateData.day_start_time = day_start_time;
     if (day_end_time !== undefined) updateData.day_end_time = day_end_time;
+    if (hasStartKm && parsedStartKm !== null) {
+      updateData.km_stand_start = parsedStartKm;
+      updateData.km_stand_start_deferred = false;
+    }
+    if (hasEndKm && parsedEndKm !== null) updateData.km_stand_end = parsedEndKm;
     
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({ error: 'No fields to update' });
@@ -4815,10 +4940,34 @@ router.patch('/day-tracking/update-km-start', requireSelfOrAdmin(req => req.body
     }
 
     const today = new Date().toISOString().split('T')[0];
+    const parsedStartKm = parseKmStandInput(km_stand_start);
+    if (parsedStartKm === null) {
+      return res.status(400).json({ error: 'km_stand_start is invalid', code: 'INVALID_KM_START' });
+    }
+
+    const { data: existing, error: fetchError } = await freshClient
+      .from('fb_day_tracking')
+      .select(FB_DAY_TRACKING_SELECT)
+      .eq('gebietsleiter_id', effectiveGlId)
+      .eq('tracking_date', today)
+      .maybeSingle();
+
+    if (fetchError) throw fetchError;
+    if (!existing) {
+      return res.status(404).json({ error: 'No day tracking found for today' });
+    }
+
+    const existingEndKm = normalizeExistingKm(existing.km_stand_end);
+    if (existingEndKm !== null && existingEndKm < parsedStartKm) {
+      return res.status(400).json({
+        error: 'Der End-KM-Stand darf nicht kleiner als der Start-KM-Stand sein.',
+        code: 'KM_END_BEFORE_START'
+      });
+    }
 
     const { data, error } = await freshClient
       .from('fb_day_tracking')
-      .update({ km_stand_start: parseFloat(String(km_stand_start).replace(',', '.')) })
+      .update({ km_stand_start: parsedStartKm, km_stand_start_deferred: false })
       .eq('gebietsleiter_id', effectiveGlId)
       .eq('tracking_date', today)
       .select(FB_DAY_TRACKING_SELECT)
@@ -4845,16 +4994,50 @@ router.patch('/day-tracking/update-km', requireSelfOrAdmin(req => req.body.gebie
       return res.status(400).json({ error: 'gebietsleiter_id and date are required' });
     }
 
-    const updateData: Record<string, any> = {};
-    if (km_stand_start !== undefined && km_stand_start !== null && km_stand_start !== '') {
-      updateData.km_stand_start = parseFloat(String(km_stand_start).replace(',', '.'));
+    const { data: existing, error: fetchError } = await freshClient
+      .from('fb_day_tracking')
+      .select(FB_DAY_TRACKING_SELECT)
+      .eq('gebietsleiter_id', effectiveGlId)
+      .eq('tracking_date', date)
+      .maybeSingle();
+
+    if (fetchError) throw fetchError;
+    if (!existing) {
+      return res.status(404).json({ error: 'No day tracking found for date' });
     }
-    if (km_stand_end !== undefined && km_stand_end !== null && km_stand_end !== '') {
-      updateData.km_stand_end = parseFloat(String(km_stand_end).replace(',', '.'));
+
+    const updateData: Record<string, any> = {};
+    const hasStartKm = hasKmStandInput(km_stand_start);
+    const hasEndKm = hasKmStandInput(km_stand_end);
+    const parsedStartKm = parseKmStandInput(km_stand_start);
+    const parsedEndKm = parseKmStandInput(km_stand_end);
+
+    if (hasStartKm && parsedStartKm === null) {
+      return res.status(400).json({ error: 'km_stand_start is invalid', code: 'INVALID_KM_START' });
+    }
+    if (hasEndKm && parsedEndKm === null) {
+      return res.status(400).json({ error: 'km_stand_end is invalid', code: 'INVALID_KM_END' });
+    }
+
+    if (hasStartKm && parsedStartKm !== null) {
+      updateData.km_stand_start = parsedStartKm;
+      updateData.km_stand_start_deferred = false;
+    }
+    if (hasEndKm && parsedEndKm !== null) {
+      updateData.km_stand_end = parsedEndKm;
     }
 
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({ error: 'No KM fields to update' });
+    }
+
+    const nextStartKm = hasStartKm ? parsedStartKm : normalizeExistingKm(existing.km_stand_start);
+    const nextEndKm = hasEndKm ? parsedEndKm : normalizeExistingKm(existing.km_stand_end);
+    if (nextStartKm !== null && nextEndKm !== null && nextEndKm < nextStartKm) {
+      return res.status(400).json({
+        error: 'Der End-KM-Stand darf nicht kleiner als der Start-KM-Stand sein.',
+        code: 'KM_END_BEFORE_START'
+      });
     }
 
     const { data, error } = await freshClient
@@ -4879,51 +5062,89 @@ router.patch('/day-tracking/update-km', requireSelfOrAdmin(req => req.body.gebie
 router.post('/day-tracking/end', requireSelfOrAdmin(req => req.body.gebietsleiter_id), async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
-    const { gebietsleiter_id, end_time, force_close, km_stand_end } = req.body;
+    const { gebietsleiter_id, end_time, force_close, km_stand_start, km_stand_end, tracking_date, date } = req.body;
     const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
     
     if (!effectiveGlId || !end_time) {
       return res.status(400).json({ error: 'gebietsleiter_id and end_time are required' });
     }
+
+    if (!isValidTimeInput(end_time)) {
+      return res.status(400).json({ error: 'end_time is invalid', code: 'INVALID_END_TIME' });
+    }
     
     const today = new Date().toISOString().split('T')[0];
+    const targetDate = tracking_date || date || today;
+    const hasStartKm = hasKmStandInput(km_stand_start);
+    const parsedStartKm = parseKmStandInput(km_stand_start);
+    const parsedEndKm = parseKmStandInput(km_stand_end);
+
+    if (hasStartKm && parsedStartKm === null) {
+      return res.status(400).json({ error: 'km_stand_start is invalid', code: 'INVALID_KM_START' });
+    }
+    if (parsedEndKm === null) {
+      return res.status(400).json({
+        error: 'Bitte gib den KM-Stand bei Tagesende ein.',
+        code: 'KM_END_REQUIRED'
+      });
+    }
     
     // Get current day tracking record
     const { data: dayTracking, error: fetchError } = await freshClient
       .from('fb_day_tracking')
       .select(FB_DAY_TRACKING_SELECT)
       .eq('gebietsleiter_id', effectiveGlId)
-      .eq('tracking_date', today)
+      .eq('tracking_date', targetDate)
       .eq('status', 'active')
-      .single();
+      .maybeSingle();
     
     if (fetchError || !dayTracking) {
-      return res.status(404).json({ error: 'No active day tracking found for today' });
+      if (fetchError) throw fetchError;
+      return res.status(404).json({ error: 'No active day tracking found for date' });
+    }
+
+    if (!dayTracking.day_start_time) {
+      return res.status(400).json({ error: 'day_start_time is missing', code: 'DAY_START_TIME_REQUIRED' });
+    }
+
+    const existingStartKm = normalizeExistingKm(dayTracking.km_stand_start);
+    const finalStartKm = existingStartKm !== null ? existingStartKm : parsedStartKm;
+    if (finalStartKm === null) {
+      return res.status(400).json({
+        error: 'Bitte trage zuerst den Start-KM-Stand nach.',
+        code: 'KM_START_REQUIRED'
+      });
+    }
+    if (parsedEndKm < finalStartKm) {
+      return res.status(400).json({
+        error: 'Der End-KM-Stand darf nicht kleiner als der Start-KM-Stand sein.',
+        code: 'KM_END_BEFORE_START'
+      });
     }
     
-    // Get all market visits for today to calculate totals
+    // Get all market visits for the selected day to calculate totals
     const { data: visits } = await freshClient
       .from('fb_zeiterfassung_submissions')
       .select(FB_ZEITERFASSUNG_SELECT)
       .eq('gebietsleiter_id', effectiveGlId)
-      .gte('created_at', `${today}T00:00:00`)
-      .lt('created_at', `${today}T23:59:59`)
+      .gte('created_at', `${targetDate}T00:00:00`)
+      .lt('created_at', `${targetDate}T23:59:59`)
       .order('created_at', { ascending: true });
     
-    // Get all Unterbrechung entries for today
+    // Get all Unterbrechung entries for the selected day
     const { data: unterbrechungen } = await freshClient
       .from('fb_zusatz_zeiterfassung')
       .select(FB_ZUSATZ_ZEITERFASSUNG_SELECT)
       .eq('gebietsleiter_id', effectiveGlId)
-      .eq('entry_date', today)
+      .eq('entry_date', targetDate)
       .eq('reason', 'unterbrechung');
 
-    // Load all zusatz entries for today to detect homeoffice-as-last-action
+    // Load all zusatz entries for the selected day to detect homeoffice-as-last-action
     const { data: allZusatzToday } = await freshClient
       .from('fb_zusatz_zeiterfassung')
       .select('reason, zeit_bis')
       .eq('gebietsleiter_id', effectiveGlId)
-      .eq('entry_date', today);
+      .eq('entry_date', targetDate);
     
     // Calculate totals
     let totalFahrzeitMinutes = 0;
@@ -5025,7 +5246,9 @@ router.post('/day-tracking/end', requireSelfOrAdmin(req => req.body.gebietsleite
         total_arbeitszeit: formatInterval(totalArbeitszeitMinutes),
         markets_visited: visits?.length || 0,
         status: force_close ? 'force_closed' : 'completed',
-        ...(km_stand_end !== undefined && km_stand_end !== null && km_stand_end !== '' ? { km_stand_end: parseFloat(km_stand_end) } : {})
+        km_stand_start: finalStartKm,
+        km_stand_start_deferred: false,
+        km_stand_end: parsedEndKm
       })
       .eq('id', dayTracking.id)
       .select(FB_DAY_TRACKING_SELECT)
@@ -5037,6 +5260,25 @@ router.post('/day-tracking/end', requireSelfOrAdmin(req => req.body.gebietsleite
     res.json(data);
   } catch (error: any) {
     console.error('Error ending day tracking');
+    sendInternalError(res);
+  }
+});
+
+// GET OLDEST ACTIVE DAY BEFORE TODAY - used to force clean closure before starting a newer day
+router.get('/day-tracking/pending-closure/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: Request, res: Response) => {
+  try {
+    const freshClient = createFreshClient();
+    const { glId } = req.params;
+    const beforeDate = (req.query.beforeDate as string) || new Date().toISOString().split('T')[0];
+
+    const pendingDay = await findPendingActiveDay(freshClient, glId, beforeDate);
+    if (!pendingDay) {
+      return res.status(404).json({ error: 'No pending day closure found' });
+    }
+
+    res.json(pendingDay);
+  } catch (error: any) {
+    console.error('Error getting pending day closure');
     sendInternalError(res);
   }
 });
