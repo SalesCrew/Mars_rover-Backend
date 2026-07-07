@@ -4906,6 +4906,7 @@ router.get('/export/submissions', requireAdmin, async (req: Request, res: Respon
     // Transform submissions to readable format
     const excelData = submissions.map(sub => {
       const market = marketMap.get(sub.market_id);
+      const einzelproduktMeta = sub.item_type === 'einzelprodukt' ? einzelprodukteMapExport.get(sub.item_id) : null;
       return {
         'ID': sub.id,
         'Welle ID': sub.welle_id,
@@ -4920,6 +4921,8 @@ router.get('/export/submissions', requireAdmin, async (req: Request, res: Respon
         'Item Type': sub.item_type,
         'Item ID': sub.item_id,
         'Item Name': itemMap.get(sub.item_id) || sub.item_id,
+        'Artikelnummer': einzelproduktMeta?.artikelNr || '',
+        'VE': einzelproduktMeta?.ve ?? '',
         'Quantity': sub.quantity,
         'Value Per Unit': sub.value_per_unit,
         'Created At': sub.created_at
@@ -4940,6 +4943,8 @@ router.get('/export/submissions', requireAdmin, async (req: Request, res: Respon
       12, // Item Type
       38, // Item ID
       40, // Item Name
+      18, // Artikelnummer
+      10, // VE
       10, // Quantity
       15, // Value Per Unit
       25, // Created At
@@ -5067,6 +5072,7 @@ router.get('/export/progress', requireAdmin, async (req: Request, res: Response)
     const glMap = new Map((gls || []).map(g => [g.id, g.name]));
     
     const itemIds = [...new Set(submissions.map(p => p.item_id).filter(Boolean))];
+    const einzelproduktIdsForExport = submissions.filter(s => s.item_type === 'einzelprodukt').map(s => s.item_id).filter(Boolean);
     
     const [wellenDisplays, wellenPaletten, wellenSchuetten, wellenKartonware] = await Promise.all([
       freshClient.from('wellen_displays').select('id, name').in('id', itemIds),
@@ -5080,26 +5086,33 @@ router.get('/export/progress', requireAdmin, async (req: Request, res: Response)
     (wellenPaletten.data || []).forEach(p => itemMap.set(p.id, p.name));
     (wellenSchuetten.data || []).forEach(s => itemMap.set(s.id, s.name));
     (wellenKartonware.data || []).forEach(k => itemMap.set(k.id, k.name));
+    const einzelprodukteMapExport = await resolveEinzelproduktMap(freshClient, einzelproduktIdsForExport);
+    einzelprodukteMapExport.forEach((e, id) => { if (!itemMap.has(id)) itemMap.set(id, e.name); });
     
-    const excelData = submissions.map(s => ({
-      'ID': s.id,
-      'Welle ID': s.welle_id,
-      'Welle Name': welleMap.get(s.welle_id) || s.welle_id,
-      'Gebietsleiter ID': s.gebietsleiter_id,
-      'Gebietsleiter Name': glMap.get(s.gebietsleiter_id) || s.gebietsleiter_id,
-      'Market ID': s.market_id,
-      'Item Type': s.item_type,
-      'Item ID': s.item_id,
-      'Item Name': itemMap.get(s.item_id) || s.item_id,
-      'Quantity': s.quantity,
-      'Value Per Unit': s.value_per_unit,
-      'Created At': s.created_at
-    }));
+    const excelData = submissions.map(s => {
+      const einzelproduktMeta = s.item_type === 'einzelprodukt' ? einzelprodukteMapExport.get(s.item_id) : null;
+      return {
+        'ID': s.id,
+        'Welle ID': s.welle_id,
+        'Welle Name': welleMap.get(s.welle_id) || s.welle_id,
+        'Gebietsleiter ID': s.gebietsleiter_id,
+        'Gebietsleiter Name': glMap.get(s.gebietsleiter_id) || s.gebietsleiter_id,
+        'Market ID': s.market_id,
+        'Item Type': s.item_type,
+        'Item ID': s.item_id,
+        'Item Name': itemMap.get(s.item_id) || s.item_id,
+        'Artikelnummer': einzelproduktMeta?.artikelNr || '',
+        'VE': einzelproduktMeta?.ve ?? '',
+        'Quantity': s.quantity,
+        'Value Per Unit': s.value_per_unit,
+        'Created At': s.created_at
+      };
+    });
     
     const buffer = await createExcelBuffer('Submissions', excelData, [
       38, 38, 30, 38, 25,
-      20, 12, 38, 40, 10,
-      15, 25
+      20, 12, 38, 40, 18,
+      10, 10, 15, 25
     ]);
     
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
