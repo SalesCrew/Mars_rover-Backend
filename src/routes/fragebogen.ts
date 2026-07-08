@@ -475,6 +475,23 @@ function getDistributionQuarterMonthRange(quarter: 1 | 2 | 3 | 4): { startMonth:
   return { startMonth, endMonth: startMonth + 2 };
 }
 
+function getDistributionQuarterParts(date: Date): { quarterKey: string; quarterLabel: string } {
+  const quarter = Math.floor(date.getMonth() / 3) + 1;
+  const year = date.getFullYear();
+  return {
+    quarterKey: `${year}-Q${quarter}`,
+    quarterLabel: `Q${quarter} ${year}`
+  };
+}
+
+function formatDistributionDateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function formatDistributionDateLabel(date: Date): string {
+  return `${String(date.getDate()).padStart(2, '0')}.${String(date.getMonth() + 1).padStart(2, '0')}.${date.getFullYear()}`;
+}
+
 function getStableDistributionOffset(seed: string, modulo: number): number {
   if (modulo <= 1) return 0;
   let hash = 2166136261;
@@ -6329,8 +6346,14 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
         if (Number.isNaN(completedDate.getTime())) return null;
         const date = applyDistributionQuarterCompression(completedDate, resp.id, quarterCompression);
         if (Number.isNaN(date.getTime())) return null;
+        const dateKey = formatDistributionDateKey(date);
+        const dateLabel = formatDistributionDateLabel(date);
+        const originalDateKey = formatDistributionDateKey(completedDate);
+        const originalDateLabel = formatDistributionDateLabel(completedDate);
+        const dateWasCompressed = quarterCompression.enabled && dateKey !== originalDateKey;
         const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
         const monthLabel = `${String(date.getMonth() + 1).padStart(2, '0')}.${date.getFullYear()}`;
+        const { quarterKey, quarterLabel } = getDistributionQuarterParts(date);
         const { weekYear, week } = getIsoWeekParts(date);
         const weekKey = `${weekYear}-W${String(week).padStart(2, '0')}`;
         const weekLabel = `KW ${String(week).padStart(2, '0')} ${weekYear}`;
@@ -6338,8 +6361,15 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
         const targets = questionTargets.get(answer.question_id);
 
         return {
+          dateKey,
+          dateLabel,
+          originalDateKey,
+          originalDateLabel,
+          dateWasCompressed,
           monthKey,
           monthLabel,
+          quarterKey,
+          quarterLabel,
           weekKey,
           weekLabel,
           fragebogenName: fragebogenById.get(resp.fragebogen_id)?.name || resp.fragebogen_id,
@@ -6357,8 +6387,15 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
         };
       })
       .filter(Boolean) as Array<{
+        dateKey: string;
+        dateLabel: string;
+        originalDateKey: string;
+        originalDateLabel: string;
+        dateWasCompressed: boolean;
         monthKey: string;
         monthLabel: string;
+        quarterKey: string;
+        quarterLabel: string;
         weekKey: string;
         weekLabel: string;
         fragebogenName: string;
@@ -6384,6 +6421,7 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
       selectedChains,
       selectedQuestionIds: questionIds,
       selectedTargetFilter: targetFilter,
+      quarterCompression,
       selectedQuestions: (questionRows || []).map((q: any) => ({
         ...questionTargets.get(q.id),
         id: q.id,
