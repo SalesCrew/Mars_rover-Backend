@@ -431,11 +431,89 @@ async function fetchPagedDistributionAnswers(
 
 type DistributionTargetFilter = 'all' | 'distribution' | 'quality';
 type DistributionQuestionTargetFlags = { distributionsziel: boolean; qualitaetsziel: boolean };
+type DistributionQuarterCompression = {
+  enabled: boolean;
+  year: number;
+  quarter: 1 | 2 | 3 | 4;
+};
 
 function normalizeDistributionTargetFilter(value: unknown): DistributionTargetFilter {
   const raw = String(value || 'all').trim().toLowerCase();
   if (raw === 'distribution' || raw === 'quality') return raw;
   return 'all';
+}
+
+function normalizeDistributionQuarterCompression(value: unknown): DistributionQuarterCompression {
+  const raw = (value && typeof value === 'object') ? value as Record<string, unknown> : {};
+  const enabled = raw.enabled === true;
+  const year = Number(raw.year);
+  const quarter = Number(raw.quarter);
+
+  if (
+    !enabled ||
+    !Number.isInteger(year) ||
+    year < 2000 ||
+    year > 2100 ||
+    ![1, 2, 3, 4].includes(quarter)
+  ) {
+    return {
+      enabled: false,
+      year: new Date().getFullYear(),
+      quarter: 1
+    };
+  }
+
+  return {
+    enabled: true,
+    year,
+    quarter: quarter as 1 | 2 | 3 | 4
+  };
+}
+
+function getDistributionQuarterMonthRange(quarter: 1 | 2 | 3 | 4): { startMonth: number; endMonth: number } {
+  const startMonth = (quarter - 1) * 3;
+  return { startMonth, endMonth: startMonth + 2 };
+}
+
+function getStableDistributionOffset(seed: string, modulo: number): number {
+  if (modulo <= 1) return 0;
+  let hash = 2166136261;
+  for (let index = 0; index < seed.length; index += 1) {
+    hash ^= seed.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Math.abs(hash >>> 0) % modulo;
+}
+
+function applyDistributionQuarterCompression(
+  date: Date,
+  responseId: string,
+  compression: DistributionQuarterCompression
+): Date {
+  if (!compression.enabled) return date;
+
+  const { startMonth, endMonth } = getDistributionQuarterMonthRange(compression.quarter);
+  const dateYear = date.getFullYear();
+  const dateMonth = date.getMonth();
+
+  if (dateYear === compression.year && dateMonth >= startMonth && dateMonth <= endMonth) {
+    return date;
+  }
+
+  const quarterStartUtc = Date.UTC(compression.year, startMonth, 1);
+  const quarterEndExclusiveUtc = Date.UTC(compression.year, endMonth + 1, 1);
+  const dayCount = Math.max(1, Math.round((quarterEndExclusiveUtc - quarterStartUtc) / 86400000));
+  const dayOffset = getStableDistributionOffset(responseId, dayCount);
+
+  return new Date(Date.UTC(
+    compression.year,
+    startMonth,
+    1 + dayOffset,
+    date.getUTCHours(),
+    date.getUTCMinutes(),
+    date.getUTCSeconds(),
+    date.getUTCMilliseconds()
+  ));
 }
 
 function isPerfectStoreModuleName(value: unknown): boolean {
@@ -6123,6 +6201,7 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
       new Set((req.body?.chains || []).map((c: string) => String(c).trim()).filter(Boolean))
     );
     const targetFilter = normalizeDistributionTargetFilter(req.body?.target_filter);
+    const quarterCompression = normalizeDistributionQuarterCompression(req.body?.quarter_compression);
 
     if (fragebogenIds.length === 0) {
       return res.status(400).json({ error: 'Mindestens ein Fragebogen muss ausgewählt werden.' });
@@ -6246,7 +6325,9 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
         const market = marketById.get(resp.market_id);
         const chain = String(market?.chain || '').trim();
         const completedAt = String(resp.completed_at || '');
-        const date = new Date(completedAt);
+        const completedDate = new Date(completedAt);
+        if (Number.isNaN(completedDate.getTime())) return null;
+        const date = applyDistributionQuarterCompression(completedDate, resp.id, quarterCompression);
         if (Number.isNaN(date.getTime())) return null;
         const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
         const monthLabel = `${String(date.getMonth() + 1).padStart(2, '0')}.${date.getFullYear()}`;
