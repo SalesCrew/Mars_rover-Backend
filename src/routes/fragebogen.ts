@@ -5482,12 +5482,63 @@ router.get('/day-tracking/:glId/:date/summary', requireSelfOrAdmin(req => req.pa
       .lt('created_at', `${date}T23:59:59`)
       .order('created_at', { ascending: true });
     
+    const marketVisits = (visits || []).map((v: any) => ({
+      ...v,
+      market_name: (v.market as any)?.name || 'Unknown'
+    }));
+
+    const { data: zusatzEntries, error: zusatzEntriesError } = await freshClient
+      .from('fb_zusatz_zeiterfassung')
+      .select('id, entry_date, reason, reason_label, zeit_von, zeit_bis, created_at')
+      .eq('gebietsleiter_id', glId)
+      .eq('entry_date', date);
+    if (zusatzEntriesError) throw zusatzEntriesError;
+
+    const lastEntryCandidates: Array<{ source: string; label: string; time: string | null; date: string; sortTime: string }> = [];
+    for (const visit of marketVisits) {
+      const time = visit.market_end_time || visit.besuchszeit_bis || visit.market_start_time || visit.besuchszeit_von || null;
+      if (time) {
+        lastEntryCandidates.push({
+          source: 'market',
+          label: visit.market_name || 'Marktbesuch',
+          time,
+          date,
+          sortTime: String(time)
+        });
+      }
+    }
+
+    for (const entry of (zusatzEntries || [])) {
+      const time = entry.zeit_bis || entry.zeit_von || null;
+      if (time) {
+        lastEntryCandidates.push({
+          source: 'zusatz',
+          label: entry.reason_label || entry.reason || 'Zusatz-Zeiterfassung',
+          time,
+          date: entry.entry_date || date,
+          sortTime: String(time)
+        });
+      }
+    }
+
+    lastEntryCandidates.sort((a, b) => a.sortTime.localeCompare(b.sortTime));
+    const latestEntry = lastEntryCandidates[lastEntryCandidates.length - 1];
+    const lastEntry = latestEntry ? {
+      source: latestEntry.source,
+      label: latestEntry.label,
+      time: latestEntry.time,
+      date: latestEntry.date
+    } : (dayTracking?.day_start_time ? {
+      source: 'day_start',
+      label: 'Tag gestartet',
+      time: dayTracking.day_start_time,
+      date
+    } : null);
+
     const summary = {
       dayTracking,
-      marketVisits: (visits || []).map(v => ({
-        ...v,
-        market_name: (v.market as any)?.name || 'Unknown'
-      })),
+      marketVisits,
+      lastEntry,
       totalFahrzeit: dayTracking?.total_fahrzeit || '0:00:00',
       totalBesuchszeit: dayTracking?.total_besuchszeit || '0:00:00',
       totalUnterbrechung: dayTracking?.total_unterbrechung || '0:00:00',
