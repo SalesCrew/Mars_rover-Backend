@@ -431,6 +431,11 @@ async function fetchPagedDistributionAnswers(
 
 type DistributionTargetFilter = 'all' | 'distribution' | 'quality';
 type DistributionQuestionTargetFlags = { distributionsziel: boolean; qualitaetsziel: boolean };
+type DistributionQuestionAnalysis = DistributionQuestionTargetFlags & {
+  key: string;
+  label: string;
+  sourceQuestionIds: string[];
+};
 type DistributionQuarterCompression = {
   enabled: boolean;
   year: number;
@@ -441,6 +446,14 @@ function normalizeDistributionTargetFilter(value: unknown): DistributionTargetFi
   const raw = String(value || 'all').trim().toLowerCase();
   if (raw === 'distribution' || raw === 'quality') return raw;
   return 'all';
+}
+
+function normalizeDistributionQuestionLabel(value: unknown): string {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLocaleLowerCase('de-AT')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
 }
 
 function normalizeDistributionQuarterCompression(value: unknown): DistributionQuarterCompression {
@@ -6348,6 +6361,44 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
       });
     }
 
+    const historicalAnalysis = fragebogenRows.length > 1;
+    const questionById = new Map((questionRows || []).map((q: any) => [q.id, q]));
+    const orderedQuestionRows = questionIds
+      .map((questionId) => questionById.get(questionId))
+      .filter(Boolean);
+    const questionAnalysisById = new Map<string, DistributionQuestionAnalysis>();
+    const analysisQuestionsByKey = new Map<string, DistributionQuestionAnalysis>();
+
+    for (const question of orderedQuestionRows) {
+      const targets = questionTargets.get(question.id) || {
+        distributionsziel: false,
+        qualitaetsziel: false
+      };
+      const normalizedLabel = normalizeDistributionQuestionLabel(question.question_text);
+      const analysisKey = historicalAnalysis
+        ? `yesno:${normalizedLabel || question.id}`
+        : question.id;
+      const existing = analysisQuestionsByKey.get(analysisKey);
+
+      if (existing) {
+        existing.sourceQuestionIds.push(question.id);
+        existing.distributionsziel = existing.distributionsziel || targets.distributionsziel;
+        existing.qualitaetsziel = existing.qualitaetsziel || targets.qualitaetsziel;
+        questionAnalysisById.set(question.id, existing);
+        continue;
+      }
+
+      const analysis: DistributionQuestionAnalysis = {
+        key: analysisKey,
+        label: question.question_text || question.id,
+        sourceQuestionIds: [question.id],
+        distributionsziel: targets.distributionsziel,
+        qualitaetsziel: targets.qualitaetsziel
+      };
+      analysisQuestionsByKey.set(analysisKey, analysis);
+      questionAnalysisById.set(question.id, analysis);
+    }
+
     const responses = await fetchPagedDistributionResponses(freshClient, fragebogenIds);
 
     const completedResponses = (responses || []).filter((r: any) => r.market_id && r.completed_at);
@@ -6366,7 +6417,6 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
     const marketById = new Map((marketRows || []).map((m: any) => [m.id, m]));
     const glById = new Map((glRows || []).map((u: any) => [u.id, `${u.first_name || ''} ${u.last_name || ''}`.trim() || 'Unbekannt']));
     const fragebogenById = new Map((fragebogenRows || []).map((f: any) => [f.id, f]));
-    const questionById = new Map((questionRows || []).map((q: any) => [q.id, q]));
 
     const allowedResponseIds = completedResponses
       .filter((r: any) => {
@@ -6409,7 +6459,7 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
         const weekKey = `${weekYear}-W${String(week).padStart(2, '0')}`;
         const weekLabel = `KW ${String(week).padStart(2, '0')} ${weekYear}`;
         const question = questionById.get(answer.question_id);
-        const targets = questionTargets.get(answer.question_id);
+        const analysis = questionAnalysisById.get(answer.question_id);
 
         return {
           dateKey,
@@ -6426,8 +6476,10 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
           fragebogenName: fragebogenById.get(resp.fragebogen_id)?.name || resp.fragebogen_id,
           questionId: answer.question_id,
           questionLabel: question?.question_text || answer.question_id,
-          distributionsziel: targets?.distributionsziel === true,
-          qualitaetsziel: targets?.qualitaetsziel === true,
+          analysisQuestionKey: analysis?.key || answer.question_id,
+          analysisQuestionLabel: analysis?.label || question?.question_text || answer.question_id,
+          distributionsziel: analysis?.distributionsziel === true,
+          qualitaetsziel: analysis?.qualitaetsziel === true,
           answerBoolean: Boolean(answer.answer_boolean),
           answerLabel: answer.answer_boolean ? 'Ja' : 'Nein',
           marketName: market?.name || resp.market_id,
@@ -6452,6 +6504,8 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
         fragebogenName: string;
         questionId: string;
         questionLabel: string;
+        analysisQuestionKey: string;
+        analysisQuestionLabel: string;
         distributionsziel: boolean;
         qualitaetsziel: boolean;
         answerBoolean: boolean;
@@ -6473,10 +6527,13 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
       selectedQuestionIds: questionIds,
       selectedTargetFilter: targetFilter,
       quarterCompression,
-      selectedQuestions: (questionRows || []).map((q: any) => ({
-        ...questionTargets.get(q.id),
-        id: q.id,
-        label: q.question_text || q.id
+      historicalAnalysis,
+      selectedQuestions: Array.from(analysisQuestionsByKey.values()).map((question) => ({
+        id: question.key,
+        label: question.label,
+        sourceQuestionIds: question.sourceQuestionIds,
+        distributionsziel: question.distributionsziel,
+        qualitaetsziel: question.qualitaetsziel
       })),
       rows
     };
