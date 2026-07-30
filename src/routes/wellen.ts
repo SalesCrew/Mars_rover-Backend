@@ -3613,7 +3613,9 @@ router.get('/:welleId/gl-submissions/:glId', requireSelfOrAdmin(req => req.param
 
     // Fetch related data in parallel
     const [marketsResult, displaysResult, kartonwareResult, paletteProductsResult, schutteProductsResult] = await Promise.all([
-      marketIds.length > 0 ? freshClient.from('markets').select('id, name, chain').in('id', marketIds) : { data: [] },
+      marketIds.length > 0
+        ? freshClient.from('markets').select('id, name, chain, address, postal_code, city').in('id', marketIds)
+        : { data: [] },
       displayIds.length > 0 ? freshClient.from('wellen_displays').select('id, name, item_value').in('id', displayIds) : { data: [] },
       kartonwareIds.length > 0 ? freshClient.from('wellen_kartonware').select('id, name, item_value').in('id', kartonwareIds) : { data: [] },
       paletteProductIds.length > 0 ? freshClient.from('wellen_paletten_products').select('id, name, palette_id, value_per_ve').in('id', paletteProductIds) : { data: [] },
@@ -3621,6 +3623,18 @@ router.get('/:welleId/gl-submissions/:glId', requireSelfOrAdmin(req => req.param
     ]);
 
     const markets = marketsResult.data || [];
+    const marketById = new Map<string, any>(markets.map((market: any) => [market.id, market]));
+    const getMarketHistoryFields = (marketId: string | null) => {
+      const market = marketById.get(marketId || '');
+      return {
+        marketId,
+        marketName: market?.name || 'Unknown',
+        marketChain: market?.chain || '',
+        marketAddress: market?.address || '',
+        marketPostalCode: market?.postal_code || '',
+        marketCity: market?.city || ''
+      };
+    };
     const displays = displaysResult.data || [];
     const kartonware = kartonwareResult.data || [];
     const einzelprodukteMap = await resolveEinzelproduktMap(freshClient, einzelproduktIds);
@@ -3642,7 +3656,6 @@ router.get('/:welleId/gl-submissions/:glId', requireSelfOrAdmin(req => req.param
     // Process standard entries (display/kartonware/einzelprodukt)
     const standardEntries = submissions.filter(s => ['display', 'kartonware', 'einzelprodukt'].includes(s.item_type));
     const standardResponses = standardEntries.map(entry => {
-      const market = markets.find((m: any) => m.id === entry.market_id);
       let item: any;
       if (entry.item_type === 'display') item = displays.find((d: any) => d.id === entry.item_id);
       else if (entry.item_type === 'kartonware') item = kartonware.find((k: any) => k.id === entry.item_id);
@@ -3650,9 +3663,7 @@ router.get('/:welleId/gl-submissions/:glId', requireSelfOrAdmin(req => req.param
 
       return {
         id: entry.id,
-        marketId: entry.market_id,
-        marketName: market?.name || 'Unknown',
-        marketChain: market?.chain || '',
+        ...getMarketHistoryFields(entry.market_id),
         itemType: entry.item_type,
         itemName: item?.name || 'Unknown',
         artikelNr: item?.artikelNr || null,
@@ -3679,7 +3690,6 @@ router.get('/:welleId/gl-submissions/:glId', requireSelfOrAdmin(req => req.param
     const paletteResponses: any[] = [];
     for (const [, entries] of paletteGroups) {
       const firstEntry = entries[0];
-      const market = markets.find((m: any) => m.id === firstEntry.market_id);
       const parentPalette = palettes.find((p: any) => p.id === firstEntry.product?.palette_id);
       const products = entries.map((e: any) => ({
         id: e.id,
@@ -3690,9 +3700,7 @@ router.get('/:welleId/gl-submissions/:glId', requireSelfOrAdmin(req => req.param
       }));
       paletteResponses.push({
         id: entries.map((e: any) => e.id).join(','),
-        marketId: firstEntry.market_id,
-        marketName: market?.name || 'Unknown',
-        marketChain: market?.chain || '',
+        ...getMarketHistoryFields(firstEntry.market_id),
         itemType: 'palette',
         itemName: parentPalette?.name || 'Palette',
         parentId: firstEntry.product?.palette_id,
@@ -3719,7 +3727,6 @@ router.get('/:welleId/gl-submissions/:glId', requireSelfOrAdmin(req => req.param
     const schutteResponses: any[] = [];
     for (const [, entries] of schutteGroups) {
       const firstEntry = entries[0];
-      const market = markets.find((m: any) => m.id === firstEntry.market_id);
       const parentSchutte = schutten.find((s: any) => s.id === firstEntry.product?.schuette_id);
       const products = entries.map((e: any) => ({
         id: e.id,
@@ -3730,9 +3737,7 @@ router.get('/:welleId/gl-submissions/:glId', requireSelfOrAdmin(req => req.param
       }));
       schutteResponses.push({
         id: entries.map((e: any) => e.id).join(','),
-        marketId: firstEntry.market_id,
-        marketName: market?.name || 'Unknown',
-        marketChain: market?.chain || '',
+        ...getMarketHistoryFields(firstEntry.market_id),
         itemType: 'schuette',
         itemName: parentSchutte?.name || 'Schütte',
         parentId: firstEntry.product?.schuette_id,
