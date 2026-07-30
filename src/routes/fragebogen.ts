@@ -198,6 +198,24 @@ type FragebogenStatusResponseRow = {
   user?: { id: string; first_name: string | null; last_name: string | null } | null;
 };
 
+type FragebogenDistributionScore = {
+  yes: number;
+  total: number;
+  percentage: number | null;
+};
+
+function toFragebogenDistributionScore(
+  value?: { yes: number; total: number }
+): FragebogenDistributionScore {
+  const yes = value?.yes || 0;
+  const total = value?.total || 0;
+  return {
+    yes,
+    total,
+    percentage: total > 0 ? Math.round((yes / total) * 100) : null
+  };
+}
+
 async function fetchPagedMarketsForGl(
   freshClient: ReturnType<typeof createFreshClient>,
   glId: string
@@ -308,6 +326,85 @@ async function fetchPagedCompletedFragebogenResponses(
   }
 
   return rows;
+}
+
+async function fetchDistributionQuestionIdsByFragebogen(
+  freshClient: ReturnType<typeof createFreshClient>,
+  fragebogenIds: string[]
+): Promise<Map<string, Set<string>>> {
+  const uniqueFragebogenIds = Array.from(new Set(fragebogenIds.filter(Boolean)));
+  const result = new Map<string, Set<string>>();
+  if (uniqueFragebogenIds.length === 0) return result;
+
+  const fragebogenModules: any[] = [];
+  for (const fragebogenChunk of chunkIds(uniqueFragebogenIds, FRAGEBOGEN_STATUS_LOOKUP_CHUNK_SIZE)) {
+    for (let offset = 0; ; offset += FRAGEBOGEN_STATUS_PAGE_SIZE) {
+      const { data, error } = await freshClient
+        .from('fb_fragebogen_modules')
+        .select('fragebogen_id, module_id, module:fb_modules!module_id (name)')
+        .in('fragebogen_id', fragebogenChunk)
+        .order('fragebogen_id', { ascending: true })
+        .order('module_id', { ascending: true })
+        .range(offset, offset + FRAGEBOGEN_STATUS_PAGE_SIZE - 1);
+
+      if (error) throw error;
+      const pageRows = data || [];
+      fragebogenModules.push(...pageRows);
+      if (pageRows.length < FRAGEBOGEN_STATUS_PAGE_SIZE) break;
+    }
+  }
+
+  const fragebogenIdsByModuleId = new Map<string, Set<string>>();
+  const moduleNameById = new Map<string, string>();
+  for (const row of fragebogenModules) {
+    const linkedFragebogenIds = fragebogenIdsByModuleId.get(row.module_id) || new Set<string>();
+    linkedFragebogenIds.add(row.fragebogen_id);
+    fragebogenIdsByModuleId.set(row.module_id, linkedFragebogenIds);
+
+    const module = Array.isArray(row.module) ? row.module[0] : row.module;
+    moduleNameById.set(row.module_id, String(module?.name || ''));
+  }
+
+  const moduleIds = Array.from(fragebogenIdsByModuleId.keys());
+  for (const moduleChunk of chunkIds(moduleIds, FRAGEBOGEN_STATUS_LOOKUP_CHUNK_SIZE)) {
+    for (let offset = 0; ; offset += FRAGEBOGEN_STATUS_PAGE_SIZE) {
+      const { data, error } = await freshClient
+        .from('fb_module_questions')
+        .select(`
+          module_id,
+          question_id,
+          order_index,
+          question:fb_questions!question_id (type, distributionsziel)
+        `)
+        .in('module_id', moduleChunk)
+        .order('module_id', { ascending: true })
+        .order('order_index', { ascending: true })
+        .range(offset, offset + FRAGEBOGEN_STATUS_PAGE_SIZE - 1);
+
+      if (error) throw error;
+      const pageRows = data || [];
+
+      for (const row of pageRows) {
+        const question = Array.isArray(row.question) ? row.question[0] : row.question;
+        if (!question || question.type !== 'yesno') continue;
+
+        const orderIndex = Number(row.order_index || 0);
+        const isDistributionTarget = question.distributionsziel === true
+          || (isPerfectStoreModuleName(moduleNameById.get(row.module_id)) && orderIndex >= 1 && orderIndex <= 10);
+        if (!isDistributionTarget) continue;
+
+        for (const fragebogenId of fragebogenIdsByModuleId.get(row.module_id) || []) {
+          const questionIds = result.get(fragebogenId) || new Set<string>();
+          questionIds.add(row.question_id);
+          result.set(fragebogenId, questionIds);
+        }
+      }
+
+      if (pageRows.length < FRAGEBOGEN_STATUS_PAGE_SIZE) break;
+    }
+  }
+
+  return result;
 }
 
 async function fetchPagedFragebogenResponses(
@@ -2348,6 +2445,41 @@ router.get('/fragebogen/status/gl/:glId', requireSelfOrAdmin(req => req.params.g
       }
     }
 
+    const visibleFragebogenIds = visibleFragebogenRows.map((fragebogen: any) => fragebogen.id);
+    const distributionQuestionIdsByFragebogen = await fetchDistributionQuestionIdsByFragebogen(
+      freshClient,
+      visibleFragebogenIds
+    );
+    const allDistributionQuestionIds = Array.from(new Set(
+      Array.from(distributionQuestionIdsByFragebogen.values()).flatMap((questionIds) => Array.from(questionIds))
+    ));
+    const completedResponseIds = completedResponses.map((response) => response.id).filter(Boolean);
+    const distributionAnswers = completedResponseIds.length > 0 && allDistributionQuestionIds.length > 0
+      ? await fetchPagedDistributionAnswers(freshClient, completedResponseIds, allDistributionQuestionIds)
+      : [];
+    const fragebogenIdByResponseId = new Map(
+      completedResponses.map((response) => [response.id, response.fragebogen_id])
+    );
+    const distributionCountsByFragebogen = new Map<string, { yes: number; total: number }>();
+    const distributionCountsByResponse = new Map<string, { yes: number; total: number }>();
+
+    for (const answer of distributionAnswers) {
+      const fragebogenId = fragebogenIdByResponseId.get(answer.response_id);
+      if (!fragebogenId || !distributionQuestionIdsByFragebogen.get(fragebogenId)?.has(answer.question_id)) {
+        continue;
+      }
+
+      const fragebogenCounts = distributionCountsByFragebogen.get(fragebogenId) || { yes: 0, total: 0 };
+      fragebogenCounts.total += 1;
+      if (answer.answer_boolean === true) fragebogenCounts.yes += 1;
+      distributionCountsByFragebogen.set(fragebogenId, fragebogenCounts);
+
+      const responseCounts = distributionCountsByResponse.get(answer.response_id) || { yes: 0, total: 0 };
+      responseCounts.total += 1;
+      if (answer.answer_boolean === true) responseCounts.yes += 1;
+      distributionCountsByResponse.set(answer.response_id, responseCounts);
+    }
+
     const assignmentsByMarket = new Map<string, FragebogenStatusAssignmentRow[]>();
     for (const assignment of assignments) {
       const rows = assignmentsByMarket.get(assignment.market_id) || [];
@@ -2368,13 +2500,19 @@ router.get('/fragebogen/status/gl/:glId', requireSelfOrAdmin(req => req.params.g
       const statuses = rows.map((assignment) => {
         const fragebogen: any = fragebogenById.get(assignment.fragebogen_id);
         const completed = completedByMarketAndFragebogen.get(`${market.id}|${assignment.fragebogen_id}`) || null;
+        const distributionScore = completed
+          ? toFragebogenDistributionScore(distributionCountsByResponse.get(completed.responseId))
+          : toFragebogenDistributionScore();
 
         return {
           fragebogenId: assignment.fragebogen_id,
           fragebogenName: fragebogen?.name || '',
           completed: Boolean(completed),
           completedAt: completed?.completedAt || null,
-          responseId: completed?.responseId || null
+          responseId: completed?.responseId || null,
+          distributionScore: distributionScore.percentage,
+          distributionYes: distributionScore.yes,
+          distributionTotal: distributionScore.total
         };
       });
 
@@ -2397,14 +2535,22 @@ router.get('/fragebogen/status/gl/:glId', requireSelfOrAdmin(req => req.params.g
     const totalAssignments = marketsPayload.reduce((sum, market) => sum + market.statuses.length, 0);
 
     res.json({
-      fragebogen: visibleFragebogenRows.map((fragebogen: any) => ({
-        id: fragebogen.id,
-        name: fragebogen.name,
-        description: fragebogen.description,
-        startDate: fragebogen.start_date,
-        endDate: fragebogen.end_date,
-        status: fragebogen.status
-      })),
+      fragebogen: visibleFragebogenRows.map((fragebogen: any) => {
+        const distributionScore = toFragebogenDistributionScore(
+          distributionCountsByFragebogen.get(fragebogen.id)
+        );
+        return {
+          id: fragebogen.id,
+          name: fragebogen.name,
+          description: fragebogen.description,
+          startDate: fragebogen.start_date,
+          endDate: fragebogen.end_date,
+          status: fragebogen.status,
+          distributionScore: distributionScore.percentage,
+          distributionYes: distributionScore.yes,
+          distributionTotal: distributionScore.total
+        };
+      }),
       markets: marketsPayload,
       summary: {
         totalMarkets: marketsPayload.length,
