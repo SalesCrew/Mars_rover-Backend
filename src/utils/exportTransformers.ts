@@ -1136,19 +1136,6 @@ export async function transformSingleWaveExport(
 
   const welleMarketIds = (welleMarketsData || []).map(wm => wm.market_id);
 
-  let markets: Array<{ id: string; name: string }> = [];
-  if (welleMarketIds.length > 0) {
-    const { data: marketsData } = await client
-      .from('markets')
-      .select('id, name, mars_fil')
-      .in('id', welleMarketIds)
-      .order('name');
-    markets = (marketsData || []).map(m => {
-      const marsFilNr = m.mars_fil == null ? '' : String(m.mars_fil).trim();
-      return { id: m.id, name: marsFilNr ? `${m.name} | ${marsFilNr}` : m.name };
-    });
-  }
-
   // 4. Fetch all submissions for this wave (paginated) -- include value_per_unit and created_at
   let allSubs: any[] = [];
   let subFrom = 0;
@@ -1168,6 +1155,23 @@ export async function transformSingleWaveExport(
     } else {
       hasMore = false;
     }
+  }
+
+  const marketIds = [...new Set([
+    ...welleMarketIds,
+    ...allSubs.map(submission => submission.market_id).filter(Boolean)
+  ])];
+  let markets: Array<{ id: string; name: string }> = [];
+  if (marketIds.length > 0) {
+    const { data: marketsData } = await client
+      .from('markets')
+      .select('id, name, mars_fil')
+      .in('id', marketIds)
+      .order('name');
+    markets = (marketsData || []).map(m => {
+      const marsFilNr = m.mars_fil == null ? '' : String(m.mars_fil).trim();
+      return { id: m.id, name: marsFilNr ? `${m.name} | ${marsFilNr}` : m.name };
+    });
   }
 
   // 5. Assign color groups -- one consistent order for both children and parents

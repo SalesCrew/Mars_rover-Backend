@@ -35,7 +35,7 @@ const WELLE_PALETTE_PRODUCT_SELECT_COLUMNS = 'id, palette_id, name, value_per_ve
 const WELLE_SCHUETTE_SELECT_COLUMNS = 'id, welle_id, name, description, image_url, picture_url, size, schuette_order';
 const WELLE_SCHUETTE_PRODUCT_SELECT_COLUMNS = 'id, schuette_id, name, value_per_ve, ve, ean, product_order';
 const WELLE_KW_DAY_SELECT_COLUMNS = 'id, welle_id, kw, days, kw_order';
-const WELLEN_SUBMISSION_SELECT_COLUMNS = 'id, welle_id, gebietsleiter_id, market_id, item_type, item_id, quantity, value_per_unit, photo_url, created_at';
+const WELLEN_SUBMISSION_SELECT_COLUMNS = 'id, welle_id, gebietsleiter_id, market_id, item_type, item_id, quantity, value_per_unit, photo_url, submission_batch_id, created_at';
 const WELLEN_PHOTO_SELECT_COLUMNS = 'id, welle_id, gebietsleiter_id, market_id, photo_url, tags, comment, submission_batch_id, created_at';
 
 const parseOptionalPositiveInt = (value: unknown): number | null => {
@@ -3430,7 +3430,7 @@ router.delete('/:id', requireAdmin, async (req: Request, res: Response) => {
 router.post('/:id/progress/batch', requireSelfOrAdmin(req => req.body.gebietsleiter_id), async (req: AuthRequest, res: Response) => {
   try {
     const { id: welleId } = req.params;
-    const { gebietsleiter_id, market_id, items, skipVisitUpdate, timestamp } = req.body;
+    const { gebietsleiter_id, market_id, items, skipVisitUpdate, timestamp, submission_batch_id } = req.body;
     const effectiveGlId = req.user?.role === 'admin' ? gebietsleiter_id : getAuthenticatedGlId(req.user);
 
     console.log(`Batch updating GL progress for welle ${welleId}...${skipVisitUpdate ? ' (skipping visit update)' : ''}`);
@@ -3439,6 +3439,31 @@ router.post('/:id/progress/batch', requireSelfOrAdmin(req => req.body.gebietslei
 
     if (!effectiveGlId || !items || !Array.isArray(items)) {
       return res.status(400).json({ error: 'Missing required fields: gebietsleiter_id, items' });
+    }
+
+    const submissionBatchId = typeof submission_batch_id === 'string' && submission_batch_id.trim()
+      ? submission_batch_id.trim()
+      : null;
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (submissionBatchId && !uuidPattern.test(submissionBatchId)) {
+      return res.status(400).json({ error: 'Invalid submission_batch_id' });
+    }
+
+    if (submissionBatchId) {
+      const { data: existingSubmission, error: existingSubmissionError } = await freshClient
+        .from('wellen_submissions')
+        .select('id')
+        .eq('submission_batch_id', submissionBatchId)
+        .limit(1);
+
+      if (existingSubmissionError) throw existingSubmissionError;
+      if (existingSubmission && existingSubmission.length > 0) {
+        return res.json({
+          message: 'Progress already processed',
+          items_updated: 0,
+          already_processed: true
+        });
+      }
     }
 
     // Insert submissions (single source of truth)
@@ -3450,7 +3475,8 @@ router.post('/:id/progress/batch', requireSelfOrAdmin(req => req.body.gebietslei
         item_type: item.item_type,
         item_id: item.item_id,
         quantity: item.current_number,
-        value_per_unit: item.value_per_unit || null
+        value_per_unit: item.value_per_unit || null,
+        submission_batch_id: submissionBatchId
       };
       if (timestamp) {
         entry.created_at = timestamp;
@@ -3462,7 +3488,16 @@ router.post('/:id/progress/batch', requireSelfOrAdmin(req => req.body.gebietslei
       .from('wellen_submissions')
       .insert(submissionLogs);
 
-    if (error) throw error;
+    if (error) {
+      if (submissionBatchId && error.code === '23505') {
+        return res.json({
+          message: 'Progress already processed',
+          items_updated: 0,
+          already_processed: true
+        });
+      }
+      throw error;
+    }
     console.log(`Logged ${submissionLogs.length} welle submissions`);
 
     // Update market visit count (if market_id is provided and not skipping)
