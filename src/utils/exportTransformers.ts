@@ -1140,10 +1140,13 @@ export async function transformSingleWaveExport(
   if (welleMarketIds.length > 0) {
     const { data: marketsData } = await client
       .from('markets')
-      .select('id, name')
+      .select('id, name, mars_fil')
       .in('id', welleMarketIds)
       .order('name');
-    markets = (marketsData || []).map(m => ({ id: m.id, name: m.name }));
+    markets = (marketsData || []).map(m => {
+      const marsFilNr = m.mars_fil == null ? '' : String(m.mars_fil).trim();
+      return { id: m.id, name: marsFilNr ? `${m.name} | ${marsFilNr}` : m.name };
+    });
   }
 
   // 4. Fetch all submissions for this wave (paginated) -- include value_per_unit and created_at
