@@ -28,6 +28,7 @@ export const EXPORT_DATASETS: Record<string, DatasetDefinition> = {
       { id: 'welle_name', label: 'Welle', type: 'string', width: 25, default: true },
       { id: 'gl_name', label: 'Gebietsleiter', type: 'string', width: 20, default: true },
       { id: 'gl_email', label: 'GL Email', type: 'string', width: 25, default: false },
+      { id: 'market_internal_id', label: 'Interne Markt ID', type: 'string', width: 18, default: true },
       { id: 'market_name', label: 'Markt', type: 'string', width: 30, default: true },
       { id: 'market_chain', label: 'Kette', type: 'string', width: 15, default: true },
       { id: 'market_address', label: 'Adresse', type: 'string', width: 30, default: true },

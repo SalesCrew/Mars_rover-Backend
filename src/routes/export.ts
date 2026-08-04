@@ -490,6 +490,7 @@ router.post('/custom', async (req: Request, res: Response) => {
             { key: 'created_at', header: 'Datum', width: 18 },
             { key: 'welle_name', header: 'Welle', width: 25 },
             { key: 'gl_name', header: 'Gebietsleiter', width: 20 },
+            { key: 'market_internal_id', header: 'Interne Markt ID', width: 18 },
             { key: 'market_name', header: 'Markt', width: 30 },
             { key: 'market_chain', header: 'Kette', width: 15 },
             { key: 'market_address', header: 'Adresse', width: 30 },
@@ -521,27 +522,28 @@ router.post('/custom', async (req: Request, res: Response) => {
             if (dateA !== dateB) return dateB - dateA; // Newest first
             
             if (a.gl_name !== b.gl_name) return a.gl_name.localeCompare(b.gl_name);
-            if (a.market_name !== b.market_name) return a.market_name.localeCompare(b.market_name);
+            if (a.market_id !== b.market_id) return String(a.market_id).localeCompare(String(b.market_id));
             return a.containerName.localeCompare(b.containerName);
           });
 
           // Track groups for separator rows
           let lastContainer = '';
-          let lastMarket = '';
+          let lastMarketId = '';
 
           // Add product rows with separators
           allProductDetails.forEach(detail => {
             // Add separator when container changes within same market
-            if (detail.containerName !== lastContainer || detail.market_name !== lastMarket) {
+            if (detail.containerName !== lastContainer || detail.market_id !== lastMarketId) {
               const separatorRow = detailSheet.addRow({
                 created_at: '',
                 welle_name: '',
                 gl_name: '',
-                market_name: '',
-                market_chain: '',
-                market_address: '',
-                market_postal_code: '',
-                market_city: '',
+                market_internal_id: detail.market_internal_id,
+                market_name: detail.market_name,
+                market_chain: detail.market_chain,
+                market_address: detail.market_address,
+                market_postal_code: detail.market_postal_code,
+                market_city: detail.market_city,
                 containerName: `▼ ${detail.containerName}`,
                 containerType: detail.containerType,
                 productName: '',
@@ -557,7 +559,7 @@ router.post('/custom', async (req: Request, res: Response) => {
               };
               
               lastContainer = detail.containerName;
-              lastMarket = detail.market_name;
+              lastMarketId = detail.market_id;
             }
 
             // Add product row
@@ -565,6 +567,7 @@ router.post('/custom', async (req: Request, res: Response) => {
               created_at: new Date(detail.created_at),
               welle_name: detail.welle_name,
               gl_name: detail.gl_name,
+              market_internal_id: detail.market_internal_id,
               market_name: detail.market_name,
               market_chain: detail.market_chain,
               market_address: detail.market_address,

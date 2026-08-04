@@ -201,6 +201,8 @@ interface SubmissionWithMeta extends ExportRow {
     created_at: any;
     welle_name: any;
     gl_name: any;
+    market_id: any;
+    market_internal_id: any;
     market_name: any;
     market_chain: any;
     market_address: any;
@@ -268,7 +270,7 @@ export async function transformWellenSubmissions(
   const [wellenData, glData, marketData] = await Promise.all([
     client.from('wellen').select('id, name').in('id', welleIds),
     client.from('gebietsleiter').select('id, name, email').in('id', glIds),
-    client.from('markets').select('id, name, chain, city, address, postal_code').in('id', marketIds)
+    client.from('markets').select('id, internal_id, name, chain, city, address, postal_code').in('id', marketIds)
   ]);
 
   const wellenMap = new Map((wellenData.data || []).map(w => [w.id, w]));
@@ -429,6 +431,7 @@ export async function transformWellenSubmissions(
             welle_name: welle?.name || 'Unbekannt',
             gl_name: gl?.name || 'Unbekannt',
             gl_email: gl?.email || '',
+            market_internal_id: market?.internal_id || '',
             market_name: market?.name || 'Unbekannt',
             market_chain: market?.chain || '',
             market_address: market?.address || '',
@@ -454,15 +457,16 @@ export async function transformWellenSubmissions(
             const childRow: SubmissionWithMeta = {
               submission_id: childSub.id,
               created_at: childSub.created_at,
-              welle_name: '',
-              gl_name: '',
-              gl_email: '',
-              market_name: '',
-              market_chain: '',
-              market_address: '',
-              market_postal_code: '',
-              market_city: '',
-              market_id: '',
+              welle_name: welle?.name || 'Unbekannt',
+              gl_name: gl?.name || 'Unbekannt',
+              gl_email: gl?.email || '',
+              market_internal_id: market?.internal_id || '',
+              market_name: market?.name || 'Unbekannt',
+              market_chain: market?.chain || '',
+              market_address: market?.address || '',
+              market_postal_code: market?.postal_code || '',
+              market_city: market?.city || '',
+              market_id: sub.market_id,
               item_type: '',
               item_name: `└─ ${childItem?.name || 'Unbekannt'}`,
               container_name: '',
@@ -497,6 +501,7 @@ export async function transformWellenSubmissions(
             welle_name: welle?.name || 'Unbekannt',
             gl_name: gl?.name || 'Unbekannt',
             gl_email: gl?.email || '',
+            market_internal_id: market?.internal_id || '',
             market_name: market?.name || 'Unbekannt',
             market_chain: market?.chain || '',
             market_address: market?.address || '',
@@ -516,6 +521,8 @@ export async function transformWellenSubmissions(
               created_at: s.created_at,
               welle_name: welle?.name || 'Unbekannt',
               gl_name: gl?.name || 'Unbekannt',
+              market_id: sub.market_id,
+              market_internal_id: market?.internal_id || '',
               market_name: market?.name || 'Unbekannt',
               market_chain: market?.chain || '',
               market_address: market?.address || '',
@@ -578,6 +585,7 @@ export async function transformWellenSubmissions(
           welle_name: welle?.name || 'Unbekannt',
           gl_name: gl?.name || 'Unbekannt',
           gl_email: gl?.email || '',
+          market_internal_id: market?.internal_id || '',
           market_name: market?.name || 'Unbekannt',
           market_chain: market?.chain || '',
           market_address: market?.address || '',
