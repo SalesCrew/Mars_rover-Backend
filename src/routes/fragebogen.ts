@@ -1408,10 +1408,22 @@ router.put('/questions/:id', requireAdmin, async (req: Request, res: Response) =
     const { id } = req.params;
     const freshClient = createFreshClient();
     const updates = { ...req.body };
+    const replaceImages = updates.replace_images === true;
     
     delete updates.id;
     delete updates.created_at;
     delete updates.created_by;
+    delete updates.replace_images;
+
+    // Image replacement must always be explicit. This prevents a partial module
+    // payload from turning a missing images field into [] and erasing references.
+    if ('images' in updates) {
+      if (!replaceImages) {
+        delete updates.images;
+      } else if (!Array.isArray(updates.images) || updates.images.some((url: unknown) => typeof url !== 'string')) {
+        return res.status(400).json({ error: 'images must be an array of URLs' });
+      }
+    }
 
     // Normalise options if present
     if (updates.options && Array.isArray(updates.options)) {
