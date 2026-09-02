@@ -3796,7 +3796,7 @@ router.get('/:welleId/gl-submissions/:glId', requireSelfOrAdmin(req => req.param
 
 // ============================================================================
 // GET SUBMITTED MARKET IDS FOR A WELLE + GL
-// Returns distinct market_ids that have submissions (or photos for foto-only)
+// Returns distinct market IDs that have a visit and/or submission in the wave period.
 // ============================================================================
 router.get('/:welleId/submitted-markets/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: AuthRequest, res: Response) => {
   try {
@@ -3807,28 +3807,96 @@ router.get('/:welleId/submitted-markets/:glId', requireSelfOrAdmin(req => req.pa
     }
     const freshClient = createFreshClient();
 
-    const { data: welleRow } = await freshClient.from('wellen').select('foto_only').eq('id', welleId).single();
+    const { data: welleRow, error: welleError } = await freshClient
+      .from('wellen')
+      .select('foto_only, start_date, end_date')
+      .eq('id', welleId)
+      .single();
+
+    if (welleError || !welleRow) {
+      return res.status(404).json({ error: 'Wave not found' });
+    }
 
     let myMarketIds: string[] = [];
     let allMarketIds: string[] = [];
 
     if (welleRow?.foto_only) {
       const [myPhotos, allPhotos] = await Promise.all([
-        freshClient.from('wellen_photos').select('market_id').eq('welle_id', welleId).eq('gebietsleiter_id', effectiveGlId),
-        freshClient.from('wellen_photos').select('market_id').eq('welle_id', welleId)
+        fetchPagedWellenMarkets<{ id: string; market_id: string }>((from, to) =>
+          freshClient
+            .from('wellen_photos')
+            .select('id, market_id')
+            .eq('welle_id', welleId)
+            .eq('gebietsleiter_id', effectiveGlId)
+            .order('market_id', { ascending: true })
+            .order('id', { ascending: true })
+            .range(from, to)
+        ),
+        fetchPagedWellenMarkets<{ id: string; market_id: string }>((from, to) =>
+          freshClient
+            .from('wellen_photos')
+            .select('id, market_id')
+            .eq('welle_id', welleId)
+            .order('market_id', { ascending: true })
+            .order('id', { ascending: true })
+            .range(from, to)
+        )
       ]);
-      myMarketIds = [...new Set((myPhotos.data || []).map(p => p.market_id).filter(Boolean))];
-      allMarketIds = [...new Set((allPhotos.data || []).map(p => p.market_id).filter(Boolean))];
+      myMarketIds = [...new Set(myPhotos.map(photo => photo.market_id).filter(Boolean))];
+      allMarketIds = [...new Set(allPhotos.map(photo => photo.market_id).filter(Boolean))];
     } else {
       const [mySubs, allSubs] = await Promise.all([
-        freshClient.from('wellen_submissions').select('market_id').eq('welle_id', welleId).eq('gebietsleiter_id', effectiveGlId),
-        freshClient.from('wellen_submissions').select('market_id').eq('welle_id', welleId)
+        fetchPagedWellenMarkets<{ id: string; market_id: string }>((from, to) =>
+          freshClient
+            .from('wellen_submissions')
+            .select('id, market_id')
+            .eq('welle_id', welleId)
+            .eq('gebietsleiter_id', effectiveGlId)
+            .order('market_id', { ascending: true })
+            .order('id', { ascending: true })
+            .range(from, to)
+        ),
+        fetchPagedWellenMarkets<{ id: string; market_id: string }>((from, to) =>
+          freshClient
+            .from('wellen_submissions')
+            .select('id, market_id')
+            .eq('welle_id', welleId)
+            .order('market_id', { ascending: true })
+            .order('id', { ascending: true })
+            .range(from, to)
+        )
       ]);
-      myMarketIds = [...new Set((mySubs.data || []).map(s => s.market_id).filter(Boolean))];
-      allMarketIds = [...new Set((allSubs.data || []).map(s => s.market_id).filter(Boolean))];
+      myMarketIds = [...new Set(mySubs.map(submission => submission.market_id).filter(Boolean))];
+      allMarketIds = [...new Set(allSubs.map(submission => submission.market_id).filter(Boolean))];
     }
 
-    res.json({ marketIds: myMarketIds, allMarketIds });
+    const welleMarkets = await fetchAllWelleMarketsByWelleId(freshClient, welleId);
+    const assignedMarketIds = [...new Set(welleMarkets.map(row => row.market_id).filter(Boolean))];
+    const visits: Array<{ market_id: string; gebietsleiter_id: string | null; visit_date: string }> = [];
+
+    for (const marketChunk of chunkArray(assignedMarketIds, WELLE_MARKETS_FILTER_CHUNK_SIZE)) {
+      const chunkVisits = await fetchPagedWellenMarkets<{ market_id: string; gebietsleiter_id: string | null; visit_date: string }>((from, to) =>
+        freshClient
+          .from('market_visits')
+          .select('market_id, gebietsleiter_id, visit_date')
+          .in('market_id', marketChunk)
+          .gte('visit_date', welleRow.start_date)
+          .lte('visit_date', welleRow.end_date)
+          .order('visit_date', { ascending: true })
+          .order('market_id', { ascending: true })
+          .range(from, to)
+      );
+      visits.push(...chunkVisits);
+    }
+
+    const visitedMarketIds = [...new Set(
+      visits
+        .filter(visit => visit.gebietsleiter_id === effectiveGlId)
+        .map(visit => visit.market_id)
+    )];
+    const allVisitedMarketIds = [...new Set(visits.map(visit => visit.market_id))];
+
+    res.json({ marketIds: myMarketIds, allMarketIds, visitedMarketIds, allVisitedMarketIds });
   } catch (error: any) {
     console.error('Error fetching submitted markets:');
     sendInternalError(res);
