@@ -2,7 +2,7 @@ import express, { Router, Request, Response } from 'express';
 import ExcelJS from 'exceljs';
 import { createFreshClient } from '../config/supabase';
 import { AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
-import { sendInternalError } from '../utils/httpErrors';
+import { sendCodedError, sendInternalError } from '../utils/httpErrors';
 
 const router: Router = express.Router();
 const sanitizeLoggedPath = (value: string): string =>
@@ -4103,6 +4103,42 @@ router.get('/responses/stats/fragebogen/:fragebogenId', requireAdmin, async (req
  * POST /api/fragebogen/zeiterfassung
  * Submit zeiterfassung (time tracking) data for a market visit
  */
+type VisitTimeField = 'besuchszeit_von' | 'besuchszeit_bis' | 'fahrzeit_von' | 'fahrzeit_bis';
+
+const visitTimeErrors: Record<VisitTimeField, { code: string; message: string }> = {
+  besuchszeit_von: {
+    code: 'MR-VISIT-TIME-START-001',
+    message: 'Die Startzeit des Marktbesuchs ist ungültig. Bitte verwende das Format HH:MM.'
+  },
+  besuchszeit_bis: {
+    code: 'MR-VISIT-TIME-END-001',
+    message: 'Die Endzeit des Marktbesuchs ist ungültig. Bitte verwende das Format HH:MM.'
+  },
+  fahrzeit_von: {
+    code: 'MR-VISIT-TRAVEL-START-001',
+    message: 'Die Startzeit der Fahrzeit ist ungültig. Bitte verwende das Format HH:MM.'
+  },
+  fahrzeit_bis: {
+    code: 'MR-VISIT-TRAVEL-END-001',
+    message: 'Die Endzeit der Fahrzeit ist ungültig. Bitte verwende das Format HH:MM.'
+  }
+};
+
+const validateVisitTimeFields = (
+  res: Response,
+  fields: ReadonlyArray<readonly [VisitTimeField, unknown]>
+): boolean => {
+  for (const [field, value] of fields) {
+    if (value !== undefined && value !== null && value !== '' && !isValidTimeInput(value)) {
+      const details = visitTimeErrors[field];
+      sendCodedError(res, 400, details.code, details.message, field);
+      return false;
+    }
+  }
+
+  return true;
+};
+
 router.post('/zeiterfassung', async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
@@ -4123,9 +4159,21 @@ router.post('/zeiterfassung', async (req: AuthRequest, res: Response) => {
     
     // Validate required fields
     if (!effectiveGlId || !market_id) {
-      return res.status(400).json({ 
-        error: 'gebietsleiter_id and market_id are required' 
-      });
+      return sendCodedError(
+        res,
+        400,
+        'MR-VISIT-CONTEXT-001',
+        'Der Marktbesuch kann nicht gespeichert werden, weil Benutzer- oder Marktinformationen fehlen.'
+      );
+    }
+
+    if (!validateVisitTimeFields(res, [
+      ['besuchszeit_von', besuchszeit_von],
+      ['besuchszeit_bis', besuchszeit_bis],
+      ['fahrzeit_von', fahrzeit_von],
+      ['fahrzeit_bis', fahrzeit_bis]
+    ])) {
+      return;
     }
 
     let effectiveFragebogenId = fragebogen_id || null;
@@ -4138,14 +4186,24 @@ router.post('/zeiterfassung', async (req: AuthRequest, res: Response) => {
 
       if (responseLookupError) throw responseLookupError;
       if (!responseRow) {
-        return res.status(404).json({ error: 'Response not found' });
+        return sendCodedError(
+          res,
+          404,
+          'MR-VISIT-RESPONSE-001',
+          'Der zugehörige Fragebogen-Datensatz wurde nicht gefunden.'
+        );
       }
       if (
         responseRow.gebietsleiter_id !== effectiveGlId ||
         responseRow.market_id !== market_id ||
         (fragebogen_id && responseRow.fragebogen_id !== fragebogen_id)
       ) {
-        return res.status(400).json({ error: 'response_id does not match provided fragebogen/market/gebietsleiter context' });
+        return sendCodedError(
+          res,
+          400,
+          'MR-VISIT-CONTEXT-002',
+          'Der Fragebogen-Datensatz passt nicht zu diesem Marktbesuch.'
+        );
       }
 
       effectiveFragebogenId = responseRow.fragebogen_id || effectiveFragebogenId;
@@ -4208,7 +4266,11 @@ router.post('/zeiterfassung', async (req: AuthRequest, res: Response) => {
     res.status(201).json(data);
   } catch (error: any) {
     console.error('Error saving zeiterfassung');
-    sendInternalError(res);
+    sendInternalError(
+      res,
+      'Der Marktbesuch konnte wegen eines Serverfehlers nicht angelegt werden.',
+      'MR-VISIT-CREATE-001'
+    );
   }
 });
 
@@ -4231,17 +4293,15 @@ router.patch('/zeiterfassung/:id', requireOwnedRowOrAdmin('fb_zeiterfassung_subm
     } = req.body;
 
     const updateData: Record<string, any> = {};
-    const timeFields = [
+    const timeFields: ReadonlyArray<readonly [VisitTimeField, unknown]> = [
       ['besuchszeit_von', besuchszeit_von],
       ['besuchszeit_bis', besuchszeit_bis],
       ['fahrzeit_von', fahrzeit_von],
       ['fahrzeit_bis', fahrzeit_bis]
-    ] as const;
+    ];
 
-    for (const [fieldName, fieldValue] of timeFields) {
-      if (fieldValue !== undefined && fieldValue !== null && fieldValue !== '' && !isValidTimeInput(fieldValue)) {
-        return res.status(400).json({ error: `Invalid time format for ${fieldName}` });
-      }
+    if (!validateVisitTimeFields(res, timeFields)) {
+      return;
     }
 
     if (besuchszeit_von !== undefined) updateData.besuchszeit_von = besuchszeit_von || null;
@@ -4260,7 +4320,12 @@ router.patch('/zeiterfassung/:id', requireOwnedRowOrAdmin('fb_zeiterfassung_subm
       .single();
 
     if (!existing) {
-      return res.status(404).json({ error: 'Submission not found' });
+      return sendCodedError(
+        res,
+        404,
+        'MR-VISIT-NOT-FOUND-001',
+        'Der zu aktualisierende Marktbesuch wurde nicht gefunden.'
+      );
     }
 
     const finalBVon = besuchszeit_von !== undefined ? besuchszeit_von : existing.besuchszeit_von;
@@ -4305,7 +4370,11 @@ router.patch('/zeiterfassung/:id', requireOwnedRowOrAdmin('fb_zeiterfassung_subm
     res.json(data);
   } catch (error: any) {
     console.error('Error updating zeiterfassung');
-    sendInternalError(res);
+    sendInternalError(
+      res,
+      'Der Marktbesuch konnte wegen eines Serverfehlers nicht aktualisiert werden.',
+      'MR-VISIT-UPDATE-001'
+    );
   }
 });
 
@@ -4928,7 +4997,7 @@ const calculateTimeDiff = (startTime: string, endTime: string): { interval: stri
   };
 };
 
-const isValidTimeInput = (value: unknown): boolean => {
+function isValidTimeInput(value: unknown): boolean {
   if (typeof value !== 'string') return false;
   const trimmed = value.trim();
   const match = trimmed.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
@@ -4949,7 +5018,7 @@ const isValidTimeInput = (value: unknown): boolean => {
     seconds >= 0 &&
     seconds <= 59
   );
-};
+}
 
 // Helper: Get current time as HH:MM string
 const getCurrentTimeString = (): string => {
