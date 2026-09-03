@@ -1079,6 +1079,10 @@ export interface SingleWaveResult {
   einzelproduktVeMap: Record<string, number | null>; // itemId -> VE (from products.content)
 }
 
+export interface SingleWaveFilters {
+  glIds?: string[];
+}
+
 const PASTEL_COLORS = [
   'FFD4E4F7', // light blue
   'FFFDE2D4', // light orange
@@ -1094,8 +1098,12 @@ const PASTEL_COLORS = [
 
 export async function transformSingleWaveExport(
   client: SupabaseClient,
-  welleId: string
+  welleId: string,
+  filters: SingleWaveFilters = {}
 ): Promise<SingleWaveResult> {
+  const selectedGlIds = [...new Set((filters.glIds || []).filter(Boolean))];
+  const selectedGlIdSet = new Set(selectedGlIds);
+
   // 1. Fetch wave
   const { data: welle, error: welleError } = await client
     .from('wellen')
@@ -1150,11 +1158,17 @@ export async function transformSingleWaveExport(
   const pageSize = 1000;
   let hasMore = true;
   while (hasMore) {
-    const { data, error } = await client
+    let query = client
       .from('wellen_submissions')
-      .select('item_type, item_id, market_id, quantity, value_per_unit, created_at')
+      .select('gebietsleiter_id, item_type, item_id, market_id, quantity, value_per_unit, created_at')
       .eq('welle_id', welleId)
       .range(subFrom, subFrom + pageSize - 1);
+
+    if (selectedGlIds.length > 0) {
+      query = query.in('gebietsleiter_id', selectedGlIds);
+    }
+
+    const { data, error } = await query;
     if (error) throw error;
     if (data && data.length > 0) {
       allSubs = [...allSubs, ...data];
@@ -1169,17 +1183,24 @@ export async function transformSingleWaveExport(
     ...welleMarketIds,
     ...allSubs.map(submission => submission.market_id).filter(Boolean)
   ])];
+  const submittedMarketIds = new Set(allSubs.map(submission => submission.market_id).filter(Boolean));
   let markets: Array<{ id: string; name: string }> = [];
   if (marketIds.length > 0) {
     const { data: marketsData } = await client
       .from('markets')
-      .select('id, name, mars_fil')
+      .select('id, name, mars_fil, gebietsleiter_id')
       .in('id', marketIds)
       .order('name');
-    markets = (marketsData || []).map(m => {
-      const marsFilNr = m.mars_fil == null ? '' : String(m.mars_fil).trim();
-      return { id: m.id, name: marsFilNr ? `${m.name} | ${marsFilNr}` : m.name };
-    });
+    markets = (marketsData || [])
+      .filter(m => (
+        selectedGlIds.length === 0 ||
+        selectedGlIdSet.has(m.gebietsleiter_id) ||
+        submittedMarketIds.has(m.id)
+      ))
+      .map(m => {
+        const marsFilNr = m.mars_fil == null ? '' : String(m.mars_fil).trim();
+        return { id: m.id, name: marsFilNr ? `${m.name} | ${marsFilNr}` : m.name };
+      });
   }
 
   // 5. Assign color groups -- one consistent order for both children and parents

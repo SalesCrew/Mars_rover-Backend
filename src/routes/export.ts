@@ -44,7 +44,9 @@ router.post('/custom', async (req: Request, res: Response) => {
     if (options?.singleWaveExport && options?.singleWaveId) {
       console.log('📊 Single wave matrix export for:', options.singleWaveId);
 
-      const result = await transformSingleWaveExport(freshClient, options.singleWaveId);
+      const result = await transformSingleWaveExport(freshClient, options.singleWaveId, {
+        glIds: filters?.glIds
+      });
       const isValueBased = result.goalType === 'value';
 
       const PASTEL_COLORS = [
