@@ -1072,7 +1072,17 @@ export interface SingleWaveResult {
   goalType: string;
   items: SingleWaveItem[];
   parentItems: Array<{ id: string; name: string; type: string; colorGroup: number }>;
-  markets: Array<{ id: string; name: string }>;
+  markets: Array<{
+    id: string;
+    name: string;
+    chain: string;
+    internalId: string;
+    marsFilNr: string;
+    address: string;
+    postalCode: string;
+    city: string;
+    gebietsleiterName: string;
+  }>;
   matrix: Record<string, Record<string, number>>; // itemId -> marketId -> quantity
   valueMatrix: Record<string, Record<string, number>>; // itemId -> marketId -> total value (from submissions)
   parentMatrix: Record<string, Record<string, number>>; // parentId -> marketId -> quantity
@@ -1184,23 +1194,44 @@ export async function transformSingleWaveExport(
     ...allSubs.map(submission => submission.market_id).filter(Boolean)
   ])];
   const submittedMarketIds = new Set(allSubs.map(submission => submission.market_id).filter(Boolean));
-  let markets: Array<{ id: string; name: string }> = [];
+  let markets: SingleWaveResult['markets'] = [];
   if (marketIds.length > 0) {
-    const { data: marketsData } = await client
+    const { data: marketsData, error: marketsError } = await client
       .from('markets')
-      .select('id, name, mars_fil, gebietsleiter_id')
+      .select('id, internal_id, name, chain, mars_fil, address, postal_code, city, gebietsleiter_id, gebietsleiter_name')
       .in('id', marketIds)
       .order('name');
-    markets = (marketsData || [])
+    if (marketsError) throw marketsError;
+
+    const filteredMarkets = (marketsData || [])
       .filter(m => (
         selectedGlIds.length === 0 ||
         selectedGlIdSet.has(m.gebietsleiter_id) ||
         submittedMarketIds.has(m.id)
-      ))
-      .map(m => {
-        const marsFilNr = m.mars_fil == null ? '' : String(m.mars_fil).trim();
-        return { id: m.id, name: marsFilNr ? `${m.name} | ${marsFilNr}` : m.name };
-      });
+      ));
+
+    const marketGlIds = [...new Set(filteredMarkets.map(m => m.gebietsleiter_id).filter(Boolean))];
+    const glNameMap = new Map<string, string>();
+    if (marketGlIds.length > 0) {
+      const { data: glData, error: glError } = await client
+        .from('gebietsleiter')
+        .select('id, name')
+        .in('id', marketGlIds);
+      if (glError) throw glError;
+      (glData || []).forEach(gl => glNameMap.set(gl.id, gl.name));
+    }
+
+    markets = filteredMarkets.map(m => ({
+      id: m.id,
+      name: m.name || '',
+      chain: m.chain || '',
+      internalId: m.internal_id == null ? '' : String(m.internal_id).trim(),
+      marsFilNr: m.mars_fil == null ? '' : String(m.mars_fil).trim(),
+      address: m.address || '',
+      postalCode: m.postal_code == null ? '' : String(m.postal_code).trim(),
+      city: m.city || '',
+      gebietsleiterName: glNameMap.get(m.gebietsleiter_id) || m.gebietsleiter_name || ''
+    }));
   }
 
   // 5. Assign color groups -- one consistent order for both children and parents

@@ -54,164 +54,222 @@ router.post('/custom', async (req: Request, res: Response) => {
         'FFD4F7F4', 'FFF7D4D4', 'FFE8D4F7', 'FFD4F0F7', 'FFF7E8D4',
       ];
 
+      const marketHeaders = [
+        'Kette',
+        'Mars Fil Nr',
+        'Interne Markt ID',
+        'Markt',
+        'Adresse',
+        'PLZ',
+        'Ort',
+        'Gebietsleiter'
+      ];
+      const itemHeaders = result.items.map(item => {
+        const details = [item.name];
+        if (item.type === 'einzelprodukt' && item.ve != null && item.ve > 0) {
+          details.push(`VE: ${item.ve}`);
+        }
+        if (item.pricePerUnit > 0) {
+          details.push(`Wert/Einheit: €${item.pricePerUnit.toFixed(2)}`);
+        }
+        return details.join('\n');
+      });
+      const parentHeaders = result.parentItems.map(parent => (
+        `${parent.type === 'palette' ? 'Palette' : 'Schütte'}: ${parent.name}`
+      ));
+      const totalHeaders = ['Gesamt Menge', 'Gesamt VE'];
+      if (isValueBased) totalHeaders.push('Gesamt Wert');
+      const headers = [...marketHeaders, ...itemHeaders, ...parentHeaders, ...totalHeaders];
+      const metadataColumnCount = marketHeaders.length;
+      const firstItemColumn = metadataColumnCount + 1;
+      const firstParentColumn = firstItemColumn + result.items.length;
+      const totalQuantityColumn = firstParentColumn + result.parentItems.length;
+      const totalVeColumn = totalQuantityColumn + 1;
+      const totalValueColumn = totalVeColumn + 1;
+
       const sheet = workbook.addWorksheet(result.waveName, {
-        views: [{ state: 'frozen', xSplit: 4, ySplit: 3 }]
+        views: [{ state: 'frozen', xSplit: metadataColumnCount, ySplit: 3 }]
       });
 
       // Row 1: Wave name header
       const titleRow = sheet.addRow([result.waveName]);
       titleRow.font = { bold: true, size: 16 };
       titleRow.height = 28;
-      sheet.mergeCells(1, 1, 1, 4 + result.markets.length + (isValueBased ? 3 : 2));
+      sheet.mergeCells(1, 1, 1, headers.length);
 
       // Row 2: spacer
       sheet.addRow([]);
 
-      // Row 3: Column headers
-      // Layout: Nr. | Produkt | Preis/VE | VE | [markets...] | Gesamt Menge | Gesamt VE | [Gesamt Wert]
-      const headers = ['Nr.', 'Produkt', 'Preis/VE', 'VE'];
-      result.markets.forEach(m => headers.push(m.name));
-      headers.push('Gesamt Menge');
-      headers.push('Gesamt VE');
-      if (isValueBased) headers.push('Gesamt Wert');
-
+      // Row 3: market metadata followed by one quantity column per product
       const headerRowObj = sheet.addRow(headers);
       headerRowObj.font = { bold: true, size: 10 };
-      headerRowObj.fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: 'FFE2E8F0' }
-      };
       headerRowObj.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-      headerRowObj.height = 40;
+      headerRowObj.height = 72;
+
+      marketHeaders.forEach((_, index) => {
+        headerRowObj.getCell(index + 1).fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFE2E8F0' }
+        };
+      });
+      result.items.forEach((item, index) => {
+        const colorArgb = item.colorGroup >= 0
+          ? PASTEL_COLORS[item.colorGroup % PASTEL_COLORS.length]
+          : 'FFF1F5F9';
+        headerRowObj.getCell(firstItemColumn + index).fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: colorArgb }
+        };
+      });
+      result.parentItems.forEach((parent, index) => {
+        headerRowObj.getCell(firstParentColumn + index).fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: PASTEL_COLORS[parent.colorGroup % PASTEL_COLORS.length] }
+        };
+      });
+      for (let column = totalQuantityColumn; column <= headers.length; column++) {
+        headerRowObj.getCell(column).fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFCBD5E1' }
+        };
+      }
 
       // Set column widths
-      sheet.getColumn(1).width = 6;
-      sheet.getColumn(2).width = 35;
-      sheet.getColumn(3).width = 12;
-      sheet.getColumn(4).width = 8; // VE column
-      for (let i = 0; i < result.markets.length; i++) {
-        sheet.getColumn(5 + i).width = 14;
-      }
-      const gesamtMengeCol = 5 + result.markets.length;
-      const gesamtVeCol = gesamtMengeCol + 1;
-      const gesamtWertCol = gesamtVeCol + 1;
-      sheet.getColumn(gesamtMengeCol).width = 14;
-      sheet.getColumn(gesamtVeCol).width = 14;
-      if (isValueBased) sheet.getColumn(gesamtWertCol).width = 14;
-
-      // Row 4+: Child items / Einzelprodukte
-      let rowNum = 1;
-      result.items.forEach(item => {
-        // VE is only available for einzelprodukt items
-        const isEinzelprodukt = item.type === 'einzelprodukt';
-        const itemVe: number | null = isEinzelprodukt ? (item.ve ?? null) : null;
-        const veDisplay = itemVe != null && itemVe > 0 ? itemVe : '';
-
-        const rowData: any[] = [rowNum, item.name, item.pricePerUnit || '', veDisplay];
-
-        let totalQty = 0;
-        let totalValue = 0;
-        result.markets.forEach(m => {
-          const qty = result.matrix[item.id]?.[m.id] || 0;
-          rowData.push(qty || '');
-          totalQty += qty;
-          totalValue += result.valueMatrix[item.id]?.[m.id] || 0;
-        });
-
-        rowData.push(totalQty || '');
-        // Gesamt VE: totalQty / ve (only for einzelprodukt with a known ve)
-        const totalVe = (isEinzelprodukt && itemVe != null && itemVe > 0 && totalQty > 0)
-          ? +(totalQty / itemVe).toFixed(2)
-          : '';
-        rowData.push(totalVe);
-        if (isValueBased) {
-          rowData.push(totalValue);
-        }
-
-        const addedRow = sheet.addRow(rowData);
-
-        // Color coding by parent group
-        if (item.colorGroup >= 0) {
-          const colorArgb = PASTEL_COLORS[item.colorGroup % PASTEL_COLORS.length];
-          addedRow.eachCell((cell) => {
-            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: colorArgb } };
-          });
-        }
-
-        // Format price column
-        const priceCell = addedRow.getCell(3);
-        if (item.pricePerUnit) {
-          priceCell.numFmt = '€#,##0.00';
-        }
-
-        // Format market quantity cells
-        for (let i = 0; i < result.markets.length; i++) {
-          const cell = addedRow.getCell(5 + i);
-          cell.alignment = { horizontal: 'center' };
-        }
-
-        // Format totals
-        const mengeCell = addedRow.getCell(gesamtMengeCol);
-        mengeCell.font = { bold: true };
-        mengeCell.alignment = { horizontal: 'center' };
-
-        const veCell = addedRow.getCell(gesamtVeCol);
-        veCell.font = { bold: true };
-        veCell.alignment = { horizontal: 'center' };
-
-        if (isValueBased) {
-          const wertCell = addedRow.getCell(gesamtWertCol);
-          wertCell.font = { bold: true };
-          wertCell.numFmt = '€#,##0.00';
-          wertCell.alignment = { horizontal: 'right' };
-        }
-
-        rowNum++;
+      const metadataWidths = [16, 14, 16, 26, 34, 10, 18, 24];
+      metadataWidths.forEach((width, index) => {
+        sheet.getColumn(index + 1).width = width;
       });
-
-      // Separator row
-      if (result.parentItems.length > 0) {
-        const sepRow = sheet.addRow([]);
-        sepRow.height = 8;
+      for (let i = 0; i < result.items.length; i++) {
+        sheet.getColumn(firstItemColumn + i).width = 22;
       }
+      for (let i = 0; i < result.parentItems.length; i++) {
+        sheet.getColumn(firstParentColumn + i).width = 22;
+      }
+      sheet.getColumn(totalQuantityColumn).width = 14;
+      sheet.getColumn(totalVeColumn).width = 12;
+      if (isValueBased) sheet.getColumn(totalValueColumn).width = 14;
 
-      // Parent item rows (palette/schuette containers only -- no Gesamt Wert to avoid double-counting)
-      result.parentItems.forEach(parent => {
-        const rowData: any[] = ['', parent.name, '', ''];
+      // Row 4+: one market per row, with quantities across product columns
+      result.markets.forEach((market, marketIndex) => {
+        const itemQuantities = result.items.map(item => result.matrix[item.id]?.[market.id] || 0);
+        const parentQuantities = result.parentItems.map(parent => result.parentMatrix[parent.id]?.[market.id] || 0);
+        const totalQuantity = itemQuantities.reduce((sum, quantity) => sum + quantity, 0);
+        const totalVe = result.items.reduce((sum, item, index) => {
+          if (item.type !== 'einzelprodukt' || item.ve == null || item.ve <= 0) return sum;
+          return sum + (itemQuantities[index] / item.ve);
+        }, 0);
+        const totalValue = result.items.reduce(
+          (sum, item) => sum + (result.valueMatrix[item.id]?.[market.id] || 0),
+          0
+        );
 
-        let totalQty = 0;
-        result.markets.forEach(m => {
-          const qty = result.parentMatrix[parent.id]?.[m.id] || 0;
-          rowData.push(qty || '');
-          totalQty += qty;
-        });
-
-        rowData.push(totalQty || '');
-        rowData.push(''); // Gesamt VE: blank for palette/schuette
-        if (isValueBased) rowData.push('');
+        const rowData: any[] = [
+          market.chain,
+          market.marsFilNr,
+          market.internalId,
+          market.name,
+          market.address,
+          market.postalCode,
+          market.city,
+          market.gebietsleiterName,
+          ...itemQuantities.map(quantity => quantity || ''),
+          ...parentQuantities.map(quantity => quantity || ''),
+          totalQuantity || '',
+          totalVe > 0 ? +totalVe.toFixed(2) : '',
+        ];
+        if (isValueBased) rowData.push(totalValue || '');
 
         const addedRow = sheet.addRow(rowData);
-        addedRow.font = { bold: true };
+        addedRow.height = 22;
 
-        const colorArgb = PASTEL_COLORS[parent.colorGroup % PASTEL_COLORS.length];
-        addedRow.eachCell((cell) => {
+        if (marketIndex % 2 === 1) {
+          for (let column = 1; column <= metadataColumnCount; column++) {
+            addedRow.getCell(column).fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: { argb: 'FFF8FAFC' }
+            };
+          }
+        }
+
+        result.items.forEach((item, index) => {
+          const cell = addedRow.getCell(firstItemColumn + index);
+          const colorArgb = item.colorGroup >= 0
+            ? PASTEL_COLORS[item.colorGroup % PASTEL_COLORS.length]
+            : 'FFF8FAFC';
           cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: colorArgb } };
-          cell.alignment = { horizontal: 'center' };
+          cell.alignment = { horizontal: 'center', vertical: 'middle' };
         });
 
-        addedRow.getCell(2).alignment = { horizontal: 'left' };
+        result.parentItems.forEach((parent, index) => {
+          const cell = addedRow.getCell(firstParentColumn + index);
+          cell.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: PASTEL_COLORS[parent.colorGroup % PASTEL_COLORS.length] }
+          };
+          cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        });
 
-        const mengeCell = addedRow.getCell(gesamtMengeCol);
-        mengeCell.font = { bold: true, size: 11 };
+        for (let column = totalQuantityColumn; column <= headers.length; column++) {
+          const cell = addedRow.getCell(column);
+          cell.font = { bold: true };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
+          cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        }
+        if (isValueBased) addedRow.getCell(totalValueColumn).numFmt = '€#,##0.00';
       });
+
+      // Final totals row keeps the matrix directly usable for comparisons and formulas.
+      const itemTotals = result.items.map(item => (
+        result.markets.reduce((sum, market) => sum + (result.matrix[item.id]?.[market.id] || 0), 0)
+      ));
+      const parentTotals = result.parentItems.map(parent => (
+        result.markets.reduce((sum, market) => sum + (result.parentMatrix[parent.id]?.[market.id] || 0), 0)
+      ));
+      const grandQuantity = itemTotals.reduce((sum, quantity) => sum + quantity, 0);
+      const grandVe = result.items.reduce((sum, item, index) => {
+        if (item.type !== 'einzelprodukt' || item.ve == null || item.ve <= 0) return sum;
+        return sum + (itemTotals[index] / item.ve);
+      }, 0);
+      const grandValue = result.items.reduce((sum, item) => (
+        sum + result.markets.reduce(
+          (marketSum, market) => marketSum + (result.valueMatrix[item.id]?.[market.id] || 0),
+          0
+        )
+      ), 0);
+      const totalRowData: any[] = [
+        'Gesamt', '', '', '', '', '', '', '',
+        ...itemTotals.map(quantity => quantity || ''),
+        ...parentTotals.map(quantity => quantity || ''),
+        grandQuantity || '',
+        grandVe > 0 ? +grandVe.toFixed(2) : '',
+      ];
+      if (isValueBased) totalRowData.push(grandValue || '');
+      const totalRow = sheet.addRow(totalRowData);
+      totalRow.font = { bold: true };
+      totalRow.height = 24;
+      totalRow.eachCell(cell => {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCE6F1' } };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      });
+      totalRow.getCell(1).alignment = { horizontal: 'left', vertical: 'middle' };
+      if (isValueBased) totalRow.getCell(totalValueColumn).numFmt = '€#,##0.00';
+
+      sheet.autoFilter = {
+        from: { row: 3, column: 1 },
+        to: { row: 3, column: headers.length }
+      };
 
       // Add borders to all data cells
       const lastRow = sheet.rowCount;
       for (let r = 3; r <= lastRow; r++) {
         const row = sheet.getRow(r);
-        const colCount = 4 + result.markets.length + (isValueBased ? 3 : 2);
-        for (let c = 1; c <= colCount; c++) {
+        for (let c = 1; c <= headers.length; c++) {
           const cell = row.getCell(c);
           cell.border = {
             top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
@@ -222,7 +280,7 @@ router.post('/custom', async (req: Request, res: Response) => {
         }
       }
 
-      console.log(`✅ Single wave sheet created: ${result.items.length} items × ${result.markets.length} markets`);
+      console.log(`✅ Single wave sheet created: ${result.markets.length} markets × ${result.items.length} items`);
 
       // Still process other selected datasets (if any besides wellen_submissions)
       const otherDatasets = datasets.filter((id: string) => id !== 'wellen_submissions');
