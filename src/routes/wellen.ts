@@ -2597,6 +2597,27 @@ router.get('/:id', async (req: Request, res: Response) => {
       .eq('welle_id', id)
       .order('einzelprodukt_order', { ascending: true });
 
+    const { data: schuetten } = await freshClient
+      .from('wellen_schuetten')
+      .select(WELLE_SCHUETTE_SELECT_COLUMNS)
+      .eq('welle_id', id)
+      .order('schuette_order', { ascending: true });
+
+    const schuettenWithProducts = await Promise.all(
+      (schuetten || []).map(async (schuette) => {
+        const { data: products } = await freshClient
+          .from('wellen_schuetten_products')
+          .select(WELLE_SCHUETTE_PRODUCT_SELECT_COLUMNS)
+          .eq('schuette_id', schuette.id)
+          .order('product_order', { ascending: true });
+
+        return {
+          ...schuette,
+          products: products || []
+        };
+      })
+    );
+
     const { data: kwDays } = await freshClient
       .from('wellen_kw_days')
       .select(WELLE_KW_DAY_SELECT_COLUMNS)
@@ -2614,9 +2635,10 @@ router.get('/:id', async (req: Request, res: Response) => {
     const uniqueGLs = new Set(progressData.map(p => p.gebietsleiter_id)).size;
 
     // Derive types based on what items exist
-    const types: ('display' | 'kartonware' | 'einzelprodukt')[] = [];
+    const types: ('display' | 'kartonware' | 'schuette' | 'einzelprodukt')[] = [];
     if (displays && displays.length > 0) types.push('display');
     if (kartonware && kartonware.length > 0) types.push('kartonware');
+    if (schuettenWithProducts.length > 0) types.push('schuette');
     if (einzelprodukte && einzelprodukte.length > 0) types.push('einzelprodukt');
 
     const welleWithDetails = {
@@ -2632,6 +2654,7 @@ router.get('/:id', async (req: Request, res: Response) => {
       goalValue: welle.goal_value,
       displayCount: displays?.length || 0,
       kartonwareCount: kartonware?.length || 0,
+      schutteCount: schuettenWithProducts.length,
       einzelproduktCount: einzelprodukte?.length || 0,
       displays: (displays || []).map(d => ({
         id: d.id,
@@ -2652,6 +2675,19 @@ router.get('/:id', async (req: Request, res: Response) => {
           .reduce((sum, p) => sum + p.current_number, 0),
         picture: k.picture_url,
         itemValue: k.item_value
+      })),
+      schutteItems: schuettenWithProducts.map(s => ({
+        id: s.id,
+        name: s.name,
+        size: s.size,
+        picture: s.picture_url,
+        products: s.products.map((product: any) => ({
+          id: product.id,
+          name: product.name,
+          valuePerVE: product.value_per_ve,
+          ve: product.ve,
+          ean: product.ean
+        }))
       })),
       einzelproduktItems: (einzelprodukte || []).map(e => ({
         id: e.id,
