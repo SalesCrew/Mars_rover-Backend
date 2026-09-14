@@ -4,8 +4,10 @@ import { createFreshClient } from '../config/supabase';
 import ExcelJS from 'exceljs';
 import { AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
 import { sendInternalError } from '../utils/httpErrors';
+import { createWellePriceCorrectionRouter } from './wellePriceCorrection';
 
 const router = Router();
+router.use(createWellePriceCorrectionRouter());
 
 const DELIVERY_PHOTOS_BUCKET = 'vorbesteller-lieferung';
 const DELIVERY_PHOTO_SIGNED_URL_SECONDS = 60 * 60;
