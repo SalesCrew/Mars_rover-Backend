@@ -4642,62 +4642,8 @@ router.get('/:id/markets-status', requireAdmin, async (req: Request, res: Respon
       .select('id, name, chain, address, city, gebietsleiter_name, last_visit_date')
       .in('id', assignedMarketIds);
 
-    // Get KW days for this wave to determine the selling period
-    const { data: kwDaysData } = await freshClient
-      .from('wellen_kw_days')
-      .select('kw, days')
-      .eq('welle_id', welleId)
-      .order('kw_order', { ascending: true });
-
-    // Helper to get KW number and day abbreviation from a date
-    const getDateKWInfo = (date: Date): { kw: number; day: string } => {
-      // Get ISO week number
-      const tempDate = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
-      const dayNum = tempDate.getUTCDay() || 7;
-      tempDate.setUTCDate(tempDate.getUTCDate() + 4 - dayNum);
-      const yearStart = new Date(Date.UTC(tempDate.getUTCFullYear(), 0, 1));
-      const kw = Math.ceil((((tempDate.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
-      
-      // Get day abbreviation
-      const dayIndex = date.getDay(); // 0 = Sunday
-      const days = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
-      
-      return { kw, day: days[dayIndex] };
-    };
-
-    // Helper to check if a date falls within the KW selling period
-    const isDateInKWSellPeriod = (dateStr: string | null): boolean => {
-      if (!dateStr) return false;
-      const date = new Date(dateStr);
-      
-      // If no KW days defined, fall back to wave start/end dates
-      if (!kwDaysData || kwDaysData.length === 0) {
-        const startDate = new Date(welle.start_date);
-        const endDate = new Date(welle.end_date);
-        endDate.setHours(23, 59, 59, 999); // Include the entire end day
-        return date >= startDate && date <= endDate;
-      }
-
-      const { kw: visitKW, day: visitDay } = getDateKWInfo(date);
-
-      for (const kwDay of kwDaysData) {
-        // Parse KW (e.g., "KW 5" -> 5, "KW5" -> 5, "5" -> 5)
-        const kwMatch = kwDay.kw.match(/(\d+)/);
-        if (!kwMatch) continue;
-        const kwNum = parseInt(kwMatch[1], 10);
-        
-        // Check if the visit week matches this KW
-        if (visitKW === kwNum) {
-          // Check if the day matches any of the selling days (case-insensitive)
-          const allowedDays = (kwDay.days || []).map((d: string) => d.toLowerCase());
-          if (allowedDays.includes(visitDay.toLowerCase())) {
-            return true;
-          }
-        }
-      }
-
-      return false;
-    };
+    const isDateInWavePeriod = (dateStr: string | null): boolean =>
+      Boolean(dateStr && dateStr >= welle.start_date && dateStr <= welle.end_date);
 
     if (marketsError) {
       return sendInternalError(res);
@@ -4762,18 +4708,29 @@ router.get('/:id/markets-status', requireAdmin, async (req: Request, res: Respon
       submissionsByMarket.get(sub.market_id)!.push(sub);
     }
 
-    // Fetch visit history from market_visits for "besucht ohne Erfolg" check
-    const { data: visitHistory } = await freshClient
-      .from('market_visits')
-      .select('market_id, visit_date')
-      .in('market_id', assignedMarketIds);
+    // A real market visit counts for the entire wave period, independently of selling days.
+    const visitHistory: Array<{ market_id: string; visit_date: string }> = [];
+    for (const marketChunk of chunkArray(assignedMarketIds, WELLE_MARKETS_FILTER_CHUNK_SIZE)) {
+      const chunkVisits = await fetchPagedWellenMarkets<{ market_id: string; visit_date: string }>((from, to) =>
+        freshClient
+          .from('market_visits')
+          .select('market_id, visit_date')
+          .in('market_id', marketChunk)
+          .gte('visit_date', welle.start_date)
+          .lte('visit_date', welle.end_date)
+          .order('visit_date', { ascending: false })
+          .order('market_id', { ascending: true })
+          .range(from, to)
+      );
+      visitHistory.push(...chunkVisits);
+    }
 
-    const visitsByMarket = new Map<string, string[]>();
-    for (const v of (visitHistory || [])) {
-      if (!visitsByMarket.has(v.market_id)) {
-        visitsByMarket.set(v.market_id, []);
+    const latestVisitByMarket = new Map<string, string>();
+    for (const visit of visitHistory) {
+      const currentLatest = latestVisitByMarket.get(visit.market_id);
+      if (!currentLatest || visit.visit_date > currentLatest) {
+        latestVisitByMarket.set(visit.market_id, visit.visit_date);
       }
-      visitsByMarket.get(v.market_id)!.push(v.visit_date);
     }
 
     // Build visited markets with their activity details
@@ -4909,9 +4866,7 @@ router.get('/:id/markets-status', requireAdmin, async (req: Request, res: Respon
           activities
         });
       } else {
-        // Check if market was visited during the wave's selling period using visit history
-        const marketVisitDates = visitsByMarket.get(market.id) || [];
-        const visitInPeriod = marketVisitDates.find(d => isDateInKWSellPeriod(d));
+        const visitInPeriod = latestVisitByMarket.get(market.id);
 
         if (visitInPeriod) {
           visitedNoSuccess.push({
@@ -4923,7 +4878,7 @@ router.get('/:id/markets-status', requireAdmin, async (req: Request, res: Respon
             gebietsleiter: market.gebietsleiter_name,
             lastVisitDate: visitInPeriod
           });
-        } else if (isDateInKWSellPeriod(market.last_visit_date)) {
+        } else if (isDateInWavePeriod(market.last_visit_date)) {
           // Fallback to last_visit_date for visits recorded before market_visits table existed
           visitedNoSuccess.push({
             id: market.id,
