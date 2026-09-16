@@ -525,6 +525,13 @@ router.post('/custom', async (req: Request, res: Response) => {
         });
       });
 
+      if (datasetId === 'markets') {
+        sheet.autoFilter = {
+          from: { row: 1, column: 1 },
+          to: { row: sheet.rowCount, column: headerRow.length }
+        };
+      }
+
       console.log(`  ✅ Created sheet: ${datasetDef.label} (${parentCount} parents, ${childCount} children)`);
 
       // If this is wellen_submissions, create a separate product details sheet

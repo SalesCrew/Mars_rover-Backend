@@ -59,6 +59,7 @@ export const EXPORT_DATASETS: Record<string, DatasetDefinition> = {
       { id: 'internal_id', label: 'Interne ID', type: 'string', width: 15, default: true },
       { id: 'name', label: 'Name', type: 'string', width: 30, default: true },
       { id: 'chain', label: 'Kette', type: 'string', width: 15, default: true },
+      { id: 'banner', label: 'Banner', type: 'string', width: 24, default: true },
       { id: 'address', label: 'Adresse', type: 'string', width: 30, default: true },
       { id: 'city', label: 'Stadt', type: 'string', width: 15, default: true },
       { id: 'postal_code', label: 'PLZ', type: 'string', width: 10, default: true },
@@ -72,7 +73,6 @@ export const EXPORT_DATASETS: Record<string, DatasetDefinition> = {
       { id: 'phone', label: 'Telefon', type: 'string', width: 18, default: false },
       { id: 'email', label: 'Email', type: 'string', width: 25, default: false },
       { id: 'channel', label: 'Kanal', type: 'string', width: 15, default: false },
-      { id: 'banner', label: 'Banner', type: 'string', width: 15, default: false },
       { id: 'subgroup', label: 'Subgroup', type: 'string', width: 20, default: false },
       { id: 'created_at', label: 'Erstellt am', type: 'datetime', width: 18, default: false }
     ]
