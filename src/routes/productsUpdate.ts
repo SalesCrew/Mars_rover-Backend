@@ -177,6 +177,11 @@ export const runDueProductUpdateBatches = async () => {
 };
 
 export const startProductUpdateScheduler = () => {
+  // Local inspection against a production-backed database must never activate due batches.
+  if (process.env.DISABLE_PRODUCT_UPDATE_SCHEDULER === 'true') {
+    console.log('Product update scheduler disabled for this process');
+    return;
+  }
   if (schedulerStarted) return;
   schedulerStarted = true;
 

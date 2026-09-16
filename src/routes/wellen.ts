@@ -96,7 +96,8 @@ const ensureWellenPhotosBucket = async (client: ReturnType<typeof createFreshCli
 
 async function createSignedWellenPhotoUrl(
   freshClient: ReturnType<typeof createFreshClient>,
-  value: string
+  value: string,
+  preview: boolean = false
 ): Promise<{ url: string; path?: string }> {
   const privatePath = extractStoragePathFromValue(value, WELLEN_PHOTOS_BUCKET);
   const legacyPath = extractStoragePathFromValue(value, WELLEN_IMAGES_BUCKET);
@@ -104,14 +105,15 @@ async function createSignedWellenPhotoUrl(
   if (!path) return { url: value };
 
   const primaryBucket = privatePath ? WELLEN_PHOTOS_BUCKET : WELLEN_IMAGES_BUCKET;
+  const previewOptions = preview ? { transform: { width: 640, quality: 65, resize: 'contain' as const } } : undefined;
   const { data, error } = await freshClient.storage
     .from(primaryBucket)
-    .createSignedUrl(path, WELLEN_PHOTO_SIGNED_URL_SECONDS);
+    .createSignedUrl(path, WELLEN_PHOTO_SIGNED_URL_SECONDS, previewOptions);
 
   if ((!data?.signedUrl || error) && primaryBucket === WELLEN_PHOTOS_BUCKET) {
     const fallback = await freshClient.storage
       .from(WELLEN_IMAGES_BUCKET)
-      .createSignedUrl(path, WELLEN_PHOTO_SIGNED_URL_SECONDS);
+      .createSignedUrl(path, WELLEN_PHOTO_SIGNED_URL_SECONDS, previewOptions);
     if (fallback.data?.signedUrl) {
       return { url: fallback.data.signedUrl, path };
     }
@@ -123,6 +125,22 @@ async function createSignedWellenPhotoUrl(
   }
 
   return { url: data.signedUrl, path };
+}
+
+async function createSignedAdminFragebogenPhotoUrl(
+  freshClient: ReturnType<typeof createFreshClient>,
+  value: string
+): Promise<string> {
+  const bucket = 'fragebogen-response-images';
+  const path = extractStoragePathFromValue(value, bucket);
+  if (!path) return value;
+  const { data, error } = await freshClient.storage.from(bucket)
+    .createSignedUrl(path, WELLEN_PHOTO_SIGNED_URL_SECONDS);
+  if (error || !data?.signedUrl) {
+    console.warn('Could not sign Fragebogen admin photo URL');
+    return value;
+  }
+  return data.signedUrl;
 }
 
 async function removeWellenPhotoObject(
@@ -1969,7 +1987,6 @@ type AdminPhotoRow = {
   createdAt: string;
 };
 
-const FOTOFRAGEN_RESPONSE_CHUNK_SIZE = 60;
 const ADMIN_PHOTO_PAGE_SIZE = 1000;
 const ADMIN_PHOTO_LOOKUP_CHUNK_SIZE = 250;
 
@@ -2115,7 +2132,8 @@ async function fetchAdminRowsByIdChunks(
 
 async function fetchPagedWellenPhotoRows(
   freshClient: ReturnType<typeof createFreshClient>,
-  filters: AdminPhotoFilters
+  filters: AdminPhotoFilters,
+  includeAllDates: boolean = false
 ): Promise<any[]> {
   const rows: any[] = [];
 
@@ -2124,6 +2142,7 @@ async function fetchPagedWellenPhotoRows(
       .from('wellen_photos')
       .select('id, welle_id, gebietsleiter_id, market_id, photo_url, tags, comment, created_at')
       .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
       .range(offset, offset + ADMIN_PHOTO_PAGE_SIZE - 1);
 
     if (filters.welleId) query = query.eq('welle_id', filters.welleId);
@@ -2133,7 +2152,7 @@ async function fetchPagedWellenPhotoRows(
     if (filters.startDate) query = query.gte('created_at', `${filters.startDate}T00:00:00`);
     if (filters.endDate) query = query.lte('created_at', `${filters.endDate}T23:59:59`);
 
-    if (!filters.welleId && !filters.startDate && !filters.endDate) {
+    if (!includeAllDates && !filters.welleId && !filters.startDate && !filters.endDate) {
       const sixMonthsAgo = new Date();
       sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
       query = query.gte('created_at', sixMonthsAgo.toISOString());
@@ -2150,11 +2169,43 @@ async function fetchPagedWellenPhotoRows(
   return rows;
 }
 
+async function fetchWellenPhotoPage(
+  freshClient: ReturnType<typeof createFreshClient>,
+  filters: AdminPhotoFilters,
+  offset: number,
+  limit: number
+): Promise<{ rows: any[]; total: number }> {
+  let query = freshClient
+    .from('wellen_photos')
+    .select('id, welle_id, gebietsleiter_id, market_id, photo_url, tags, comment, created_at', { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (filters.welleId) query = query.eq('welle_id', filters.welleId);
+  if (filters.glId) query = query.eq('gebietsleiter_id', filters.glId);
+  if (filters.marketId) query = query.eq('market_id', filters.marketId);
+  if (filters.tags.length > 0) query = query.contains('tags', filters.tags);
+  if (filters.startDate) query = query.gte('created_at', `${filters.startDate}T00:00:00`);
+  if (filters.endDate) query = query.lte('created_at', `${filters.endDate}T23:59:59`);
+  if (!filters.welleId && !filters.startDate && !filters.endDate) {
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+    query = query.gte('created_at', sixMonthsAgo.toISOString());
+  }
+
+  const { data, count, error } = await query;
+  if (error) throw error;
+  return { rows: data || [], total: count || 0 };
+}
+
 async function fetchWellenPhotoRowsForAdmin(
   freshClient: ReturnType<typeof createFreshClient>,
-  filters: AdminPhotoFilters
+  filters: AdminPhotoFilters,
+  selectedRows?: any[],
+  signUrls: boolean = true
 ): Promise<AdminPhotoRow[]> {
-  const data = await fetchPagedWellenPhotoRows(freshClient, filters);
+  const data = selectedRows ?? await fetchPagedWellenPhotoRows(freshClient, filters);
 
   const welleIds = Array.from(new Set((data || []).map((p: any) => p.welle_id).filter(Boolean)));
   const glIds = Array.from(new Set((data || []).map((p: any) => p.gebietsleiter_id).filter(Boolean)));
@@ -2182,7 +2233,9 @@ async function fetchWellenPhotoRowsForAdmin(
     const marketPostalCode = String((market as any).postal_code || '');
     const marketCity = String((market as any).city || '');
     const marketAddress = [marketAddressLine, [marketPostalCode, marketCity].filter(Boolean).join(' ')].filter(Boolean).join(', ');
-    const signedPhoto = await createSignedWellenPhotoUrl(freshClient, photo.photo_url);
+    const signedPhoto = signUrls
+      ? await createSignedWellenPhotoUrl(freshClient, photo.photo_url)
+      : { url: String(photo.photo_url || '') };
 
     return {
       id: photo.id,
@@ -2212,86 +2265,71 @@ async function fetchFragebogenPhotoRowsForAdmin(
   freshClient: ReturnType<typeof createFreshClient>,
   filters: AdminPhotoFilters
 ): Promise<AdminPhotoRow[]> {
-  let responsesQuery = freshClient
-    .from('fb_responses')
-    .select('id,fragebogen_id,gebietsleiter_id,market_id')
-    .order('started_at', { ascending: false });
-
-  if (filters.fragebogenId) responsesQuery = responsesQuery.eq('fragebogen_id', filters.fragebogenId);
-  if (filters.glId) responsesQuery = responsesQuery.eq('gebietsleiter_id', filters.glId);
-  if (filters.marketId) responsesQuery = responsesQuery.eq('market_id', filters.marketId);
-
-  const { data: responses, error: responsesError } = await responsesQuery;
-  if (responsesError) throw responsesError;
-  if (!responses || responses.length === 0) return [];
-
-  const responseMap = new Map((responses || []).map((r: any) => [r.id, r]));
-  const responseIds = Array.from(responseMap.keys());
   const answerRows: any[] = [];
-
-  for (const responseChunk of chunkArray(responseIds, FOTOFRAGEN_RESPONSE_CHUNK_SIZE)) {
+  const sixMonthsAgo = new Date();
+  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  for (let offset = 0; ; offset += ADMIN_PHOTO_PAGE_SIZE) {
     let answersQuery = freshClient
       .from('fb_response_answers')
-      .select('id,response_id,question_id,answer_file_url,answered_at')
+      .select('id,question_id,answer_file_url,answer_json,answered_at,response:fb_responses!inner(id,fragebogen_id,gebietsleiter_id,market_id)')
       .eq('question_type', 'photo_upload')
-      .in('response_id', responseChunk)
-      .not('answer_file_url', 'is', null);
+      .gte('answered_at', sixMonthsAgo.toISOString())
+      .order('answered_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(offset, offset + ADMIN_PHOTO_PAGE_SIZE - 1);
 
+    if (filters.fragebogenId) answersQuery = answersQuery.eq('response.fragebogen_id', filters.fragebogenId);
+    if (filters.glId) answersQuery = answersQuery.eq('response.gebietsleiter_id', filters.glId);
+    if (filters.marketId) answersQuery = answersQuery.eq('response.market_id', filters.marketId);
     if (filters.startDate) answersQuery = answersQuery.gte('answered_at', `${filters.startDate}T00:00:00`);
     if (filters.endDate) answersQuery = answersQuery.lte('answered_at', `${filters.endDate}T23:59:59`);
 
-    const { data: answersData, error: answersError } = await answersQuery.order('answered_at', { ascending: false });
-    if (answersError) throw answersError;
-
-    answerRows.push(
-      ...(answersData || []).filter((a: any) => typeof a.answer_file_url === 'string' && a.answer_file_url.trim() !== '')
-    );
+    const { data, error } = await answersQuery;
+    if (error) throw error;
+    answerRows.push(...(data || []).filter((answer: any) =>
+      (Array.isArray(answer.answer_json) && answer.answer_json.some((url: unknown) => typeof url === 'string' && url.trim()))
+      || (typeof answer.answer_file_url === 'string' && answer.answer_file_url.trim())
+    ));
+    if (!data || data.length < ADMIN_PHOTO_PAGE_SIZE) break;
   }
 
   if (answerRows.length === 0) return [];
-
-  const sixMonthsAgo = new Date();
-  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-  const sixMonthsAgoMs = sixMonthsAgo.getTime();
-
-  const filteredByAge = answerRows.filter((row: any) => {
-    const ts = new Date(row.answered_at).getTime();
-    return !Number.isNaN(ts) ? ts >= sixMonthsAgoMs : true;
-  });
-  if (filteredByAge.length === 0) return [];
-
+  const responses = answerRows.map((answer: any) => answer.response).filter(Boolean);
   const fragebogenIds = Array.from(new Set(responses.map((r: any) => r.fragebogen_id).filter(Boolean)));
   const glIds = Array.from(new Set(responses.map((r: any) => r.gebietsleiter_id).filter(Boolean)));
   const marketIds = Array.from(new Set(responses.map((r: any) => r.market_id).filter(Boolean)));
 
-  const [fragebogenResult, usersResult, marketsResult] = await Promise.all([
+  const [frageboegen, users, markets] = await Promise.all([
     fragebogenIds.length > 0
-      ? freshClient.from('fb_fragebogen').select('id,name').in('id', fragebogenIds)
-      : Promise.resolve({ data: [] as any[] }),
+      ? fetchAdminRowsByIdChunks(freshClient, 'fb_fragebogen', 'id,name', fragebogenIds)
+      : Promise.resolve([] as any[]),
     glIds.length > 0
-      ? freshClient.from('users').select('id,first_name,last_name').in('id', glIds)
-      : Promise.resolve({ data: [] as any[] }),
+      ? fetchAdminRowsByIdChunks(freshClient, 'users', 'id,first_name,last_name', glIds)
+      : Promise.resolve([] as any[]),
     marketIds.length > 0
-      ? freshClient.from('markets').select('id,name,chain,address,city,postal_code').in('id', marketIds)
-      : Promise.resolve({ data: [] as any[] })
+      ? fetchAdminRowsByIdChunks(freshClient, 'markets', 'id,name,chain,address,city,postal_code', marketIds)
+      : Promise.resolve([] as any[])
   ]);
 
-  const fragebogenMap = new Map((fragebogenResult.data || []).map((fb: any) => [fb.id, fb.name]));
+  const fragebogenMap = new Map(frageboegen.map((fb: any) => [fb.id, fb.name]));
   const userMap = new Map(
-    (usersResult.data || []).map((u: any) => [u.id, `${u.first_name || ''} ${u.last_name || ''}`.trim() || 'Unbekannt'])
+    users.map((u: any) => [u.id, `${u.first_name || ''} ${u.last_name || ''}`.trim() || 'Unbekannt'])
   );
-  const marketMap = new Map((marketsResult.data || []).map((m: any) => [m.id, m]));
+  const marketMap = new Map(markets.map((m: any) => [m.id, m]));
 
-  return filteredByAge.map((answer: any) => {
-    const response = responseMap.get(answer.response_id) || {};
+  return answerRows.flatMap((answer: any) => {
+    const response = answer.response || {};
     const market = marketMap.get((response as any).market_id) || {};
     const marketAddressLine = String((market as any).address || '');
     const marketPostalCode = String((market as any).postal_code || '');
     const marketCity = String((market as any).city || '');
     const marketAddress = [marketAddressLine, [marketPostalCode, marketCity].filter(Boolean).join(' ')].filter(Boolean).join(', ');
 
-    return {
-      id: answer.id,
+    const photoUrls = Array.isArray(answer.answer_json) && answer.answer_json.length > 0
+      ? answer.answer_json.filter((url: unknown): url is string => typeof url === 'string' && url.trim().length > 0)
+      : [String(answer.answer_file_url || '')].filter(Boolean);
+    return photoUrls.map((photoUrl: string, index: number) => ({
+      id: `${answer.id}:${index}`,
       source: 'fotofragen',
       welleId: '',
       welleName: '',
@@ -2306,11 +2344,11 @@ async function fetchFragebogenPhotoRowsForAdmin(
       marketPostalCode,
       marketCity,
       marketAddress,
-      photoUrl: String(answer.answer_file_url || ''),
+      photoUrl,
       tags: [],
       comment: null,
       createdAt: answer.answered_at || ''
-    } as AdminPhotoRow;
+    } as AdminPhotoRow));
   });
 }
 
@@ -2319,7 +2357,8 @@ async function fetchAdminPhotoRows(
   filters: AdminPhotoFilters
 ): Promise<AdminPhotoRow[]> {
   const loadWellen = filters.source === 'all' || filters.source === 'fotowelle';
-  const loadFragebogen = filters.source === 'all' || filters.source === 'fotofragen';
+  const loadFragebogen = !filters.welleId && filters.tags.length === 0
+    && (filters.source === 'all' || filters.source === 'fotofragen');
 
   const [wellenRows, fragebogenRows] = await Promise.all([
     loadWellen ? fetchWellenPhotoRowsForAdmin(freshClient, filters) : Promise.resolve([] as AdminPhotoRow[]),
@@ -2334,8 +2373,115 @@ async function fetchAdminPhotoRows(
       return tB - tA;
     });
 
-  if (filters.source === 'all') return merged;
-  return merged.filter(row => row.source === filters.source);
+  const selected = filters.source === 'all' ? merged : merged.filter(row => row.source === filters.source);
+  return Promise.all(selected.map(async row => row.source === 'fotofragen'
+    ? { ...row, photoUrl: await createSignedAdminFragebogenPhotoUrl(freshClient, row.photoUrl) }
+    : row));
+}
+
+async function signAdminPhotoPage(
+  freshClient: ReturnType<typeof createFreshClient>,
+  rows: AdminPhotoRow[]
+): Promise<AdminPhotoRow[]> {
+  return Promise.all(rows.map(async row => {
+    if (row.source === 'fotofragen') {
+      return { ...row, photoUrl: await createSignedAdminFragebogenPhotoUrl(freshClient, row.photoUrl) };
+    }
+    const signed = await createSignedWellenPhotoUrl(freshClient, row.photoUrl, true);
+    return { ...row, photoUrl: signed.url };
+  }));
+}
+
+async function fetchAdminPhotoPage(
+  freshClient: ReturnType<typeof createFreshClient>,
+  filters: AdminPhotoFilters,
+  offset: number,
+  limit: number
+): Promise<{ photos: AdminPhotoRow[]; total: number }> {
+  const loadWellen = filters.source !== 'fotofragen';
+  // A selected Fotowelle or photo tag can never match Fotofragen.
+  const loadFragebogen = !filters.welleId && filters.tags.length === 0 && filters.source !== 'fotowelle';
+  const fragebogenPromise = loadFragebogen
+    ? fetchFragebogenPhotoRowsForAdmin(freshClient, filters)
+    : Promise.resolve([] as AdminPhotoRow[]);
+  const prefixLength = offset + limit;
+  let waveRows: any[] = [];
+  let waveTotal = 0;
+  if (loadWellen) {
+    if (filters.source === 'fotowelle' || filters.welleId || !loadFragebogen) {
+      const page = await fetchWellenPhotoPage(freshClient, filters, offset, limit);
+      waveRows = page.rows;
+      waveTotal = page.total;
+    } else {
+      for (let from = 0; from < prefixLength; from += ADMIN_PHOTO_PAGE_SIZE) {
+        const page = await fetchWellenPhotoPage(
+          freshClient, filters, from, Math.min(ADMIN_PHOTO_PAGE_SIZE, prefixLength - from)
+        );
+        waveRows.push(...page.rows);
+        waveTotal = page.total;
+        if (page.rows.length < Math.min(ADMIN_PHOTO_PAGE_SIZE, prefixLength - from)) break;
+      }
+    }
+  }
+
+  const [wellenRows, fragebogenRows] = await Promise.all([
+    waveRows.length ? fetchWellenPhotoRowsForAdmin(freshClient, filters, waveRows, false) : Promise.resolve([]),
+    fragebogenPromise,
+  ]);
+
+  fragebogenRows.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  const total = waveTotal + fragebogenRows.length;
+  const selectedRows = loadFragebogen && loadWellen
+    ? [...wellenRows, ...fragebogenRows]
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+        .slice(offset, prefixLength)
+    : loadFragebogen ? fragebogenRows.slice(offset, prefixLength) : wellenRows;
+  return { photos: await signAdminPhotoPage(freshClient, selectedRows), total };
+}
+
+async function fetchAdminPhotoFacets(freshClient: ReturnType<typeof createFreshClient>) {
+  const filters: AdminPhotoFilters = { source: 'all', tags: [] };
+  const [rawWellen, fragebogenRows, waveOptionsResult] = await Promise.all([
+    fetchPagedWellenPhotoRows(freshClient, filters, true),
+    fetchFragebogenPhotoRowsForAdmin(freshClient, filters),
+    freshClient.from('wellen').select('id,name,start_date,end_date')
+      .eq('foto_enabled', true).eq('is_deleted', false)
+      .order('start_date', { ascending: false }),
+  ]);
+  if (waveOptionsResult.error) throw waveOptionsResult.error;
+  const wellenRows = await fetchWellenPhotoRowsForAdmin(freshClient, filters, rawWellen, false);
+  const allRows = [...wellenRows, ...fragebogenRows];
+  const gls = new Map<string, string>();
+  const markets = new Map<string, { id: string; name: string; fullAddress: string }>();
+  const frageboegen = new Map<string, string>();
+  const tags = new Set<string>();
+  const glsBySource: Record<AdminPhotoSource, Map<string, string>> = {
+    fotowelle: new Map(), fotofragen: new Map(),
+  };
+  for (const row of allRows) {
+    if (row.glId && row.glName) {
+      gls.set(row.glId, row.glName);
+      glsBySource[row.source].set(row.glId, row.glName);
+    }
+    if (row.marketId && row.marketName) {
+      markets.set(row.marketId, { id: row.marketId, name: row.marketName, fullAddress: row.marketAddress });
+    }
+    if (row.fragebogenId && row.fragebogenName) frageboegen.set(row.fragebogenId, row.fragebogenName);
+    for (const tag of row.tags) tags.add(tag);
+  }
+  const mapGl = (items: Map<string, string>) => Array.from(items, ([id, name]) => ({ id, name }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'de'));
+  return {
+    waves: (waveOptionsResult.data || []).map((wave: any) => ({
+      id: wave.id, name: wave.name, startDate: wave.start_date, endDate: wave.end_date,
+    })),
+    gls: mapGl(gls),
+    glsBySource: { fotowelle: mapGl(glsBySource.fotowelle), fotofragen: mapGl(glsBySource.fotofragen) },
+    markets: Array.from(markets.values()).sort((a, b) => a.name.localeCompare(b.name, 'de')),
+    tags: Array.from(tags).sort((a, b) => a.localeCompare(b, 'de')),
+    frageboegen: Array.from(frageboegen, ([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'de')),
+  };
 }
 
 router.post('/photos/upload', async (req: AuthRequest, res: Response) => {
@@ -2407,16 +2553,43 @@ router.post('/photos/upload', async (req: AuthRequest, res: Response) => {
   }
 });
 
+router.get('/photos/facets', requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const facets = await fetchAdminPhotoFacets(createFreshClient());
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    return res.json(facets);
+  } catch (error) {
+    console.error('Error fetching photo facets');
+    return sendInternalError(res);
+  }
+});
+
+router.get('/photos/:id/original-url', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const freshClient = createFreshClient();
+    const { data, error } = await freshClient.from('wellen_photos')
+      .select('photo_url').eq('id', req.params.id).maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Photo not found' });
+    const signed = await createSignedWellenPhotoUrl(freshClient, data.photo_url);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ url: signed.url });
+  } catch (error) {
+    console.error('Error fetching original photo URL');
+    return sendInternalError(res);
+  }
+});
+
 router.get('/photos', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { welle_id, fragebogen_id, gl_id, market_id, tag, tags, source, start_date, end_date, limit: limitParam, offset: offsetParam } = req.query;
     const parsedSource = parseAdminPhotoSource(source);
     const selectedTags = parsePhotoTagFilter(tags, tag);
-    const limit = Math.max(1, Math.min(1000, Number(limitParam) || 200));
+    const limit = Math.max(1, Math.min(100, Number(limitParam) || 30));
     const offset = Math.max(0, Number(offsetParam) || 0);
     const freshClient = createFreshClient();
 
-    const allRows = await fetchAdminPhotoRows(freshClient, {
+    const page = await fetchAdminPhotoPage(freshClient, {
       source: parsedSource,
       welleId: typeof welle_id === 'string' ? welle_id : undefined,
       fragebogenId: typeof fragebogen_id === 'string' ? fragebogen_id : undefined,
@@ -2425,10 +2598,10 @@ router.get('/photos', requireAdmin, async (req: Request, res: Response) => {
       tags: selectedTags,
       startDate: typeof start_date === 'string' ? start_date : undefined,
       endDate: typeof end_date === 'string' ? end_date : undefined
-    });
+    }, offset, limit);
 
-    const pagedRows = allRows.slice(offset, offset + limit);
-    res.json({ photos: pagedRows, total: allRows.length });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(page);
   } catch (error: any) {
     console.error('Error fetching photos');
     sendInternalError(res);

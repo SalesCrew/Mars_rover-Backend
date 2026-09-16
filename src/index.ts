@@ -6,6 +6,7 @@ import express from 'express';
 import cors from 'cors';
 import authRouter from './routes/auth';
 import marketsRouter from './routes/markets';
+import marketAdminCommentsRouter from './routes/marketAdminComments';
 import actionHistoryRouter from './routes/actionHistory';
 import gebietsleiterRouter from './routes/gebietsleiter';
 import productsRouter from './routes/products';
@@ -101,6 +102,14 @@ app.use((req, _res, next) => {
   next();
 });
 
+// Keep a production-backed localhost preview safe while allowing sign-in/session refresh.
+app.use((req, res, next) => {
+  if (process.env.READ_ONLY_INSPECTION !== 'true' || !req.path.startsWith('/api/')) return next();
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  if (req.method === 'POST' && ['/api/auth/login', '/api/auth/refresh', '/api/auth/logout'].includes(req.path)) return next();
+  return res.status(403).json({ error: 'Local inspection is read-only' });
+});
+
 // API Routes
 console.log('Registering auth routes...');
 app.use('/api/auth', authRouter);
@@ -110,6 +119,7 @@ app.use('/api/auth', authRouter);
 app.use('/api', authenticateToken);
 
 console.log('Registering markets routes...');
+app.use('/api/markets', marketAdminCommentsRouter);
 app.use('/api/markets', marketsRouter);
 console.log('Registering action-history routes...');
 app.use('/api/action-history', requireAdmin, actionHistoryRouter);
