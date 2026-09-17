@@ -4,6 +4,7 @@ import { createFreshClient } from '../config/supabase';
 import ExcelJS from 'exceljs';
 import { AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
 import { sendInternalError } from '../utils/httpErrors';
+import { summarizeWellenPhotosByMarket, type WellenPhotoMarketRow } from '../utils/wellenPhotoHistory';
 import { createWellePriceCorrectionRouter } from './wellePriceCorrection';
 
 const router = Router();
@@ -3822,6 +3823,40 @@ router.get('/:id/progress/:glId', requireSelfOrAdmin(req => req.params.glId), as
     res.json(data);
   } catch (error: any) {
     console.error('❌ Error fetching progress:');
+    sendInternalError(res);
+  }
+});
+
+// ============================================================================
+// GET GL PHOTO MARKETS FOR A WELLE - For GL Vorbesteller History
+// ============================================================================
+router.get('/:welleId/gl-photo-markets/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: AuthRequest, res: Response) => {
+  try {
+    const { welleId, glId } = req.params;
+    const effectiveGlId = req.user?.role === 'admin' ? glId : getAuthenticatedGlId(req.user);
+    if (!effectiveGlId) return res.status(400).json({ error: 'gebietsleiter_id required' });
+
+    const freshClient = createFreshClient();
+    const photos = await fetchPagedWellenMarkets<{ id: string; market_id: string | null; created_at: string }>((from, to) =>
+      freshClient
+        .from('wellen_photos')
+        .select('id, market_id, created_at')
+        .eq('welle_id', welleId)
+        .eq('gebietsleiter_id', effectiveGlId)
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
+        .range(from, to)
+    );
+
+    const marketIds = [...new Set(photos.map(photo => photo.market_id).filter((id): id is string => Boolean(id)))];
+    const markets = marketIds.length > 0
+      ? await fetchAdminRowsByIdChunks(freshClient, 'markets', 'id, name, chain, address, postal_code, city', marketIds) as WellenPhotoMarketRow[]
+      : [];
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(summarizeWellenPhotosByMarket(photos, markets));
+  } catch (error) {
+    console.error('Error fetching GL photo markets:');
     sendInternalError(res);
   }
 });
