@@ -3,6 +3,10 @@ import ExcelJS from 'exceljs';
 import { createFreshClient } from '../config/supabase';
 import { AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
 import { sendCodedError, sendInternalError } from '../utils/httpErrors';
+import {
+  scoreFragebogenDistributionAnswers,
+  toFragebogenDistributionScore
+} from '../utils/fragebogenDistribution';
 
 const router: Router = express.Router();
 const sanitizeLoggedPath = (value: string): string =>
@@ -197,24 +201,6 @@ type FragebogenStatusResponseRow = {
   completed_at: string | null;
   user?: { id: string; first_name: string | null; last_name: string | null } | null;
 };
-
-type FragebogenDistributionScore = {
-  yes: number;
-  total: number;
-  percentage: number | null;
-};
-
-function toFragebogenDistributionScore(
-  value?: { yes: number; total: number }
-): FragebogenDistributionScore {
-  const yes = value?.yes || 0;
-  const total = value?.total || 0;
-  return {
-    yes,
-    total,
-    percentage: total > 0 ? Math.round((yes / total) * 100) : null
-  };
-}
 
 async function fetchPagedMarketsForGl(
   freshClient: ReturnType<typeof createFreshClient>,
@@ -3329,7 +3315,7 @@ router.get('/responses/gl-history/:glId', requireSelfOrAdmin(req => req.params.g
 
     const moduleIds = Array.from(new Set((fragebogenModules || []).map((row: any) => row.module_id).filter(Boolean)));
 
-    const [moduleQuestionsResult, moduleRulesResult] = await Promise.all([
+    const [moduleQuestionsResult, moduleRulesResult, distributionQuestionIdsByFragebogen] = await Promise.all([
       moduleIds.length > 0
         ? freshClient
             .from('fb_module_questions')
@@ -3360,7 +3346,8 @@ router.get('/responses/gl-history/:glId', requireSelfOrAdmin(req => req.params.g
             .from('fb_module_rules')
             .select('id, module_id, trigger_local_id, trigger_answer, operator, trigger_answer_max, action, target_local_ids')
             .in('module_id', moduleIds)
-        : Promise.resolve({ data: [], error: null } as any)
+        : Promise.resolve({ data: [], error: null } as any),
+      fetchDistributionQuestionIdsByFragebogen(freshClient, fragebogenIds)
     ]);
 
     if (moduleQuestionsResult.error) throw moduleQuestionsResult.error;
@@ -3430,15 +3417,28 @@ router.get('/responses/gl-history/:glId', requireSelfOrAdmin(req => req.params.g
       answersByResponseId.set(answer.response_id, existing);
     });
 
-    const payload = responses.map((response: any) => ({
-      ...response,
-      modules: (modulesByFragebogenId.get(response.fragebogen_id) || []).map((module: any) => ({
-        ...module,
-        questions: [...module.questions],
-        rules: [...module.rules]
-      })),
-      answers: answersByResponseId.get(response.id) || []
-    }));
+    const payload = responses.map((response: any) => {
+      const responseAnswers = answersByResponseId.get(response.id) || [];
+      const distributionScore = response.status === 'completed'
+        ? scoreFragebogenDistributionAnswers(
+            responseAnswers,
+            distributionQuestionIdsByFragebogen.get(response.fragebogen_id) || new Set<string>()
+          )
+        : toFragebogenDistributionScore();
+
+      return {
+        ...response,
+        modules: (modulesByFragebogenId.get(response.fragebogen_id) || []).map((module: any) => ({
+          ...module,
+          questions: [...module.questions],
+          rules: [...module.rules]
+        })),
+        answers: responseAnswers,
+        distributionScore: distributionScore.percentage,
+        distributionYes: distributionScore.yes,
+        distributionTotal: distributionScore.total
+      };
+    });
 
     res.json(payload);
   } catch (error: any) {
