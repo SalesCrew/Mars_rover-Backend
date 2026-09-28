@@ -3,6 +3,7 @@ import ExcelJS from 'exceljs';
 import { createFreshClient } from '../config/supabase';
 import { AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
 import { sendCodedError, sendInternalError } from '../utils/httpErrors';
+import { normalizeMarketChain, matchesMarketChainFilter } from '../utils/marketChainNormalization';
 import {
   scoreFragebogenDistributionAnswers,
   toFragebogenDistributionScore
@@ -6506,7 +6507,7 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
     const fragebogenIds: string[] = Array.from(new Set((req.body?.fragebogen_ids || []).filter(Boolean)));
     let questionIds: string[] = Array.from(new Set((req.body?.question_ids || []).filter(Boolean)));
     const selectedChains: string[] = Array.from(
-      new Set((req.body?.chains || []).map((c: string) => String(c).trim()).filter(Boolean))
+      new Set((req.body?.chains || []).map((c: string) => normalizeMarketChain(String(c))).filter(Boolean))
     );
     const targetFilter = normalizeDistributionTargetFilter(req.body?.target_filter);
     const quarterCompression = normalizeDistributionQuarterCompression(req.body?.quarter_compression);
@@ -6647,9 +6648,7 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
 
     const allowedResponseIds = completedResponses
       .filter((r: any) => {
-        if (selectedChains.length === 0) return true;
-        const chain = String(marketById.get(r.market_id)?.chain || '').trim();
-        return selectedChains.includes(chain);
+        return matchesMarketChainFilter(marketById.get(r.market_id)?.chain, selectedChains);
       })
       .map((r: any) => r.id);
 
@@ -6668,7 +6667,7 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
         if (!resp) return null;
 
         const market = marketById.get(resp.market_id);
-        const chain = String(market?.chain || '').trim();
+        const chain = normalizeMarketChain(String(market?.chain || ''));
         const completedAt = String(resp.completed_at || '');
         const completedDate = new Date(completedAt);
         if (Number.isNaN(completedDate.getTime())) return null;
