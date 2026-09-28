@@ -4,6 +4,7 @@ import { createFreshClient } from '../config/supabase';
 import ExcelJS from 'exceljs';
 import { AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
 import { sendInternalError } from '../utils/httpErrors';
+import { ZOOFACHHANDEL_CHAINS } from '../utils/marketChainNormalization';
 import { summarizeWellenPhotosByMarket, type WellenPhotoMarketRow } from '../utils/wellenPhotoHistory';
 import { createWellePriceCorrectionRouter } from './wellePriceCorrection';
 
@@ -564,7 +565,7 @@ router.get('/dashboard/chain-averages', async (req: AuthRequest, res: Response) 
     const chains = {
       billa: ['Adeg', 'Billa+', 'BILLA+', 'BILLA Plus', 'BILLA+ Privat', 'BILLA Plus Privat', 'BILLA Privat'],
       spar: ['Spar', 'SPAR Privat Popovic', 'Spar Gourmet', 'Eurospar', 'Interspar'],
-      zoofachhandel: ['Zoofachhandel', 'Futterhaus', 'Fressnapf', 'Das Futterhaus'],
+      zoofachhandel: [...ZOOFACHHANDEL_CHAINS],
       hagebau: ['Hagebau']
     };
 
@@ -4441,7 +4442,7 @@ router.get('/gl/:glId/chain-performance', requireSelfOrAdmin(req => req.params.g
     const chainGroups = {
       billa: ['Adeg', 'Billa+', 'BILLA+', 'BILLA Plus', 'BILLA+ Privat', 'BILLA Plus Privat', 'BILLA Privat'],
       spar: ['Spar', 'SPAR Privat Popovic', 'Spar Gourmet', 'Eurospar', 'Interspar'],
-      zoofachhandel: ['Zoofachhandel', 'Futterhaus', 'Fressnapf', 'Das Futterhaus'],
+      zoofachhandel: [...ZOOFACHHANDEL_CHAINS],
       hagebau: ['Hagebau']
     };
 

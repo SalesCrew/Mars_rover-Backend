@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { supabase, createFreshClient } from '../config/supabase';
 import { AuthRequest, getAuthenticatedGlId, requireAdmin } from '../middleware/auth';
 import { sendInternalError } from '../utils/httpErrors';
+import { normalizeMarketChain } from '../utils/marketChainNormalization';
 
 const router = Router();
 
@@ -62,7 +63,10 @@ const pickMarketWriteFields = (input: unknown): Record<string, any> => {
   const source = input as Record<string, any>;
   return MARKET_WRITE_FIELDS.reduce<Record<string, any>>((payload, field) => {
     if (Object.prototype.hasOwnProperty.call(source, field) && source[field] !== undefined) {
-      payload[field] = source[field];
+      const value = source[field];
+      payload[field] = field === 'chain'
+        ? normalizeMarketChain(value)
+        : value;
     }
     return payload;
   }, {});
