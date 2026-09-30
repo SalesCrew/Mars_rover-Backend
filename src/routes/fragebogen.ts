@@ -5,6 +5,12 @@ import { AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin
 import { sendCodedError, sendInternalError } from '../utils/httpErrors';
 import { normalizeMarketChain, matchesMarketChainFilter } from '../utils/marketChainNormalization';
 import {
+  distributionReportingQuarter,
+  distributionViennaDateKey,
+  isInDistributionExportDateRange,
+  normalizeDistributionExportDateRange
+} from '../utils/distributionExportDates';
+import {
   scoreFragebogenDistributionAnswers,
   toFragebogenDistributionScore
 } from '../utils/fragebogenDistribution';
@@ -6511,6 +6517,12 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
     );
     const targetFilter = normalizeDistributionTargetFilter(req.body?.target_filter);
     const quarterCompression = normalizeDistributionQuarterCompression(req.body?.quarter_compression);
+    let dateRange;
+    try {
+      dateRange = normalizeDistributionExportDateRange(req.body?.start_date, req.body?.end_date);
+    } catch (error) {
+      return res.status(400).json({ error: (error as Error).message });
+    }
 
     if (fragebogenIds.length === 0) {
       return res.status(400).json({ error: 'Mindestens ein Fragebogen muss ausgewählt werden.' });
@@ -6521,7 +6533,7 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
 
     const freshClient = createFreshClient();
 
-    const fragebogenRows = await fetchRowsByIdChunks(freshClient, 'fb_fragebogen', 'id,name', fragebogenIds);
+    const fragebogenRows = await fetchRowsByIdChunks(freshClient, 'fb_fragebogen', 'id,name,start_date,end_date', fragebogenIds);
     if (!fragebogenRows || fragebogenRows.length === 0) {
       return res.status(400).json({ error: 'Keine gültigen Fragebögen gefunden.' });
     }
@@ -6629,7 +6641,9 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
 
     const responses = await fetchPagedDistributionResponses(freshClient, fragebogenIds);
 
-    const completedResponses = (responses || []).filter((r: any) => r.market_id && r.completed_at);
+    const completedResponses = (responses || []).filter((r: any) =>
+      r.market_id && isInDistributionExportDateRange(r.completed_at, dateRange)
+    );
     const marketIds = Array.from(new Set(completedResponses.map((r: any) => r.market_id).filter(Boolean)));
     const glIds = Array.from(new Set(completedResponses.map((r: any) => r.gebietsleiter_id).filter(Boolean)));
 
@@ -6671,16 +6685,19 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
         const completedAt = String(resp.completed_at || '');
         const completedDate = new Date(completedAt);
         if (Number.isNaN(completedDate.getTime())) return null;
-        const date = applyDistributionQuarterCompression(completedDate, resp.id, quarterCompression);
+        const originalDateKey = distributionViennaDateKey(completedDate);
+        const localCompletionDate = new Date(`${originalDateKey}T12:00:00Z`);
+        const date = applyDistributionQuarterCompression(localCompletionDate, resp.id, quarterCompression);
         if (Number.isNaN(date.getTime())) return null;
         const dateKey = formatDistributionDateKey(date);
         const dateLabel = formatDistributionDateLabel(date);
-        const originalDateKey = formatDistributionDateKey(completedDate);
-        const originalDateLabel = formatDistributionDateLabel(completedDate);
+        const originalDateLabel = formatDistributionDateLabel(localCompletionDate);
         const dateWasCompressed = quarterCompression.enabled && dateKey !== originalDateKey;
         const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
         const monthLabel = `${String(date.getMonth() + 1).padStart(2, '0')}.${date.getFullYear()}`;
-        const { quarterKey, quarterLabel } = getDistributionQuarterParts(date);
+        const { quarterKey, quarterLabel } = quarterCompression.enabled
+          ? getDistributionQuarterParts(date)
+          : distributionReportingQuarter(completedDate, fragebogenById.get(resp.fragebogen_id));
         const { weekYear, week } = getIsoWeekParts(date);
         const weekKey = `${weekYear}-W${String(week).padStart(2, '0')}`;
         const weekLabel = `KW ${String(week).padStart(2, '0')} ${weekYear}`;
@@ -6752,6 +6769,8 @@ router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Re
       selectedChains,
       selectedQuestionIds: questionIds,
       selectedTargetFilter: targetFilter,
+      dateRange,
+      quarterBasis: 'questionnaire',
       quarterCompression,
       historicalAnalysis,
       selectedQuestions: Array.from(analysisQuestionsByKey.values()).map((question) => ({
