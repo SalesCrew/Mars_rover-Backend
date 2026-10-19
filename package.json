@@ -4,6 +4,7 @@
   "description": "Mars Rover Admin Backend API",
   "main": "dist/index.js",
   "scripts": {
+    "test:product-uuid": "node --import tsx --test tests/productUuid*.test.mjs",
     "test:price-correction": "node --import tsx --test tests/wellePriceCorrection*.test.mjs",
     "dev": "tsx watch src/index.ts",
     "build": "tsc",

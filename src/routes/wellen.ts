@@ -3679,6 +3679,23 @@ router.post('/:id/progress/batch', requireSelfOrAdmin(req => req.body.gebietslei
       }
     }
 
+    // The catalogue historically allowed text IDs, whereas submissions require
+    // UUIDs. Reject the entire batch before any write, including market visits.
+    const itemIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const invalidItems = items.filter((item: any) => !item || typeof item.item_id !== 'string' || !itemIdPattern.test(item.item_id));
+    if (invalidItems.length > 0) {
+      const invalidIds = invalidItems.map((item: any) => item?.item_id).filter((id: unknown): id is string => typeof id === 'string');
+      const { data: products } = invalidIds.length > 0
+        ? await freshClient.from('products').select('id, name, artikel_nr').in('id', invalidIds)
+        : { data: [] };
+      const product = products?.[0];
+      const article = product ? `Der Artikel „${product.name}“${product.artikel_nr ? ` (${product.artikel_nr})` : ''}` : 'Ein ausgewählter Artikel';
+      return res.status(422).json({
+        code: 'MR-WELLE-PRODUCT-ID-001',
+        error: `${article} konnte nicht zugeordnet werden. Es wurde nichts gespeichert. Bitte notiere die Mengen, lade Rover vollständig neu und erfasse die Eingabe erneut.`
+      });
+    }
+
     // Insert submissions (single source of truth)
     const submissionLogs = items.map((item: any) => {
       const entry: any = {
@@ -3752,7 +3769,7 @@ router.post('/:id/progress/batch', requireSelfOrAdmin(req => req.body.gebietslei
       items_updated: items.length 
     });
   } catch (error: any) {
-    console.error('❌ Error updating batch progress:');
+    console.error('❌ Error updating batch progress:', { code: error?.code || 'UNKNOWN' });
     sendInternalError(res);
   }
 });

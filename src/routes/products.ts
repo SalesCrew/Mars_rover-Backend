@@ -1,4 +1,5 @@
 import express from 'express';
+import { randomUUID } from 'crypto';
 import { createFreshClient } from '../config/supabase.js';
 import { AuthRequest, requireAdmin } from '../middleware/auth';
 import { sendInternalError } from '../utils/httpErrors';
@@ -25,7 +26,9 @@ const transformProductFromDB = (dbProduct: any) => ({
 
 // Transform from API format to DB format
 const transformProductToDB = (product: any) => ({
-  id: product.id,
+  // New catalogue rows always receive a server-generated UUID. Client IDs from
+  // Excel/manual entry are temporary; existing IDs are preserved by PUT.
+  id: randomUUID(),
   name: product.name,
   department: product.department,
   product_type: product.productType,
