@@ -2774,6 +2774,26 @@ router.get('/:id', async (req: Request, res: Response) => {
       .eq('welle_id', id)
       .order('einzelprodukt_order', { ascending: true });
 
+    const { data: paletten, error: palettenError } = await freshClient
+      .from('wellen_paletten')
+      .select(WELLE_PALETTE_SELECT_COLUMNS)
+      .eq('welle_id', id)
+      .order('palette_order', { ascending: true });
+    if (palettenError) throw palettenError;
+
+    const palettenWithProducts = await Promise.all(
+      (paletten || []).map(async (palette) => {
+        const { data: products, error: productsError } = await freshClient
+          .from('wellen_paletten_products')
+          .select(WELLE_PALETTE_PRODUCT_SELECT_COLUMNS)
+          .eq('palette_id', palette.id)
+          .order('product_order', { ascending: true });
+        if (productsError) throw productsError;
+
+        return { ...palette, products: products || [] };
+      })
+    );
+
     const { data: schuetten } = await freshClient
       .from('wellen_schuetten')
       .select(WELLE_SCHUETTE_SELECT_COLUMNS)
@@ -2812,9 +2832,10 @@ router.get('/:id', async (req: Request, res: Response) => {
     const uniqueGLs = new Set(progressData.map(p => p.gebietsleiter_id)).size;
 
     // Derive types based on what items exist
-    const types: ('display' | 'kartonware' | 'schuette' | 'einzelprodukt')[] = [];
+    const types: ('display' | 'kartonware' | 'palette' | 'schuette' | 'einzelprodukt')[] = [];
     if (displays && displays.length > 0) types.push('display');
     if (kartonware && kartonware.length > 0) types.push('kartonware');
+    if (palettenWithProducts.length > 0) types.push('palette');
     if (schuettenWithProducts.length > 0) types.push('schuette');
     if (einzelprodukte && einzelprodukte.length > 0) types.push('einzelprodukt');
 
@@ -2831,6 +2852,7 @@ router.get('/:id', async (req: Request, res: Response) => {
       goalValue: welle.goal_value,
       displayCount: displays?.length || 0,
       kartonwareCount: kartonware?.length || 0,
+      paletteCount: palettenWithProducts.length,
       schutteCount: schuettenWithProducts.length,
       einzelproduktCount: einzelprodukte?.length || 0,
       displays: (displays || []).map(d => ({
@@ -2852,6 +2874,19 @@ router.get('/:id', async (req: Request, res: Response) => {
           .reduce((sum, p) => sum + p.current_number, 0),
         picture: k.picture_url,
         itemValue: k.item_value
+      })),
+      paletteItems: palettenWithProducts.map(p => ({
+        id: p.id,
+        name: p.name,
+        size: p.size,
+        picture: p.picture_url,
+        products: p.products.map((product: any) => ({
+          id: product.id,
+          name: product.name,
+          valuePerVE: product.value_per_ve,
+          ve: product.ve,
+          ean: product.ean
+        }))
       })),
       schutteItems: schuettenWithProducts.map(s => ({
         id: s.id,
