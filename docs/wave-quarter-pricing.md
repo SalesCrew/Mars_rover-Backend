@@ -1,0 +1,15 @@
+# Quarterly wave pricing
+
+Display, cartonware and individual wave articles are selected from `quarter_price_catalog`. The server resolves the current Europe/Vienna quarter at booking time and stores the article, quarter, order quantity, VE size, order price and immutable catalog source on the submission. Individual quantities remain pieces internally; the UI accepts whole VEs. Percentage targets do not control whether prices are stored or exported.
+
+Catalog imports require an admin and record the workbook filename, SHA-256 and exact source cells. Prices for a quarter are immutable: a conflicting price or VE size rejects the whole import. Imports and historical reconciliation RPCs are restricted to service_role, behind authenticated admin API routes. The public tables have RLS and no client-role access.
+
+Legacy bookings remain usable. Installing the migration changes no existing booking prices. Exports prefer booking snapshots and label unconfirmed legacy prices. The single-wave export always includes revenue and a Buchungsdetails worksheet with article numbers, ordering units, prices and source quarter.
+
+Historical reconciliation is separate: GET `/api/wellen/catalog/reconciliation` produces a read-only preview and confirmation token; POST with that token applies only uniquely proven article/quarter matches, in one audited transaction. Existing snapshots retain their original article identity. For legacy master-product or wave article references, both article number and full normalized name must match. Missing evidence remains unchanged and appears in the downloadable report. A stale preview rejects the operation. Quantities, dates, ownership and original IDs are preserved. Audit rows retain all old pricing metadata.
+
+Release order: apply the additive `20261112132449_wave_quarter_catalog.sql` migration, import verified quarter sources, deploy backend, then frontend. Import original source lists only as actual catalog data, never as test fixtures. No synthetic orders or tests may target production.
+
+Verification uses generated synthetic XLSX files and in-memory PGlite. Backend: `node --import tsx --test tests/*.test.mjs` and `npm run build`. Frontend browser runner: `node --import ./backend/node_modules/tsx/dist/loader.mjs tests/quarter-pricing-browser.mjs`; it expects an isolated backend checkout at `frontend/backend`, Playwright on NODE_PATH, and no .env files. It refuses external fetches and exercises UI import, percentage-wave creation, whole-VE ordering, authorization failures, atomic validation, retry idempotency, article-ID retention and actual Excel generation. Frontend unit tests use the same loader with `--test tests/*.test.mjs`.
+
+Application rollback can redeploy the previous backend/frontend commits while retaining additive schema and evidence. Never drop catalog/audit tables or guess older quarter prices. A reviewed data rollback must restore only the saved audit before-images within a transaction and account for the snapshot update guard; do not reverse quantities or delete bookings.

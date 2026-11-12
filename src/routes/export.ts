@@ -47,7 +47,7 @@ router.post('/custom', async (req: Request, res: Response) => {
       const result = await transformSingleWaveExport(freshClient, options.singleWaveId, {
         glIds: filters?.glIds
       });
-      const isValueBased = result.goalType === 'value';
+      const isValueBased = true; // Valuation is independent of the wave goal type.
 
       const PASTEL_COLORS = [
         'FFD4E4F7', 'FFFDE2D4', 'FFD4F7E4', 'FFF4D4F7', 'FFF7F0D4',
@@ -66,12 +66,11 @@ router.post('/custom', async (req: Request, res: Response) => {
       ];
       const itemHeaders = result.items.map(item => {
         const details = [item.name];
+        if (item.artikelNr) details.push(`Art.-Nr. ${item.artikelNr}`);
         if (item.type === 'einzelprodukt' && item.ve != null && item.ve > 0) {
           details.push(`VE: ${item.ve}`);
         }
-        if (item.pricePerUnit > 0) {
-          details.push(`Wert/Einheit: €${item.pricePerUnit.toFixed(2)}`);
-        }
+        // Booking prices can differ by quarter; show exact prices in Buchungsdetails.
         return details.join('\n');
       });
       const parentHeaders = result.parentItems.map(parent => (
@@ -98,7 +97,7 @@ router.post('/custom', async (req: Request, res: Response) => {
       sheet.mergeCells(1, 1, 1, headers.length);
 
       // Row 2: spacer
-      sheet.addRow([]);
+      sheet.addRow([result.unverifiedPriceCount ? `${result.unverifiedPriceCount} Buchungszeilen ohne bestätigten Quartalspreis. Preisstatus siehe Buchungsdetails.` : 'Bewertung mit gespeicherten Buchungspreisen.']);
 
       // Row 3: market metadata followed by one quantity column per product
       const headerRowObj = sheet.addRow(headers);
@@ -159,8 +158,7 @@ router.post('/custom', async (req: Request, res: Response) => {
         const parentQuantities = result.parentItems.map(parent => result.parentMatrix[parent.id]?.[market.id] || 0);
         const totalQuantity = itemQuantities.reduce((sum, quantity) => sum + quantity, 0);
         const totalVe = result.items.reduce((sum, item, index) => {
-          if (item.type !== 'einzelprodukt' || item.ve == null || item.ve <= 0) return sum;
-          return sum + (itemQuantities[index] / item.ve);
+          return sum + (result.veMatrix[item.id]?.[market.id] || 0);
         }, 0);
         const totalValue = result.items.reduce(
           (sum, item) => sum + (result.valueMatrix[item.id]?.[market.id] || 0),
@@ -233,8 +231,7 @@ router.post('/custom', async (req: Request, res: Response) => {
       ));
       const grandQuantity = itemTotals.reduce((sum, quantity) => sum + quantity, 0);
       const grandVe = result.items.reduce((sum, item, index) => {
-        if (item.type !== 'einzelprodukt' || item.ve == null || item.ve <= 0) return sum;
-        return sum + (itemTotals[index] / item.ve);
+        return sum + result.markets.reduce((total, market)=>total+(result.veMatrix[item.id]?.[market.id] || 0),0);
       }, 0);
       const grandValue = result.items.reduce((sum, item) => (
         sum + result.markets.reduce(
@@ -281,6 +278,29 @@ router.post('/custom', async (req: Request, res: Response) => {
       }
 
       console.log(`✅ Single wave sheet created: ${result.markets.length} markets × ${result.items.length} items`);
+
+      // Auditable article/quarter/unit/price rows accompany the aggregate matrix.
+      const bookingRows = await transformDataset(freshClient, 'wellen_submissions', {
+        columns: ['created_at','artikel_nr','item_name','market_name','order_quantity','order_unit','order_unit_price','total_value','price_quarter','price_status'], filters: { ...(filters || {}), welleIds: [options.singleWaveId] },
+      });
+      const detailSheet = workbook.addWorksheet('Buchungsdetails');
+      detailSheet.columns = [
+        { header: 'Datum', key: 'created_at', width: 25 },
+        { header: 'Artikelnummer', key: 'artikel_nr', width: 18 },
+        { header: 'Artikel', key: 'item_name', width: 55 },
+        { header: 'Markt', key: 'market_name', width: 35 },
+        { header: 'Bestellmenge', key: 'order_quantity', width: 15 },
+        { header: 'Bestelleinheit', key: 'order_unit', width: 16 },
+        { header: 'Preis/Bestelleinheit', key: 'order_unit_price', width: 20 },
+        { header: 'Umsatz', key: 'total_value', width: 16 },
+        { header: 'Preisquartal', key: 'price_quarter', width: 15 },
+        { header: 'Preisstatus', key: 'price_status', width: 40 },
+      ];
+      bookingRows.filter(row => !row._isChild).forEach(row => detailSheet.addRow(row));
+      detailSheet.getRow(1).font = { bold: true };
+      detailSheet.getColumn('order_unit_price').numFmt = '€#,##0.00';
+      detailSheet.getColumn('total_value').numFmt = '€#,##0.00';
+      detailSheet.views = [{ state: 'frozen', ySplit: 1 }];
 
       // Still process other selected datasets (if any besides wellen_submissions)
       const otherDatasets = datasets.filter((id: string) => id !== 'wellen_submissions');

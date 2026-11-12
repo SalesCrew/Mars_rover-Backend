@@ -2,8 +2,9 @@
 // Handles joining tables, grouping nested data, and formatting for Excel output
 
 import { SupabaseClient } from '@supabase/supabase-js';
+import { submissionPrice } from './quarterPricing';
 
-const EXPORT_WELLEN_SUBMISSION_SELECT = 'id, welle_id, gebietsleiter_id, market_id, item_type, item_id, quantity, value_per_unit, parent_palette_id, delivery_photo_url, created_at';
+const EXPORT_WELLEN_SUBMISSION_SELECT = 'id, welle_id, gebietsleiter_id, market_id, item_type, item_id, quantity, value_per_unit, parent_palette_id, delivery_photo_url, artikel_nr, order_quantity, order_unit, order_unit_price, ve_size, price_year, price_quarter, price_source_id, created_at';
 const EXPORT_MARKET_SELECT = 'id, internal_id, name, chain, address, city, postal_code, gebietsleiter_name, gebietsleiter_email, gebietsleiter_id, frequency, current_visits, last_visit_date, is_active, phone, email, channel, banner, subgroup, created_at';
 const EXPORT_VORVERKAUF_ENTRY_SELECT = 'id, gebietsleiter_id, market_id, reason, notes, status, created_at';
 const EXPORT_VORVERKAUF_ITEM_SELECT = 'id, vorverkauf_entry_id, product_id, quantity, item_type';
@@ -293,8 +294,8 @@ export async function transformWellenSubmissions(
   });
 
   const [displaysData, kartonwareData, paletteProductsData, schutteProductsData] = await Promise.all([
-    fetchRowsByIdsInChunks(client, 'wellen_displays', 'id, name, item_value', displayIds),
-    fetchRowsByIdsInChunks(client, 'wellen_kartonware', 'id, name, item_value', kartonwareIds),
+    fetchRowsByIdsInChunks(client, 'wellen_displays', 'id, name, item_value, artikel_nr', displayIds),
+    fetchRowsByIdsInChunks(client, 'wellen_kartonware', 'id, name, item_value, artikel_nr', kartonwareIds),
     fetchRowsByIdsInChunks(client, 'wellen_paletten_products', 'id, name, palette_id', paletteProductIds),
     fetchRowsByIdsInChunks(client, 'wellen_schuetten_products', 'id, name, schuette_id', schutteProductIds)
   ]);
@@ -303,14 +304,14 @@ export async function transformWellenSubmissions(
   let einzelprodukteData = await fetchRowsByIdsInChunks(
     client,
     'wellen_einzelprodukte',
-    'id, name, item_value, product_id',
+    'id, name, item_value, artikel_nr, product_id',
     einzelproduktIds
   );
   if (einzelprodukteData.error) {
     einzelprodukteData = await fetchRowsByIdsInChunks(
       client,
       'wellen_einzelprodukte',
-      'id, name, item_value',
+      'id, name, item_value, artikel_nr',
       einzelproduktIds
     );
   }
@@ -366,14 +367,14 @@ export async function transformWellenSubmissions(
     schutteIds.length > 0 ? client.from('wellen_schuetten').select('id, name').in('id', schutteIds) : { data: [] }
   ]);
 
-  const itemNameMap = new Map<string, { name: string; container: string | null; itemValue: number | null }>([
-    ...(displaysData.data || []).map(d => [d.id, { name: d.name, container: null, itemValue: d.item_value || null }]),
-    ...(kartonwareData.data || []).map(k => [k.id, { name: k.name, container: null, itemValue: k.item_value || null }]),
+  const itemNameMap = new Map<string, { name: string; container: string | null; itemValue: number | null; artikelNr?: string | null }>([
+    ...(displaysData.data || []).map(d => [d.id, { name: d.name, container: null, itemValue: d.item_value ?? null, artikelNr: d.artikel_nr || null }]),
+    ...(kartonwareData.data || []).map(k => [k.id, { name: k.name, container: null, itemValue: k.item_value ?? null, artikelNr: k.artikel_nr || null }]),
     // Master products first (lower priority — wave-local entries will overwrite below)
     ...(masterProductsData.data || []).map((p: any) => [p.id, { name: p.name, container: null, itemValue: parseFloat(p.price) || null }]),
     // Wave-local einzelprodukte overwrite master entries (higher priority)
-    ...(einzelprodukteData.data || []).map(e => [e.id, { name: e.name, container: null, itemValue: e.item_value || null }])
-  ] as [string, { name: string; container: string | null; itemValue: number | null }][]);
+    ...(einzelprodukteData.data || []).map(e => [e.id, { name: e.name, container: null, itemValue: e.item_value ?? null, artikelNr: e.artikel_nr || null }])
+  ] as [string, { name: string; container: string | null; itemValue: number | null; artikelNr?: string | null }][]);
 
   const paletteMap = new Map((palettesData.data || []).map(p => [p.id, p.name]));
   const schutteMap = new Map((schuettenData.data || []).map(s => [s.id, s.name]));
@@ -543,7 +544,7 @@ export async function transformWellenSubmissions(
       } else {
         // Regular item (display, kartonware, einzelprodukt)
         // Use item_value from wave definition if available (for value-based waves)
-        const valuePerUnit = item?.itemValue || sub.value_per_unit || 0;
+        const valuePerUnit = submissionPrice(sub, item?.itemValue) ?? 0;
 
         // VE enrichment for Einzelprodukte only
         let einzelproduktVe: number | null = null;
@@ -579,6 +580,7 @@ export async function transformWellenSubmissions(
           }
         }
         
+        if (sub.item_type === 'einzelprodukt' && sub.ve_size > 0) { einzelproduktVe = sub.ve_size; quantityInVe = sub.quantity / sub.ve_size; }
         const row: SubmissionWithMeta = {
           submission_id: sub.id,
           created_at: sub.created_at,
@@ -593,11 +595,17 @@ export async function transformWellenSubmissions(
           market_city: market?.city || '',
           market_id: sub.market_id,
           item_type: sub.item_type,
+          artikel_nr: sub.artikel_nr || item?.artikelNr || '',
+          order_quantity: sub.order_quantity ?? sub.quantity,
+          order_unit: sub.order_unit || 'Stück',
+          order_unit_price: sub.order_unit_price ?? valuePerUnit,
+          price_quarter: sub.price_year ? `Q${sub.price_quarter} ${sub.price_year}` : '',
+          price_status: sub.price_source_id ? 'Quartalspreis gespeichert' : sub.value_per_unit != null ? 'Buchungspreis, Quartal nicht bestätigt' : item?.itemValue != null ? 'Wellenpreis, Quartal nicht bestätigt' : 'Preis fehlt',
           item_name: item?.name || 'Unbekannt',
           container_name: item?.container || '',
           quantity: sub.quantity,
           value_per_unit: valuePerUnit,
-          total_value: (sub.quantity * valuePerUnit),
+          total_value: sub.order_quantity != null && sub.order_unit_price != null ? Number(sub.order_quantity) * Number(sub.order_unit_price) : (sub.quantity * valuePerUnit),
           photo_url: PRIVATE_STORAGE_URL_EXPORT_VALUE,
           delivery_photo_url: PRIVATE_STORAGE_URL_EXPORT_VALUE,
           einzelprodukt_ve: einzelproduktVe !== null ? einzelproduktVe : '',
@@ -1055,6 +1063,7 @@ export async function transformGebietsleiter(
 // ============================================================================
 
 export interface SingleWaveItem {
+  artikelNr?: string | null;
   id: string;
   name: string;
   type: 'display' | 'kartonware' | 'einzelprodukt' | 'palette_product' | 'schuette_product';
@@ -1084,6 +1093,8 @@ export interface SingleWaveResult {
     gebietsleiterName: string;
   }>;
   matrix: Record<string, Record<string, number>>; // itemId -> marketId -> quantity
+  unverifiedPriceCount: number;
+  veMatrix: Record<string, Record<string, number>>;
   valueMatrix: Record<string, Record<string, number>>; // itemId -> marketId -> total value (from submissions)
   parentMatrix: Record<string, Record<string, number>>; // parentId -> marketId -> quantity
   einzelproduktVeMap: Record<string, number | null>; // itemId -> VE (from products.content)
@@ -1125,9 +1136,9 @@ export async function transformSingleWaveExport(
 
   // 2. Fetch all item types in parallel
   const [displaysRes, kartonwareRes, einzelprodukteRes, palettenRes, schuettenRes] = await Promise.all([
-    client.from('wellen_displays').select('id, name, item_value').eq('welle_id', welleId).order('display_order'),
-    client.from('wellen_kartonware').select('id, name, item_value').eq('welle_id', welleId).order('kartonware_order'),
-    client.from('wellen_einzelprodukte').select('id, name, item_value').eq('welle_id', welleId).order('einzelprodukt_order'),
+    client.from('wellen_displays').select('id, name, item_value, artikel_nr').eq('welle_id', welleId).order('display_order'),
+    client.from('wellen_kartonware').select('id, name, item_value, artikel_nr').eq('welle_id', welleId).order('kartonware_order'),
+    client.from('wellen_einzelprodukte').select('id, name, item_value, artikel_nr').eq('welle_id', welleId).order('einzelprodukt_order'),
     client.from('wellen_paletten').select('id, name, size, palette_order').eq('welle_id', welleId).order('palette_order'),
     client.from('wellen_schuetten').select('id, name, size, schuette_order').eq('welle_id', welleId).order('schuette_order'),
   ]);
@@ -1170,7 +1181,7 @@ export async function transformSingleWaveExport(
   while (hasMore) {
     let query = client
       .from('wellen_submissions')
-      .select('gebietsleiter_id, item_type, item_id, market_id, quantity, value_per_unit, created_at')
+      .select('gebietsleiter_id, item_type, item_id, market_id, quantity, value_per_unit, artikel_nr, order_quantity, order_unit, order_unit_price, ve_size, price_source_id, created_at')
       .eq('welle_id', welleId)
       .range(subFrom, subFrom + pageSize - 1);
 
@@ -1289,7 +1300,8 @@ export async function transformSingleWaveExport(
       id: d.id,
       name: d.name,
       type: 'display',
-      pricePerUnit: d.item_value || 0,
+      artikelNr: d.artikel_nr || null,
+      pricePerUnit: d.item_value ?? 0,
       parentId: null,
       parentName: null,
       parentType: null,
@@ -1304,7 +1316,8 @@ export async function transformSingleWaveExport(
       id: k.id,
       name: k.name,
       type: 'kartonware',
-      pricePerUnit: k.item_value || 0,
+      artikelNr: k.artikel_nr || null,
+      pricePerUnit: k.item_value ?? 0,
       parentId: null,
       parentName: null,
       parentType: null,
@@ -1319,7 +1332,8 @@ export async function transformSingleWaveExport(
       id: ep.id,
       name: ep.name,
       type: 'einzelprodukt',
-      pricePerUnit: ep.item_value || 0,
+      artikelNr: ep.artikel_nr || null,
+      pricePerUnit: ep.item_value ?? 0,
       parentId: null,
       parentName: null,
       parentType: null,
@@ -1341,6 +1355,7 @@ export async function transformSingleWaveExport(
 
   // 7. Build quantity + value matrices
   const matrix: Record<string, Record<string, number>> = {};
+  const veMatrix: Record<string, Record<string, number>> = {};
   const valueMatrix: Record<string, Record<string, number>> = {}; // itemId -> marketId -> total value
   const parentMatrix: Record<string, Record<string, number>> = {};
 
@@ -1362,17 +1377,21 @@ export async function transformSingleWaveExport(
 
     let unitPrice = 0;
     if (item_type === 'display' || item_type === 'kartonware' || item_type === 'einzelprodukt') {
-      unitPrice = itemPriceMap.get(item_id) || 0;
+      unitPrice = submissionPrice(sub, itemPriceMap.get(item_id)) ?? 0;
     } else if (item_type === 'palette' || item_type === 'schuette') {
       unitPrice = value_per_unit != null && value_per_unit > 0
         ? value_per_unit
         : (itemPriceMap.get(item_id) || 0);
     }
-    const subValue = quantity * unitPrice;
+    const subValue = sub.order_quantity != null && sub.order_unit_price != null ? Number(sub.order_quantity) * Number(sub.order_unit_price) : quantity * unitPrice;
 
     if (!matrix[item_id]) matrix[item_id] = {};
     matrix[item_id][market_id] = (matrix[item_id][market_id] || 0) + quantity;
 
+    if (item_type === 'einzelprodukt') {
+      const ve = Number(sub.ve_size || einzelproduktVeMap[item_id]);
+      if(ve>0){ if(!veMatrix[item_id])veMatrix[item_id]={};veMatrix[item_id][market_id]=(veMatrix[item_id][market_id] || 0)+quantity/ve; }
+    }
     if (!valueMatrix[item_id]) valueMatrix[item_id] = {};
     valueMatrix[item_id][market_id] = (valueMatrix[item_id][market_id] || 0) + subValue;
   });
@@ -1389,9 +1408,9 @@ export async function transformSingleWaveExport(
     const [palOrphan, schOrphan, dispOrphan, kartOrphan, epOrphan, masterOrphan] = await Promise.all([
       client.from('wellen_paletten_products').select('id, name, value_per_ve').in('id', orphanIds),
       client.from('wellen_schuetten_products').select('id, name, value_per_ve').in('id', orphanIds),
-      client.from('wellen_displays').select('id, name, item_value').in('id', orphanIds),
-      client.from('wellen_kartonware').select('id, name, item_value').in('id', orphanIds),
-      client.from('wellen_einzelprodukte').select('id, name, item_value').in('id', orphanIds),
+      client.from('wellen_displays').select('id, name, item_value, artikel_nr').in('id', orphanIds),
+      client.from('wellen_kartonware').select('id, name, item_value, artikel_nr').in('id', orphanIds),
+      client.from('wellen_einzelprodukte').select('id, name, item_value, artikel_nr').in('id', orphanIds),
       // Also check master products table — submissions from GL product catalog
       client.from('products').select('id, name, price').in('id', orphanIds)
     ]);
@@ -1480,7 +1499,9 @@ export async function transformSingleWaveExport(
     parentItems,
     markets,
     matrix,
+    veMatrix,
     valueMatrix,
+    unverifiedPriceCount: allSubs.filter(s => ['display','kartonware','einzelprodukt'].includes(s.item_type) && !s.price_source_id).length,
     parentMatrix,
     einzelproduktVeMap,
   };

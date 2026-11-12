@@ -7,8 +7,11 @@ import { sendInternalError } from '../utils/httpErrors';
 import { ZOOFACHHANDEL_CHAINS } from '../utils/marketChainNormalization';
 import { summarizeWellenPhotosByMarket, type WellenPhotoMarketRow } from '../utils/wellenPhotoHistory';
 import { createWellePriceCorrectionRouter } from './wellePriceCorrection';
+import { createQuarterCatalogRouter } from './quarterCatalog';
+import { catalogErrorMessage, prepareWaveCatalog, catalogItemMeta, catalogItemColumns } from '../utils/quarterPricing';
 
 const router = Router();
+router.use(createQuarterCatalogRouter());
 router.use(createWellePriceCorrectionRouter());
 
 const DELIVERY_PHOTOS_BUCKET = 'vorbesteller-lieferung';
@@ -29,17 +32,17 @@ const WELLEN_PHOTO_MIME_TO_EXTENSION: Record<string, string> = {
 };
 const WELLEN_PHOTO_ALLOWED_MIME_TYPES = Object.keys(WELLEN_PHOTO_MIME_TO_EXTENSION);
 const WELLEN_PHOTO_MAX_BYTES = 8 * 1024 * 1024;
-const WELLE_SELECT_COLUMNS = 'id, name, description, start_date, end_date, status, types, goal_type, goal_percentage, goal_value, image_url, foto_enabled, foto_only, foto_header, foto_description, no_limit_welle, is_deleted, created_at, updated_at';
-const WELLE_DISPLAY_SELECT_COLUMNS = 'id, welle_id, name, target_number, item_value, display_order, description, image_url, picture_url, ve, ve_size, vpe';
-const WELLE_KARTONWARE_SELECT_COLUMNS = 'id, welle_id, name, target_number, item_value, kartonware_order, description, image_url, picture_url, ve, ve_size, vpe';
-const WELLE_EINZELPRODUKT_SELECT_COLUMNS = 'id, welle_id, name, target_number, item_value, einzelprodukt_order, description, image_url, picture_url, artikel_nr, ve, ve_size, vpe';
+const WELLE_SELECT_COLUMNS = 'id, name, description, start_date, end_date, status, types, goal_type, goal_percentage, goal_value, image_url, foto_enabled, foto_only, foto_header, foto_description, no_limit_welle, catalog_pricing_required, is_deleted, created_at, updated_at';
+const WELLE_DISPLAY_SELECT_COLUMNS = 'id, welle_id, name, target_number, item_value, display_order, description, image_url, picture_url, ve, ve_size, vpe, catalog_key, catalog_ve_size, catalog_order_price, artikel_nr';
+const WELLE_KARTONWARE_SELECT_COLUMNS = 'id, welle_id, name, target_number, item_value, kartonware_order, description, image_url, picture_url, ve, ve_size, vpe, catalog_key, catalog_ve_size, catalog_order_price, artikel_nr';
+const WELLE_EINZELPRODUKT_SELECT_COLUMNS = 'id, welle_id, name, target_number, item_value, einzelprodukt_order, description, image_url, picture_url, artikel_nr, ve, ve_size, vpe, catalog_key, catalog_ve_size, catalog_order_price';
 const WELLE_PHOTO_TAG_SELECT_COLUMNS = 'id, welle_id, tag_name, tag_type, tag_order, created_at';
 const WELLE_PALETTE_SELECT_COLUMNS = 'id, welle_id, name, description, image_url, picture_url, size, palette_order';
 const WELLE_PALETTE_PRODUCT_SELECT_COLUMNS = 'id, palette_id, name, value_per_ve, ve, ean, product_order';
 const WELLE_SCHUETTE_SELECT_COLUMNS = 'id, welle_id, name, description, image_url, picture_url, size, schuette_order';
 const WELLE_SCHUETTE_PRODUCT_SELECT_COLUMNS = 'id, schuette_id, name, value_per_ve, ve, ean, product_order';
 const WELLE_KW_DAY_SELECT_COLUMNS = 'id, welle_id, kw, days, kw_order';
-const WELLEN_SUBMISSION_SELECT_COLUMNS = 'id, welle_id, gebietsleiter_id, market_id, item_type, item_id, quantity, value_per_unit, photo_url, submission_batch_id, created_at';
+const WELLEN_SUBMISSION_SELECT_COLUMNS = 'id, welle_id, gebietsleiter_id, market_id, item_type, item_id, quantity, value_per_unit, artikel_nr, order_quantity, order_unit, order_unit_price, ve_size, price_year, price_quarter, price_source_id, photo_url, submission_batch_id, created_at';
 const WELLEN_PHOTO_SELECT_COLUMNS = 'id, welle_id, gebietsleiter_id, market_id, photo_url, tags, comment, submission_batch_id, created_at';
 
 const parseOptionalPositiveInt = (value: unknown): number | null => {
@@ -253,6 +256,10 @@ const createExcelBuffer = async (
 // SUBMISSION AGGREGATION HELPER
 // ============================================================================
 
+export const aggregateValue = (progress: any, fallbackPrice = 0): number => progress.priced_value != null
+  ? Number(progress.priced_value) + Number(progress.unpriced_quantity || 0) * Number(fallbackPrice || 0)
+  : progress.current_number * Number(progress.value_per_unit ?? fallbackPrice ?? 0);
+
 export function aggregateSubmissions(submissions: any[]): Array<{
   welle_id: string;
   gebietsleiter_id: string;
@@ -260,6 +267,8 @@ export function aggregateSubmissions(submissions: any[]): Array<{
   item_id: string;
   current_number: number;
   value_per_unit: number | null;
+  priced_value: number;
+  unpriced_quantity: number;
   market_id: string | null;
 }> {
   const map = new Map<string, any>();
@@ -272,16 +281,17 @@ export function aggregateSubmissions(submissions: any[]): Array<{
         item_type: sub.item_type,
         item_id: sub.item_id,
         current_number: 0,
+        _priced_quantity: 0, _stored_value: 0,
         value_per_unit: null,
         market_id: null
       });
     }
     const entry = map.get(key)!;
     entry.current_number += sub.quantity || 0;
-    if (sub.value_per_unit != null) entry.value_per_unit = sub.value_per_unit;
+    if (sub.value_per_unit != null) { entry._priced_quantity += sub.quantity || 0; entry._stored_value += (sub.quantity || 0) * Number(sub.value_per_unit); }
     if (sub.market_id) entry.market_id = sub.market_id;
   }
-  return Array.from(map.values());
+  return Array.from(map.values()).map(({ _priced_quantity, _stored_value, ...entry }) => ({ ...entry, priced_value: _stored_value, unpriced_quantity: entry.current_number - _priced_quantity, value_per_unit: _priced_quantity === entry.current_number && entry.current_number > 0 ? _stored_value / entry.current_number : null }));
 }
 
 // ============================================================================
@@ -690,7 +700,7 @@ router.get('/dashboard/chain-averages', async (req: AuthRequest, res: Response) 
         {
           let query = freshClient
             .from('wellen_submissions')
-            .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
+            .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, artikel_nr, order_quantity, order_unit, order_unit_price, ve_size, price_year, price_quarter, price_source_id')
             .in('welle_id', welleIds)
             .in('item_type', ['display', 'kartonware']);
           
@@ -847,7 +857,7 @@ router.get('/dashboard/chain-averages', async (req: AuthRequest, res: Response) 
         let kartonwareProgress: any[] = [];
         
         {
-          let query = freshClient.from('wellen_submissions').select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit').in('welle_id', welleIds).in('item_type', ['display', 'kartonware']);
+          let query = freshClient.from('wellen_submissions').select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, artikel_nr, order_quantity, order_unit, order_unit_price, ve_size, price_year, price_quarter, price_source_id').in('welle_id', welleIds).in('item_type', ['display', 'kartonware']);
           if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
           const { data } = await query;
           const aggregated = aggregateSubmissions(data || []);
@@ -1045,7 +1055,7 @@ router.get('/dashboard/chain-averages', async (req: AuthRequest, res: Response) 
           let chainHasMore = true;
           while (chainHasMore) {
             let query = freshClient.from('wellen_submissions')
-              .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
+              .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, artikel_nr, order_quantity, order_unit, order_unit_price, ve_size, price_year, price_quarter, price_source_id')
               .in('welle_id', welleIds);
             if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
             const { data } = await query.range(chainSubFrom, chainSubFrom + chainPageSize - 1);
@@ -1074,11 +1084,11 @@ router.get('/dashboard/chain-averages', async (req: AuthRequest, res: Response) 
         let currentValue = 0;
         for (const progress of displayProgress) {
           const display = displays.find(d => d.id === progress.item_id);
-          if (display) currentValue += progress.current_number * (display.item_value || 0);
+          if (display) currentValue += aggregateValue(progress, display.item_value);
         }
         for (const progress of kartonwareProgress) {
           const kw = kartonware.find(k => k.id === progress.item_id);
-          if (kw) currentValue += progress.current_number * (kw.item_value || 0);
+          if (kw) currentValue += aggregateValue(progress, kw.item_value);
         }
         
         for (const progress of paletteProgressZoo) {
@@ -1095,7 +1105,7 @@ router.get('/dashboard/chain-averages', async (req: AuthRequest, res: Response) 
 
         for (const progress of einzelproduktProgressZoo) {
           const ep = (einzelprodukteZoo || []).find((e: any) => e.id === progress.item_id);
-          if (ep) currentValue += progress.current_number * (ep.item_value || 0);
+          if (ep) currentValue += aggregateValue(progress, ep.item_value);
         }
         
         const marketsWithProgressSet = new Set<string>();
@@ -1284,7 +1294,7 @@ router.get('/dashboard/chain-averages', async (req: AuthRequest, res: Response) 
           let chainHasMore = true;
           while (chainHasMore) {
             let query = freshClient.from('wellen_submissions')
-              .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
+              .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, artikel_nr, order_quantity, order_unit, order_unit_price, ve_size, price_year, price_quarter, price_source_id')
               .in('welle_id', welleIds);
             if (glFilter.length > 0) query = query.in('gebietsleiter_id', glFilter);
             const { data } = await query.range(chainSubFrom, chainSubFrom + chainPageSize - 1);
@@ -1311,11 +1321,11 @@ router.get('/dashboard/chain-averages', async (req: AuthRequest, res: Response) 
         let currentValue = 0;
         for (const progress of displayProgress) {
           const display = displays.find(d => d.id === progress.item_id);
-          if (display) currentValue += progress.current_number * (display.item_value || 0);
+          if (display) currentValue += aggregateValue(progress, display.item_value);
         }
         for (const progress of kartonwareProgress) {
           const kw = kartonware.find(k => k.id === progress.item_id);
-          if (kw) currentValue += progress.current_number * (kw.item_value || 0);
+          if (kw) currentValue += aggregateValue(progress, kw.item_value);
         }
         
         for (const progress of paletteProgress) {
@@ -1332,7 +1342,7 @@ router.get('/dashboard/chain-averages', async (req: AuthRequest, res: Response) 
 
         for (const progress of einzelproduktProgress) {
           const ep = (einzelprodukteHage || []).find((e: any) => e.id === progress.item_id);
-          if (ep) currentValue += progress.current_number * (ep.item_value || 0);
+          if (ep) currentValue += aggregateValue(progress, ep.item_value);
         }
         
         const marketsWithProgressSet = new Set<string>();
@@ -1494,7 +1504,7 @@ router.get('/dashboard/waves', async (req: AuthRequest, res: Response) => {
         // Fetch progress from submissions (single source of truth)
         let progressQuery = freshClient
           .from('wellen_submissions')
-          .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
+          .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, artikel_nr, order_quantity, order_unit, order_unit_price, ve_size, price_year, price_quarter, price_source_id')
           .eq('welle_id', welle.id);
         
         if (glFilter.length > 0) {
@@ -1540,7 +1550,7 @@ router.get('/dashboard/waves', async (req: AuthRequest, res: Response) => {
         if (welle.goal_type === 'value') {
           let submissionsQuery = freshClient
             .from('wellen_submissions')
-            .select('quantity, item_type, item_id, value_per_unit')
+            .select('quantity, item_type, item_id, value_per_unit, artikel_nr, order_quantity, order_unit, order_unit_price, ve_size, price_year, price_quarter, price_source_id')
             .eq('welle_id', welle.id);
           
           if (glFilter.length > 0) {
@@ -1555,7 +1565,7 @@ router.get('/dashboard/waves', async (req: AuthRequest, res: Response) => {
           while (subHasMore) {
             let pageQuery = freshClient
               .from('wellen_submissions')
-              .select('quantity, item_type, item_id, value_per_unit')
+              .select('quantity, item_type, item_id, value_per_unit, artikel_nr, order_quantity, order_unit, order_unit_price, ve_size, price_year, price_quarter, price_source_id')
               .eq('welle_id', welle.id);
             if (glFilter.length > 0) {
               pageQuery = pageQuery.in('gebietsleiter_id', glFilter);
@@ -1574,12 +1584,12 @@ router.get('/dashboard/waves', async (req: AuthRequest, res: Response) => {
             if (sub.item_type === 'display') {
               const display = displays.find(d => d.id === sub.item_id);
               if (display) {
-                currentValue += sub.quantity * (display.item_value || 0);
+                currentValue += sub.quantity * (sub.value_per_unit ?? display.item_value ?? 0);
               }
             } else if (sub.item_type === 'kartonware') {
               const kw = kartonware.find(k => k.id === sub.item_id);
               if (kw) {
-                currentValue += sub.quantity * (kw.item_value || 0);
+                currentValue += sub.quantity * (sub.value_per_unit ?? kw.item_value ?? 0);
               }
             } else if (sub.item_type === 'palette' || sub.item_type === 'schuette') {
               currentValue += sub.quantity * (sub.value_per_unit || 0);
@@ -1803,7 +1813,7 @@ router.get('/', async (req: Request, res: Response) => {
         // Calculate progress aggregates from submissions
         const { data: rawProgressData } = await freshClient
           .from('wellen_submissions')
-          .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
+          .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, artikel_nr, order_quantity, order_unit, order_unit_price, ve_size, price_year, price_quarter, price_source_id')
           .eq('welle_id', welle.id);
 
         const progressData = aggregateSubmissions(rawProgressData || []);
@@ -1860,6 +1870,8 @@ router.get('/', async (req: Request, res: Response) => {
               .filter(p => p.item_type === 'display' && p.item_id === d.id)
               .reduce((sum, p) => sum + p.current_number, 0),
             picture: d.picture_url,
+            ...catalogItemMeta(d),
+            currentValue: (progressData || []).filter(p => p.item_type === 'display' && p.item_id === d.id).reduce((sum,p)=>sum+aggregateValue(p,d.item_value),0),
             itemValue: d.item_value,
             ve: d.ve ?? d.ve_size ?? d.vpe ?? null
           })),
@@ -1871,6 +1883,8 @@ router.get('/', async (req: Request, res: Response) => {
               .filter(p => p.item_type === 'kartonware' && p.item_id === k.id)
               .reduce((sum, p) => sum + p.current_number, 0),
             picture: k.picture_url,
+            ...catalogItemMeta(k),
+            currentValue: (progressData || []).filter(p => p.item_type === 'kartonware' && p.item_id === k.id).reduce((sum,p)=>sum+aggregateValue(p,k.item_value),0),
             itemValue: k.item_value,
             ve: k.ve ?? k.ve_size ?? k.vpe ?? null
           })),
@@ -1908,6 +1922,8 @@ router.get('/', async (req: Request, res: Response) => {
               .filter(p => p.item_type === 'einzelprodukt' && p.item_id === e.id)
               .reduce((sum, p) => sum + p.current_number, 0),
             picture: e.picture_url,
+            ...catalogItemMeta(e),
+            currentValue: (progressData || []).filter(p => p.item_type === 'einzelprodukt' && p.item_id === e.id).reduce((sum,p)=>sum+aggregateValue(p,e.item_value),0),
             itemValue: e.item_value,
             artikelNr: e.artikel_nr || null,
             ve: e.ve ?? e.ve_size ?? e.vpe ?? null
@@ -1925,6 +1941,7 @@ router.get('/', async (req: Request, res: Response) => {
           fotoDescription: welle.foto_description || null,
           fotoTags: (fotoTagsData || []).map(t => ({ id: t.id, name: t.tag_name, type: t.tag_type })),
           fotoOnly: welle.foto_only || false,
+          catalogPricingRequired: welle.catalog_pricing_required,
           noLimitWelle: welle.no_limit_welle || false,
           // Value from submissions for items no longer present in wellen_displays / kartonware / einzelprodukte
           // (products hard-deleted before soft-delete was introduced)
@@ -1936,7 +1953,7 @@ router.get('/', async (req: Request, res: Response) => {
             ]);
             return (progressData || [])
               .filter(p => ['display', 'kartonware', 'einzelprodukt'].includes(p.item_type) && !knownIds.has(p.item_id))
-              .reduce((sum, p) => sum + (p.current_number * (p.value_per_unit || 0)), 0);
+              .reduce((sum, p) => sum + (aggregateValue(p)), 0);
           })()
         };
       })
@@ -2825,7 +2842,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 
     const { data: rawProgressSubs } = await freshClient
       .from('wellen_submissions')
-      .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit')
+      .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, artikel_nr, order_quantity, order_unit, order_unit_price, ve_size, price_year, price_quarter, price_source_id')
       .eq('welle_id', id);
 
     const progressData = aggregateSubmissions(rawProgressSubs || []);
@@ -2863,6 +2880,8 @@ router.get('/:id', async (req: Request, res: Response) => {
           .filter(p => p.item_type === 'display' && p.item_id === d.id)
           .reduce((sum, p) => sum + p.current_number, 0),
         picture: d.picture_url,
+        ...catalogItemMeta(d),
+            currentValue: (progressData || []).filter(p => p.item_type === 'display' && p.item_id === d.id).reduce((sum,p)=>sum+aggregateValue(p,d.item_value),0),
         itemValue: d.item_value
       })),
       kartonwareItems: (kartonware || []).map(k => ({
@@ -2873,6 +2892,8 @@ router.get('/:id', async (req: Request, res: Response) => {
           .filter(p => p.item_type === 'kartonware' && p.item_id === k.id)
           .reduce((sum, p) => sum + p.current_number, 0),
         picture: k.picture_url,
+        ...catalogItemMeta(k),
+            currentValue: (progressData || []).filter(p => p.item_type === 'kartonware' && p.item_id === k.id).reduce((sum,p)=>sum+aggregateValue(p,k.item_value),0),
         itemValue: k.item_value
       })),
       paletteItems: palettenWithProducts.map(p => ({
@@ -2909,6 +2930,8 @@ router.get('/:id', async (req: Request, res: Response) => {
           .filter(p => p.item_type === 'einzelprodukt' && p.item_id === e.id)
           .reduce((sum, p) => sum + p.current_number, 0),
         picture: e.picture_url,
+        ...catalogItemMeta(e),
+            currentValue: (progressData || []).filter(p => p.item_type === 'einzelprodukt' && p.item_id === e.id).reduce((sum,p)=>sum+aggregateValue(p,e.item_value),0),
         itemValue: e.item_value,
         artikelNr: e.artikel_nr || null,
         ve: e.ve ?? e.ve_size ?? e.vpe ?? null
@@ -2926,6 +2949,7 @@ router.get('/:id', async (req: Request, res: Response) => {
       fotoDescription: welle.foto_description || null,
       fotoTags: [], // Tags loaded via GET all endpoint
       fotoOnly: welle.foto_only || false,
+      catalogPricingRequired: welle.catalog_pricing_required,
       noLimitWelle: welle.no_limit_welle || false
     };
 
@@ -3003,6 +3027,7 @@ router.post('/', requireAdmin, async (req: Request, res: Response) => {
     if (noLimitWelle !== undefined) insertPayload.no_limit_welle = noLimitWelle || false;
 
     const freshClient = createFreshClient();
+    insertPayload.catalog_pricing_required = await prepareWaveCatalog(freshClient, req.body);
     const { data: welle, error: welleError } = await freshClient
       .from('wellen')
       .insert(insertPayload)
@@ -3030,7 +3055,8 @@ router.post('/', requireAdmin, async (req: Request, res: Response) => {
         welle_id: welle.id,
         name: d.name,
         target_number: d.targetNumber,
-        item_value: d.itemValue || null,
+        ...catalogItemColumns(d),
+        item_value: d.itemValue ?? null,
         picture_url: d.picture || null,
         display_order: index
       }));
@@ -3049,7 +3075,8 @@ router.post('/', requireAdmin, async (req: Request, res: Response) => {
         welle_id: welle.id,
         name: k.name,
         target_number: k.targetNumber,
-        item_value: k.itemValue || null,
+        ...catalogItemColumns(k),
+        item_value: k.itemValue ?? null,
         picture_url: k.picture || null,
         kartonware_order: index
       }));
@@ -3068,7 +3095,8 @@ router.post('/', requireAdmin, async (req: Request, res: Response) => {
         welle_id: welle.id,
         name: e.name,
         target_number: e.targetNumber,
-        item_value: e.itemValue || null,
+        ...catalogItemColumns(e),
+        item_value: e.itemValue ?? null,
         picture_url: e.picture || null,
         artikel_nr: e.artikelNr || e.artikel_nr || null,
         ve: parseOptionalPositiveInt(e.ve),
@@ -3206,6 +3234,7 @@ router.post('/', requireAdmin, async (req: Request, res: Response) => {
     res.status(201).json({ id: welle.id, message: 'Welle created successfully' });
   } catch (error: any) {
     console.error('❌ Error creating welle:');
+    if (catalogErrorMessage(error)) return res.status(422).json({ error: catalogErrorMessage(error) });
     sendInternalError(res);
   }
 });
@@ -3219,6 +3248,7 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
     console.log(`✏️ Updating welle ${id}...`);
     
     const freshClient = createFreshClient();
+    await prepareWaveCatalog(freshClient, req.body, id);
 
     const {
       name,
@@ -3287,7 +3317,7 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
     const newDisplayNames = new Set((displays || []).map((d: any) => d.name));
     
     // Delete displays that are no longer in the list
-    const displaysToDelete = (existingDisplays || []).filter(d => !newDisplayNames.has(d.name)).map(d => d.id);
+    const displaysToDelete = (existingDisplays || []).filter(d => !newDisplayNames.has(d.name) && !(displays || []).some((item: any) => item.id === d.id)).map(d => d.id);
     if (displaysToDelete.length > 0) {
       await freshClient.from('wellen_displays').delete().in('id', displaysToDelete);
     }
@@ -3296,13 +3326,15 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
     if (displays && displays.length > 0) {
       for (let index = 0; index < displays.length; index++) {
         const d = displays[index];
-        const existingId = existingDisplayMap.get(d.name);
+        const existingId = existingDisplays?.find((row: any) => row.id === d.id)?.id || existingDisplayMap.get(d.name);
         
         if (existingId) {
           // Update existing display (preserves ID for progress)
           await freshClient.from('wellen_displays').update({
+            name: d.name,
             target_number: d.targetNumber,
-            item_value: d.itemValue || null,
+            ...catalogItemColumns(d),
+            item_value: d.itemValue ?? null,
             picture_url: d.picture || null,
             display_order: index
           }).eq('id', existingId);
@@ -3312,7 +3344,8 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
             welle_id: id,
             name: d.name,
             target_number: d.targetNumber,
-            item_value: d.itemValue || null,
+            ...catalogItemColumns(d),
+            item_value: d.itemValue ?? null,
             picture_url: d.picture || null,
             display_order: index
           });
@@ -3330,7 +3363,7 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
     const newKartonwareNames = new Set((kartonwareItems || []).map((k: any) => k.name));
     
     // Delete kartonware that is no longer in the list
-    const kartonwareToDelete = (existingKartonware || []).filter(k => !newKartonwareNames.has(k.name)).map(k => k.id);
+    const kartonwareToDelete = (existingKartonware || []).filter(k => !newKartonwareNames.has(k.name) && !(kartonwareItems || []).some((item: any) => item.id === k.id)).map(k => k.id);
     if (kartonwareToDelete.length > 0) {
       await freshClient.from('wellen_kartonware').delete().in('id', kartonwareToDelete);
     }
@@ -3339,13 +3372,15 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
     if (kartonwareItems && kartonwareItems.length > 0) {
       for (let index = 0; index < kartonwareItems.length; index++) {
         const k = kartonwareItems[index];
-        const existingId = existingKartonwareMap.get(k.name);
+        const existingId = existingKartonware?.find((row: any) => row.id === k.id)?.id || existingKartonwareMap.get(k.name);
         
         if (existingId) {
           // Update existing kartonware (preserves ID for progress)
           await freshClient.from('wellen_kartonware').update({
+            name: k.name,
             target_number: k.targetNumber,
-            item_value: k.itemValue || null,
+            ...catalogItemColumns(k),
+            item_value: k.itemValue ?? null,
             picture_url: k.picture || null,
             kartonware_order: index
           }).eq('id', existingId);
@@ -3355,7 +3390,8 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
             welle_id: id,
             name: k.name,
             target_number: k.targetNumber,
-            item_value: k.itemValue || null,
+            ...catalogItemColumns(k),
+            item_value: k.itemValue ?? null,
             picture_url: k.picture || null,
             kartonware_order: index
           });
@@ -3373,7 +3409,7 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
     const newEinzelproduktNames = new Set((einzelproduktItems || []).map((e: any) => e.name));
     
     // Delete einzelprodukte that are no longer in the list
-    const einzelprodukteToDelete = (existingEinzelprodukte || []).filter(e => !newEinzelproduktNames.has(e.name)).map(e => e.id);
+    const einzelprodukteToDelete = (existingEinzelprodukte || []).filter(e => !newEinzelproduktNames.has(e.name) && !(einzelproduktItems || []).some((item: any) => item.id === e.id)).map(e => e.id);
     if (einzelprodukteToDelete.length > 0) {
       await freshClient.from('wellen_einzelprodukte').delete().in('id', einzelprodukteToDelete);
     }
@@ -3382,12 +3418,14 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
     if (einzelproduktItems && einzelproduktItems.length > 0) {
       for (let index = 0; index < einzelproduktItems.length; index++) {
         const e = einzelproduktItems[index];
-        const existingId = existingEinzelproduktMap.get(e.name);
+        const existingId = existingEinzelprodukte?.find((row: any) => row.id === e.id)?.id || existingEinzelproduktMap.get(e.name);
         
         if (existingId) {
           const einzelproduktUpdate: any = {
+            name: e.name,
             target_number: e.targetNumber,
-            item_value: e.itemValue || null,
+            ...catalogItemColumns(e),
+            item_value: e.itemValue ?? null,
             picture_url: e.picture || null,
             einzelprodukt_order: index
           };
@@ -3405,7 +3443,8 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
             welle_id: id,
             name: e.name,
             target_number: e.targetNumber,
-            item_value: e.itemValue || null,
+            ...catalogItemColumns(e),
+            item_value: e.itemValue ?? null,
             picture_url: e.picture || null,
             artikel_nr: e.artikelNr || e.artikel_nr || null,
             ve: parseOptionalPositiveInt(e.ve),
@@ -3644,6 +3683,7 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
     res.json({ message: 'Welle updated successfully' });
   } catch (error: any) {
     console.error('❌ Error updating welle:');
+    if (catalogErrorMessage(error)) return res.status(422).json({ error: catalogErrorMessage(error) });
     sendInternalError(res);
   }
 });
@@ -3717,6 +3757,9 @@ router.post('/:id/progress/batch', requireSelfOrAdmin(req => req.body.gebietslei
     // The catalogue historically allowed text IDs, whereas submissions require
     // UUIDs. Reject the entire batch before any write, including market visits.
     const itemIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (items.some((item: any) => !Number.isInteger(item?.current_number) || item.current_number <= 0 || item.current_number > 2147483647)) {
+      return res.status(422).json({ error: 'Bitte positive, ganze Bestellmengen eingeben.' });
+    }
     const invalidItems = items.filter((item: any) => !item || typeof item.item_id !== 'string' || !itemIdPattern.test(item.item_id));
     if (invalidItems.length > 0) {
       const invalidIds = invalidItems.map((item: any) => item?.item_id).filter((id: unknown): id is string => typeof id === 'string');
@@ -3805,6 +3848,7 @@ router.post('/:id/progress/batch', requireSelfOrAdmin(req => req.body.gebietslei
     });
   } catch (error: any) {
     console.error('❌ Error updating batch progress:', { code: error?.code || 'UNKNOWN' });
+    if (catalogErrorMessage(error)) return res.status(422).json({ error: catalogErrorMessage(error) });
     sendInternalError(res);
   }
 });
@@ -3845,6 +3889,7 @@ router.post('/:id/progress', requireSelfOrAdmin(req => req.body.gebietsleiter_id
     res.json({ message: 'Progress updated successfully' });
   } catch (error: any) {
     console.error('❌ Error updating progress:');
+    if (catalogErrorMessage(error)) return res.status(422).json({ error: catalogErrorMessage(error) });
     sendInternalError(res);
   }
 });
@@ -3865,7 +3910,7 @@ router.get('/:id/progress/:glId', requireSelfOrAdmin(req => req.params.glId), as
 
     const { data: rawSubs, error } = await freshClient
       .from('wellen_submissions')
-      .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, market_id')
+      .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, market_id, artikel_nr, order_quantity, order_unit, order_unit_price, ve_size, price_year, price_quarter, price_source_id')
       .eq('welle_id', welleId)
       .eq('gebietsleiter_id', effectiveGlId);
 
@@ -4003,8 +4048,8 @@ router.get('/:welleId/gl-submissions/:glId', requireSelfOrAdmin(req => req.param
         artikelNr: item?.artikelNr || null,
         ve: item?.ve ?? null,
         quantity: entry.quantity,
-        valuePerUnit: item?.item_value ?? item?.itemValue ?? entry.value_per_unit ?? 0,
-        value: entry.quantity * (item?.item_value ?? item?.itemValue ?? entry.value_per_unit ?? 0),
+        valuePerUnit: entry.value_per_unit ?? item?.item_value ?? item?.itemValue ?? 0,
+        value: entry.quantity * (entry.value_per_unit ?? item?.item_value ?? item?.itemValue ?? 0),
         timestamp: entry.created_at
       };
     });
@@ -4344,7 +4389,7 @@ router.get('/:id/all-progress', requireAdmin, async (req: Request, res: Response
         artikelNr: item?.artikelNr || null,
         ve: item?.ve ?? null,
         quantity: entry.quantity,
-        value: entry.quantity * (item?.item_value ?? item?.itemValue ?? entry.value_per_unit ?? 0),
+        value: entry.quantity * (entry.value_per_unit ?? item?.item_value ?? item?.itemValue ?? 0),
         timestamp: entry.created_at,
         photoUrl: signedPhoto?.url || entry.photo_url
       };
@@ -4501,7 +4546,7 @@ router.get('/gl/:glId/chain-performance', requireSelfOrAdmin(req => req.params.g
     // Get all submission entries for this GL (raw - need per-entry created_at for KW grouping)
     const { data: rawAllSubs, error: progressError } = await freshClient
       .from('wellen_submissions')
-      .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, market_id, created_at')
+      .select('welle_id, gebietsleiter_id, item_type, item_id, quantity, value_per_unit, market_id, created_at, artikel_nr, order_quantity, order_unit, order_unit_price, ve_size, price_year, price_quarter, price_source_id')
       .eq('gebietsleiter_id', effectiveGlId)
       .order('created_at', { ascending: true });
     
@@ -5283,7 +5328,11 @@ router.get('/export/submissions', requireAdmin, async (req: Request, res: Respon
         'Item Type': sub.item_type,
         'Item ID': sub.item_id,
         'Item Name': itemMap.get(sub.item_id) || sub.item_id,
-        'Artikelnummer': einzelproduktMeta?.artikelNr || '',
+        'Artikelnummer': sub.artikel_nr || einzelproduktMeta?.artikelNr || '',
+        'Bestellmenge': sub.order_quantity ?? sub.quantity,
+        'Bestelleinheit': sub.order_unit || 'Stück',
+        'Preis pro Bestelleinheit': sub.order_unit_price ?? sub.value_per_unit,
+        'Preisquartal': sub.price_year ? `Q${sub.price_quarter} ${sub.price_year}` : '',
         'VE': einzelproduktMeta?.ve ?? '',
         'Quantity': sub.quantity,
         'Value Per Unit': sub.value_per_unit,
@@ -5359,6 +5408,7 @@ router.put('/submissions/:submissionId', requireOwnedRowOrAdmin('wellen_submissi
       .eq('id', submissionId);
 
     if (updateError) {
+      if(catalogErrorMessage(updateError))return res.status(422).json({error:catalogErrorMessage(updateError)});
       return sendInternalError(res);
     }
 
@@ -5463,7 +5513,11 @@ router.get('/export/progress', requireAdmin, async (req: Request, res: Response)
         'Item Type': s.item_type,
         'Item ID': s.item_id,
         'Item Name': itemMap.get(s.item_id) || s.item_id,
-        'Artikelnummer': einzelproduktMeta?.artikelNr || '',
+        'Artikelnummer': s.artikel_nr || einzelproduktMeta?.artikelNr || '',
+        'Bestellmenge': s.order_quantity ?? s.quantity,
+        'Bestelleinheit': s.order_unit || 'Stück',
+        'Preis pro Bestelleinheit': s.order_unit_price ?? s.value_per_unit,
+        'Preisquartal': s.price_year ? `Q${s.price_quarter} ${s.price_year}` : '',
         'VE': einzelproduktMeta?.ve ?? '',
         'Quantity': s.quantity,
         'Value Per Unit': s.value_per_unit,
