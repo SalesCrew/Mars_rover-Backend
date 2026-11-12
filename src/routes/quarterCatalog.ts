@@ -25,7 +25,10 @@ export const createQuarterCatalogRouter = (getClient: () => any = createFreshCli
         || typeof row.name !== 'string' || !row.name.trim() || row.name.length > 500
         || !Number.isInteger(row.units_per_ve) || row.units_per_ve < 1 || row.units_per_ve > 100000
         || typeof row.price_per_order !== 'number' || !Number.isFinite(row.price_per_order) || row.price_per_order < 0 || row.price_per_order >= 100000000
-        || typeof row.source_cell !== 'string' || !row.source_cell.trim())) return res.status(400).json({ error: 'Bitte eine gültige Preisliste auswählen.' });
+        || typeof row.source_cell !== 'string' || !row.source_cell.trim()
+        || (row.source_note !== undefined && (typeof row.source_note !== 'string' || row.source_note.length > 2000))
+        || (row.source_valid_from !== undefined && (typeof row.source_valid_from !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(row.source_valid_from)
+          || !Number.isFinite(Date.parse(row.source_valid_from)) || new Date(row.source_valid_from).toISOString().slice(0,10) !== row.source_valid_from)))) return res.status(400).json({ error: 'Bitte eine gültige Preisliste auswählen.' });
     try {
       const { data, error } = await getClient().rpc('import_quarter_prices', { p_year: year, p_quarter: quarter, p_filename: filename, p_sha256: sha256, p_rows: rows, p_actor: req.user!.id });
       if (error) return res.status(error.code === '22023' ? 422 : 503).json({ error: error.code === '22023' ? error.message : 'Preisliste konnte nicht gespeichert werden.' });

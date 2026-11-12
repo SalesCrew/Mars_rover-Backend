@@ -24,6 +24,7 @@ before(async()=>{
  create table wellen_submissions(id uuid primary key default gen_random_uuid(),welle_id uuid references wellen(id),item_type text,item_id uuid,quantity integer,value_per_unit numeric,created_at timestamptz default now(),market_id text default 'synthetic-market');
  create table products(id text primary key,name text,artikel_nr text);`);
  await db.exec(await readFile(new URL('../supabase/migrations/20261112132449_wave_quarter_catalog.sql',import.meta.url),'utf8'));
+ await db.exec(await readFile(new URL('../supabase/migrations/20261112152854_wave_catalog_validity_and_exact_legacy_matches.sql',import.meta.url),'utf8'));
  period=await scalar(`select extract(year from now() at time zone 'Europe/Vienna')::int as year,extract(quarter from now() at time zone 'Europe/Vienna')::int as quarter`);
 });
 after(()=>db.close());
@@ -129,8 +130,29 @@ test('catalog and historical writes are service-only and imports reject absent p
  assert.equal((await scalar('select count(*)::int as n from quarter_price_imports')).n,0);
 });
 test('historical preview and apply process more than a PostgREST page without dropping bookings',async()=>{
- await load([row()],2026,1);
+ await load([row(),...Array.from({length:999},(_,i)=>({...row(),artikel_nr:'DECOY-'+i,name:'Synthetic decoy '+i}))],2026,1);
  await db.query("insert into wellen_submissions(welle_id,item_type,item_id,quantity,created_at) select $1,'display',$2,1,'2026-01-15' from generate_series(1,1201)",[wave,display]);
- await db.query("update wellen_displays set catalog_key='food:display:SYNTHETIC-display'");
+ await db.query("update wellen_displays set name='Synthetic display'");
  const preview=await reconcile();assert.equal(preview.count,1201);assert.equal((await reconcile(true,preview.token)).updated,1201);assert.equal((await reconcile()).count,0);
+});
+test('a supplier date outside the quarter boundary requires recorded business approval',async()=>{
+ const entry={...row(),source_valid_from:'2025-10-01'};
+ await assert.rejects(load([entry],2026,1),/Freigabe/);assert.equal((await scalar('select count(*)::int as n from quarter_price_imports')).n,0);
+ const note='Synthetic approver confirms this source for Q1 2026';await load([{...entry,source_note:note}],2026,1);
+ assert.equal((await scalar('select source_note from quarter_price_imports')).source_note,note);assert.equal((await scalar('select source_note from quarter_price_catalog')).source_note,note);
+ await assert.rejects(load([{...row(),source_valid_from:'2026-02-01'}],2026,1),/Freigabe/);
+});
+test('only a unique full name/type/quarter can recover an article number that was never saved',async()=>{
+ await load([row('display',100)],2026,1);await load([row('display',120)],2026,2);
+ await db.query("update wellen_displays set name='SYNTHETIC™   display'");
+ await db.query("insert into wellen_submissions(welle_id,item_type,item_id,quantity,created_at) values($1,'display',$2,2,'2026-01-15'),($1,'display',$2,3,'2026-04-15')",[wave,display]);
+ const p=await reconcile();assert.equal(p.count,2);assert.deepEqual(p.changes.map(c=>Number(c.newPrice)).sort(),[100,120]);assert.ok(p.changes.every(c=>c.matchMethod.includes('vollständiger Name')));assert.equal((await reconcile(true,p.token)).updated,2);
+});
+test('duplicate names and conflicting recorded article numbers cannot use the name-only fallback',async()=>{
+ await load([row('display',100),{...row('display',500),artikel_nr:'DIFFERENT-SKU'}],2026,1);
+ await db.query("update wellen_displays set name='Synthetic display'");
+ await db.query("insert into wellen_submissions(welle_id,item_type,item_id,quantity,created_at) values($1,'display',$2,2,'2026-01-15')",[wave,display]);
+ assert.equal((await reconcile()).count,0);assert.equal((await reconcile()).unresolved.length,1);
+ await db.query("update wellen_displays set artikel_nr='WRONG-SKU'");assert.equal((await reconcile()).count,0);
+ assert.equal((await scalar('select price_source_id from wellen_submissions')).price_source_id,null);
 });
