@@ -22,7 +22,8 @@ import mapsRouter from './routes/maps';
 import wochenCheckRouter from './routes/wochenCheck';
 import chatRouter from './routes/chat';
 import productsUpdateRouter, { startProductUpdateScheduler } from './routes/productsUpdate';
-import { authenticateToken, requireAdmin } from './middleware/auth';
+import customerRouter from './routes/customer';
+import { authenticateToken, blockCustomerBusinessRoutes, requireAdmin } from './middleware/auth';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -117,6 +118,8 @@ app.use('/api/auth', authRouter);
 // All business-data routes below use a service-role Supabase client, so the
 // Express layer must verify the caller before any route can touch data.
 app.use('/api', authenticateToken);
+app.use('/api/customer', customerRouter);
+app.use('/api', blockCustomerBusinessRoutes);
 
 console.log('Registering markets routes...');
 app.use('/api/markets', marketAdminCommentsRouter);

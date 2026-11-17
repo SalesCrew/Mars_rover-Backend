@@ -1,11 +1,13 @@
 import { Request, Response, NextFunction } from 'express';
 import { createFreshClient, supabase } from '../config/supabase';
+import { parseCustomerPermissions, type CustomerPermissions } from '../utils/customerAccess';
 
 export interface AuthUser {
   id: string;
   username: string;
   email: string;
-  role: 'gl' | 'admin';
+  role: 'gl' | 'admin' | 'customer';
+  permissions?: CustomerPermissions;
   firstName: string;
   lastName: string;
   gebietsleiter_id?: string;
@@ -84,6 +86,13 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
       return res.status(403).json({ error: 'User profile not found' });
     }
 
+    if (!['admin', 'gl', 'customer'].includes(profile.role)) return res.status(403).json({ error: 'Unknown role' });
+    let permissions: CustomerPermissions | undefined;
+    if (profile.role === 'customer') {
+      const { data: access, error } = await freshClient.from('customer_access').select('is_active, permissions').eq('user_id', profile.id).maybeSingle();
+      if (error || !access || access.is_active !== true) return res.status(403).json({ error: 'User account is inactive' });
+      try { permissions = parseCustomerPermissions(access.permissions); } catch { return res.status(403).json({ error: 'Invalid access configuration' }); }
+    }
     if (profile.role === 'gl') {
       const glId = profile.gebietsleiter_id || profile.id;
       if (!glId || !(await isActiveGlProfile(glId))) {
@@ -91,7 +100,7 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
       }
     }
 
-    req.user = normalizeProfile(authData.user, profile);
+    req.user = { ...normalizeProfile(authData.user, profile), ...(permissions ? { permissions } : {}) };
     return next();
   } catch (error) {
     return res.status(403).json({ error: 'Invalid or expired token' });
@@ -191,4 +200,10 @@ export const requireOwnedRowOrAdmin = (
       return res.status(500).json({ error: 'Authorization check failed' });
     }
   };
+};
+
+// Customers may only use the dedicated, permission-checked reporting API.
+export const blockCustomerBusinessRoutes = (req: AuthRequest, res: Response, next: NextFunction) => {
+  if (req.user?.role === 'customer') return res.status(403).json({ error: 'Dieser Bereich ist nicht freigegeben.' });
+  return next();
 };

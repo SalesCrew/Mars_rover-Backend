@@ -1,5 +1,6 @@
 import express, { Router, Request, Response, NextFunction } from 'express';
 import { createHash } from 'crypto';
+import { parseCustomerPermissions } from '../utils/customerAccess';
 import { supabase, createFreshClient } from '../config/supabase';
 import { AuthRequest, authenticateToken, requireAdmin, requireSelfOrAdmin } from '../middleware/auth';
 
@@ -57,7 +58,14 @@ const authRateLimit = (req: Request, res: Response, next: NextFunction) => {
   return next();
 };
 
-const ensureActiveGlProfile = async (profile: any): Promise<boolean> => {
+const ensureActiveProfile = async (profile: any): Promise<boolean> => {
+  if (profile.role === 'customer') {
+    const { data, error } = await createFreshClient().from('customer_access').select('is_active, permissions').eq('user_id', profile.id).maybeSingle();
+    if (error || !data || data.is_active !== true) return false;
+    try { profile.permissions = parseCustomerPermissions(data.permissions); } catch { return false; }
+    return true;
+  }
+  if (profile.role !== 'admin' && profile.role !== 'gl') return false;
   if (profile.role !== 'gl') {
     return true;
   }
@@ -131,7 +139,7 @@ router.post('/login', authRateLimit, async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'User profile not found' });
     }
 
-    if (!(await ensureActiveGlProfile(profile))) {
+    if (!(await ensureActiveProfile(profile))) {
       return res.status(403).json({ error: 'User account is inactive' });
     }
 
@@ -144,6 +152,7 @@ router.post('/login', authRateLimit, async (req: Request, res: Response) => {
         username: authData.user.email,
         email: authData.user.email,
         role: profile.role,
+        ...(profile.role === 'customer' ? { permissions: (profile as any).permissions } : {}),
         firstName: profile.first_name,
         lastName: profile.last_name,
         gebietsleiter_id: profile.gebietsleiter_id,
@@ -189,7 +198,7 @@ router.post('/refresh', authRateLimit, async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'User profile not found' });
     }
 
-    if (!(await ensureActiveGlProfile(profile))) {
+    if (!(await ensureActiveProfile(profile))) {
       return res.status(403).json({ error: 'User account is inactive' });
     }
 
@@ -199,6 +208,7 @@ router.post('/refresh', authRateLimit, async (req: Request, res: Response) => {
         username: data.user.email,
         email: data.user.email,
         role: profile.role,
+        ...(profile.role === 'customer' ? { permissions: (profile as any).permissions } : {}),
         firstName: profile.first_name,
         lastName: profile.last_name,
         gebietsleiter_id: profile.gebietsleiter_id,
