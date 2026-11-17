@@ -1,8 +1,8 @@
+import { hasAdminReadAccess, requireAdminRead, AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
 import { Router, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import { createFreshClient } from '../config/supabase';
 import ExcelJS from 'exceljs';
-import { AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
 import { sendInternalError } from '../utils/httpErrors';
 import { ZOOFACHHANDEL_CHAINS } from '../utils/marketChainNormalization';
 import { summarizeWellenPhotosByMarket, type WellenPhotoMarketRow } from '../utils/wellenPhotoHistory';
@@ -559,7 +559,7 @@ router.get('/dashboard/chain-averages', async (req: AuthRequest, res: Response) 
     const endDate = req.query.endDate as string | undefined;
     const itemType = req.query.itemType as 'displays' | 'kartonware' | undefined;
     
-    const glFilter = req.user?.role === 'admin'
+    const glFilter = hasAdminReadAccess(req)
       ? (glIdsParam ? glIdsParam.split(',').filter(Boolean) : [])
       : [getAuthenticatedGlId(req.user)].filter(Boolean) as string[];
     const isNoneSelected = glFilter.includes('__none__');
@@ -1385,7 +1385,7 @@ router.get('/dashboard/waves', async (req: AuthRequest, res: Response) => {
     const glIdsParam = req.query.glIds as string | undefined;
     const itemType = req.query.itemType as 'displays' | 'kartonware' | undefined;
     
-    const glFilter = req.user?.role === 'admin'
+    const glFilter = hasAdminReadAccess(req)
       ? (glIdsParam ? glIdsParam.split(',').filter(Boolean) : [])
       : [getAuthenticatedGlId(req.user)].filter(Boolean) as string[];
     const isNoneSelected = glFilter.includes('__none__');
@@ -2572,10 +2572,10 @@ router.post('/photos/upload', async (req: AuthRequest, res: Response) => {
   }
 });
 
-router.get('/photos/facets', requireAdmin, async (_req: Request, res: Response) => {
+router.get('/photos/facets', requireAdminRead, async (req: AuthRequest, res: Response) => {
   try {
     const facets = await fetchAdminPhotoFacets(createFreshClient());
-    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.setHeader('Cache-Control', req.user?.role === 'customer' ? 'no-store' : 'private, max-age=300');
     return res.json(facets);
   } catch (error) {
     console.error('Error fetching photo facets');
@@ -2583,7 +2583,7 @@ router.get('/photos/facets', requireAdmin, async (_req: Request, res: Response) 
   }
 });
 
-router.get('/photos/:id/original-url', requireAdmin, async (req: Request, res: Response) => {
+router.get('/photos/:id/original-url', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { data, error } = await freshClient.from('wellen_photos')
@@ -2599,7 +2599,7 @@ router.get('/photos/:id/original-url', requireAdmin, async (req: Request, res: R
   }
 });
 
-router.get('/photos', requireAdmin, async (req: Request, res: Response) => {
+router.get('/photos', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const { welle_id, fragebogen_id, gl_id, market_id, tag, tags, source, start_date, end_date, limit: limitParam, offset: offsetParam } = req.query;
     const parsedSource = parseAdminPhotoSource(source);
@@ -2627,7 +2627,7 @@ router.get('/photos', requireAdmin, async (req: Request, res: Response) => {
   }
 });
 
-router.get('/photos/export.zip', requireAdmin, async (req: Request, res: Response) => {
+router.get('/photos/export.zip', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const { welle_id, fragebogen_id, gl_id, market_id, tag, tags, source, start_date, end_date, zip_name } = req.query;
     const parsedSource = parseAdminPhotoSource(source);
@@ -3900,7 +3900,7 @@ router.post('/:id/progress', requireSelfOrAdmin(req => req.body.gebietsleiter_id
 router.get('/:id/progress/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: AuthRequest, res: Response) => {
   try {
     const { id: welleId, glId } = req.params;
-    const effectiveGlId = req.user?.role === 'admin' ? glId : getAuthenticatedGlId(req.user);
+    const effectiveGlId = hasAdminReadAccess(req) ? glId : getAuthenticatedGlId(req.user);
     if (!effectiveGlId) {
       return res.status(400).json({ error: 'gebietsleiter_id required' });
     }
@@ -3931,7 +3931,7 @@ router.get('/:id/progress/:glId', requireSelfOrAdmin(req => req.params.glId), as
 router.get('/:welleId/gl-photo-markets/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: AuthRequest, res: Response) => {
   try {
     const { welleId, glId } = req.params;
-    const effectiveGlId = req.user?.role === 'admin' ? glId : getAuthenticatedGlId(req.user);
+    const effectiveGlId = hasAdminReadAccess(req) ? glId : getAuthenticatedGlId(req.user);
     if (!effectiveGlId) return res.status(400).json({ error: 'gebietsleiter_id required' });
 
     const freshClient = createFreshClient();
@@ -3965,7 +3965,7 @@ router.get('/:welleId/gl-photo-markets/:glId', requireSelfOrAdmin(req => req.par
 router.get('/:welleId/gl-submissions/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: AuthRequest, res: Response) => {
   try {
     const { welleId, glId } = req.params;
-    const effectiveGlId = req.user?.role === 'admin' ? glId : getAuthenticatedGlId(req.user);
+    const effectiveGlId = hasAdminReadAccess(req) ? glId : getAuthenticatedGlId(req.user);
     if (!effectiveGlId) {
       return res.status(400).json({ error: 'gebietsleiter_id required' });
     }
@@ -4145,7 +4145,7 @@ router.get('/:welleId/gl-submissions/:glId', requireSelfOrAdmin(req => req.param
 router.get('/:welleId/submitted-markets/:glId', requireSelfOrAdmin(req => req.params.glId), async (req: AuthRequest, res: Response) => {
   try {
     const { welleId, glId } = req.params;
-    const effectiveGlId = req.user?.role === 'admin' ? glId : getAuthenticatedGlId(req.user);
+    const effectiveGlId = hasAdminReadAccess(req) ? glId : getAuthenticatedGlId(req.user);
     if (!effectiveGlId) {
       return res.status(400).json({ error: 'gebietsleiter_id required' });
     }
@@ -4251,7 +4251,7 @@ router.get('/:welleId/submitted-markets/:glId', requireSelfOrAdmin(req => req.pa
 // GET ALL PROGRESS FOR A WELLE (ALL GLs) - For detailed view
 // Uses wellen_submissions for individual market-specific entries
 // ============================================================================
-router.get('/:id/all-progress', requireAdmin, async (req: Request, res: Response) => {
+router.get('/:id/all-progress', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const { id: welleId } = req.params;
     
@@ -4528,7 +4528,7 @@ router.get('/:id/all-progress', requireAdmin, async (req: Request, res: Response
 router.get('/gl/:glId/chain-performance', requireSelfOrAdmin(req => req.params.glId), async (req: AuthRequest, res: Response) => {
   try {
     const { glId } = req.params;
-    const effectiveGlId = req.user?.role === 'admin' ? glId : getAuthenticatedGlId(req.user);
+    const effectiveGlId = hasAdminReadAccess(req) ? glId : getAuthenticatedGlId(req.user);
     if (!effectiveGlId) {
       return res.status(400).json({ error: 'gebietsleiter_id required' });
     }
@@ -4915,7 +4915,7 @@ router.delete('/delete-image', requireAdmin, async (req: Request, res: Response)
 // ============================================================================
 // GET WAVE MARKETS WITH VISIT STATUS - For markets modal
 // ============================================================================
-router.get('/:id/markets-status', requireAdmin, async (req: Request, res: Response) => {
+router.get('/:id/markets-status', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const { id: welleId } = req.params;
     
@@ -5234,7 +5234,7 @@ router.get('/:id/markets-status', requireAdmin, async (req: Request, res: Respon
 // ============================================================================
 // TEMPORARY: EXPORT WELLEN_SUBMISSIONS TO EXCEL
 // ============================================================================
-router.get('/export/submissions', requireAdmin, async (req: Request, res: Response) => {
+router.get('/export/submissions', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     
@@ -5459,7 +5459,7 @@ router.delete('/submissions/:submissionId', requireOwnedRowOrAdmin('wellen_submi
 // ============================================================================
 // EXPORT SUBMISSIONS TO EXCEL
 // ============================================================================
-router.get('/export/progress', requireAdmin, async (req: Request, res: Response) => {
+router.get('/export/progress', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     
@@ -5578,7 +5578,7 @@ router.get('/market/:marketId/pending-photos', async (req: AuthRequest, res: Res
       .is('delivery_photo_url', null)
       .order('created_at', { ascending: false });
 
-    if (req.user?.role !== 'admin') {
+    if (!hasAdminReadAccess(req)) {
       submissionsQuery = submissionsQuery.eq('gebietsleiter_id', getAuthenticatedGlId(req.user));
     }
 

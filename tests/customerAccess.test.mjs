@@ -85,7 +85,7 @@ test('login and refresh load the customer role and permissions from the database
   const me = await req('/auth/me');
   assert.equal((await me.json()).user.role, 'customer');
 });
-test('default-deny blocks legacy admin/GL routes and every customer mutation', async () => {
+test('page allowlist admits existing admin reads and blocks all customer mutations', async () => {
   for (const path of [
     '/markets',
     '/products',
@@ -99,7 +99,7 @@ test('default-deny blocks legacy admin/GL routes and every customer mutation', a
       assert.equal(
         (await req(path, customer, method, method === 'GET' ? undefined : {}))
           .status,
-        403,
+        method === 'GET' && ['/wellen','/wellen/' + waveId,'/gebietsleiter'].includes(path) ? 200 : 403,
         path + ' ' + method
       );
   for (const method of ['POST', 'PUT', 'DELETE'])

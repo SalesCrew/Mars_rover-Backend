@@ -15,6 +15,7 @@ export interface AuthUser {
 
 export interface AuthRequest extends Request {
   user?: AuthUser;
+  customerReadAuthorized?: boolean;
 }
 
 const normalizeProfile = (authUser: { id: string; email?: string | null }, profile: any): AuthUser => ({
@@ -107,6 +108,14 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
   }
 };
 
+// Set only by the server's explicit page allowlist, never by client metadata.
+export const hasAdminReadAccess = (req: AuthRequest): boolean =>
+  req.user?.role === 'admin' || (req.user?.role === 'customer' && req.customerReadAuthorized === true);
+export const requireAdminRead = (req: AuthRequest, res: Response, next: NextFunction) => {
+  if (hasAdminReadAccess(req)) return next();
+  return res.status(req.user ? 403 : 401).json({ error: 'Access denied' });
+};
+
 /**
  * Middleware to check if user is admin
  */
@@ -142,7 +151,7 @@ export const requireSelfOrAdmin = (getUserId: (req: AuthRequest) => string | und
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    if (req.user.role === 'admin') {
+    if (hasAdminReadAccess(req)) {
       return next();
     }
 
@@ -165,7 +174,7 @@ export const requireOwnedRowOrAdmin = (
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    if (req.user.role === 'admin') {
+    if (hasAdminReadAccess(req)) {
       return next();
     }
 
@@ -202,8 +211,5 @@ export const requireOwnedRowOrAdmin = (
   };
 };
 
-// Customers may only use the dedicated, permission-checked reporting API.
-export const blockCustomerBusinessRoutes = (req: AuthRequest, res: Response, next: NextFunction) => {
-  if (req.user?.role === 'customer') return res.status(403).json({ error: 'Dieser Bereich ist nicht freigegeben.' });
-  return next();
-};
+// Compatibility export for existing test harnesses.
+export { authorizeCustomerPage as blockCustomerBusinessRoutes } from './customerPageAccess';

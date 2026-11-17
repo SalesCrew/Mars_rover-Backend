@@ -1,6 +1,6 @@
+import { hasAdminReadAccess, requireAdminRead, AuthRequest, getAuthenticatedGlId, requireAdmin } from '../middleware/auth';
 import { Router, Request, Response } from 'express';
 import { supabase, createFreshClient } from '../config/supabase';
-import { AuthRequest, getAuthenticatedGlId, requireAdmin } from '../middleware/auth';
 import { sendInternalError } from '../utils/httpErrors';
 import { normalizeMarketChain } from '../utils/marketChainNormalization';
 
@@ -259,7 +259,7 @@ router.post('/backfill-gl-ids', requireAdmin, async (req: Request, res: Response
  * Find markets that might be duplicates (same normalized content but different IDs)
  * MUST be defined BEFORE /:id routes to avoid being caught by parameter matching
  */
-router.get('/find-duplicates', requireAdmin, async (req: Request, res: Response) => {
+router.get('/find-duplicates', requireAdminRead, async (req: Request, res: Response) => {
   try {
     console.log('🔍 Scanning for duplicate markets...');
     
@@ -643,7 +643,7 @@ router.get('/:id/history', async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const requestedGlId = req.query.gl_id as string | undefined;
-    const glId = req.user?.role === 'admin' ? requestedGlId : getAuthenticatedGlId(req.user);
+    const glId = hasAdminReadAccess(req) ? requestedGlId : getAuthenticatedGlId(req.user);
     console.log('Fetching market history');
     
     const freshClient = createFreshClient();
@@ -959,7 +959,7 @@ router.get('/:id/visit-crm', async (req: AuthRequest, res: Response) => {
   try {
     const { id: marketId } = req.params;
     const requestedGlId = String(req.query.gl_id || '').trim();
-    const glId = req.user?.role === 'admin' ? requestedGlId : (getAuthenticatedGlId(req.user) || '');
+    const glId = hasAdminReadAccess(req) ? requestedGlId : (getAuthenticatedGlId(req.user) || '');
     const SECTION_LIMIT = 20;
 
     if (!glId) {

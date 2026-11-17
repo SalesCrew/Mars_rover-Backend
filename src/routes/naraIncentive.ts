@@ -1,6 +1,6 @@
+import { hasAdminReadAccess, AuthRequest, getAuthenticatedGlId, requireAdmin } from '../middleware/auth';
 import { Router, Request, Response } from 'express';
 import { createFreshClient } from '../config/supabase';
-import { AuthRequest, getAuthenticatedGlId, requireAdmin } from '../middleware/auth';
 import { sendInternalError } from '../utils/httpErrors';
 
 const router = Router();
@@ -75,7 +75,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       `)
       .order('created_at', { ascending: false });
 
-    if (req.user?.role !== 'admin') {
+    if (!hasAdminReadAccess(req)) {
       query = query.eq('gebietsleiter_id', getAuthenticatedGlId(req.user));
     } else if (glId) {
       query = query.eq('gebietsleiter_id', glId as string);

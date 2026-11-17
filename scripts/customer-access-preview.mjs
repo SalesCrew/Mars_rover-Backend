@@ -2,7 +2,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createCustomerAccessHarness } from '../tests/helpers/customerAccessHarness.mjs';
-const h = await createCustomerAccessHarness({ port: 4087 });
+const h = await createCustomerAccessHarness({ port: 4087, actualAdminPages: true });
 const cwd = fileURLToPath(new URL('../../frontend/', import.meta.url));
 const vite = spawn(
   process.execPath,

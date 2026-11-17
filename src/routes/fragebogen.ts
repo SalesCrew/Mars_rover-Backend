@@ -1,7 +1,7 @@
+import { hasAdminReadAccess, requireAdminRead, AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
 import express, { Router, Request, Response } from 'express';
 import ExcelJS from 'exceljs';
 import { createFreshClient } from '../config/supabase';
-import { AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
 import { sendCodedError, sendInternalError } from '../utils/httpErrors';
 import { normalizeMarketChain, matchesMarketChainFilter } from '../utils/marketChainNormalization';
 import {
@@ -38,7 +38,9 @@ const getViennaDateString = (): string => {
   return formatter.format(new Date()); // YYYY-MM-DD
 };
 
-const refreshFragebogenStatuses = async (freshClient: ReturnType<typeof createFreshClient>): Promise<void> => {
+const refreshFragebogenStatuses = async (freshClient: ReturnType<typeof createFreshClient>, req: AuthRequest): Promise<void> => {
+  // Viewing a page as a customer must never change business data.
+  if (req.user?.role === 'customer') return;
   const viennaDate = getViennaDateString();
 
   const { error: inactiveError } = await freshClient
@@ -57,6 +59,14 @@ const refreshFragebogenStatuses = async (freshClient: ReturnType<typeof createFr
     .lte('start_date', viennaDate)
     .gte('end_date', viennaDate);
   if (activeError) throw activeError;
+};
+
+const currentFragebogenStatus = (row: any): string => {
+  const today = getViennaDateString();
+  if (row.archived !== false) return row.status;
+  if (row.end_date && row.end_date < today) return 'inactive';
+  if (row.status === 'scheduled' && row.start_date <= today && row.end_date >= today) return 'active';
+  return row.status;
 };
 
 const runDistributionPythonExporter = async (payload: unknown): Promise<Buffer> => {
@@ -167,7 +177,7 @@ const WELLEN_SUBMISSION_FRAGEBOGEN_SELECT = 'id, welle_id, gebietsleiter_id, mar
 const VORVERKAUF_ENTRY_FRAGEBOGEN_SELECT = 'id, gebietsleiter_id, market_id, reason, notes, status, created_at';
 
 const getFragebogenUserOwnerId = (req: AuthRequest, requestedId?: string): string | undefined =>
-  req.user?.role === 'admin' ? requestedId : req.user?.id;
+  hasAdminReadAccess(req) ? requestedId : req.user?.id;
 const FB_QUESTIONS_USAGE_SELECT = 'id, type, question_text, is_template, distributionsziel, qualitaetsziel, archived, created_at, module_usage_count, answer_count';
 const FB_MODULES_OVERVIEW_SELECT = 'id, name, description, archived, created_at, updated_at, question_count, rules_count, fragebogen_usage_count';
 const FB_FRAGEBOGEN_OVERVIEW_SELECT = 'id, name, description, start_date, end_date, status, archived, created_at, updated_at, module_count, market_count, response_count, completed_response_count';
@@ -1076,7 +1086,7 @@ router.post('/responses/photo-url', async (req: AuthRequest, res: Response) => {
     }
 
     const freshClient = createFreshClient();
-    if (req.user?.role !== 'admin') {
+    if (!hasAdminReadAccess(req)) {
       const { data: responseRow, error: responseError } = await freshClient
         .from('fb_responses')
         .select('id, gebietsleiter_id')
@@ -1104,7 +1114,7 @@ router.post('/responses/photo-url', async (req: AuthRequest, res: Response) => {
  * GET /api/fragebogen/photos
  * Admin listing endpoint for Fotoantworten aus Fotofragen.
  */
-router.get('/photos', requireAdmin, async (req: Request, res: Response) => {
+router.get('/photos', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const {
@@ -1140,7 +1150,7 @@ router.get('/photos', requireAdmin, async (req: Request, res: Response) => {
  * GET /api/fragebogen/photos/export.zip
  * Admin ZIP export endpoint for Fotoantworten.
  */
-router.get('/photos/export.zip', requireAdmin, async (req: Request, res: Response) => {
+router.get('/photos/export.zip', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { fragebogen_id, gl_id, market_id, start_date, end_date, zip_name } = req.query;
@@ -1499,7 +1509,7 @@ router.delete('/questions/:id', requireAdmin, async (req: Request, res: Response
  * GET /api/fragebogen/questions/stats/:id
  * Get usage statistics for a question
  */
-router.get('/questions/stats/:id', requireAdmin, async (req: Request, res: Response) => {
+router.get('/questions/stats/:id', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -1530,7 +1540,7 @@ router.get('/questions/stats/:id', requireAdmin, async (req: Request, res: Respo
  * Used for copy-on-write logic - if a question is used by multiple modules,
  * editing it should create a new question instead of modifying the shared one
  */
-router.get('/questions/:id/module-count', requireAdmin, async (req: Request, res: Response) => {
+router.get('/questions/:id/module-count', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -2113,7 +2123,7 @@ router.delete('/modules/:id', requireAdmin, async (req: Request, res: Response) 
  * GET /api/fragebogen/modules/:id/usage
  * Get detailed usage information for a module (which fragebögen use it)
  */
-router.get('/modules/:id/usage', requireAdmin, async (req: Request, res: Response) => {
+router.get('/modules/:id/usage', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -2256,7 +2266,7 @@ router.delete('/modules/:id/permanent', requireAdmin, async (req: Request, res: 
  * GET /api/fragebogen/modules/stats/:id
  * Get usage statistics for a module
  */
-router.get('/modules/stats/:id', requireAdmin, async (req: Request, res: Response) => {
+router.get('/modules/stats/:id', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -2292,7 +2302,7 @@ router.get('/fragebogen', async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { status, archived, search } = req.query;
-    await refreshFragebogenStatuses(freshClient);
+    await refreshFragebogenStatuses(freshClient, req);
     
     // Get basic fragebogen data from overview
     let query = freshClient
@@ -2383,6 +2393,7 @@ router.get('/fragebogen', async (req: Request, res: Response) => {
     // Combine the data
     const enrichedFragebogen = fragebogenList.map(f => ({
       ...f,
+      status: currentFragebogenStatus(f),
       module_ids: modulesByFragebogen[f.id] || [],
       market_ids: marketsByFragebogen[f.id] || []
     }));
@@ -2402,7 +2413,7 @@ router.get('/fragebogen/status/gl/:glId', requireSelfOrAdmin(req => req.params.g
   try {
     const { glId } = req.params;
     const freshClient = createFreshClient();
-    await refreshFragebogenStatuses(freshClient);
+    await refreshFragebogenStatuses(freshClient, req);
 
     const [markets, activeFragebogenResult] = await Promise.all([
       fetchPagedMarketsForGl(freshClient, glId),
@@ -2574,11 +2585,11 @@ router.get('/fragebogen/status/gl/:glId', requireSelfOrAdmin(req => req.params.g
  * GET /api/fragebogen/fragebogen/:id/market-status
  * Admin Ampelsystem market completion list for one Fragebogen.
  */
-router.get('/fragebogen/:id/market-status', requireAdmin, async (req: Request, res: Response) => {
+router.get('/fragebogen/:id/market-status', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
-    await refreshFragebogenStatuses(freshClient);
+    await refreshFragebogenStatuses(freshClient, req);
 
     const { data: fragebogen, error: fragebogenError } = await freshClient
       .from('fb_fragebogen')
@@ -2708,7 +2719,7 @@ router.get('/fragebogen/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
-    await refreshFragebogenStatuses(freshClient);
+    await refreshFragebogenStatuses(freshClient, req);
     
     // Get fragebogen
     const { data: fragebogen, error: fragebogenError } = await freshClient
@@ -2794,6 +2805,7 @@ router.get('/fragebogen/:id', async (req: Request, res: Response) => {
     
     res.json({
       ...fragebogen,
+      status: currentFragebogenStatus(fragebogen),
       modules: modulesWithDetails,
       market_ids: (fragebogenMarkets || []).map((fm: any) => fm.market_id)
     });
@@ -3147,11 +3159,11 @@ router.delete('/fragebogen/:id/permanent', requireAdmin, async (req: Request, re
  * GET /api/fragebogen/fragebogen/stats/:id
  * Get response statistics for a fragebogen
  */
-router.get('/fragebogen/stats/:id', requireAdmin, async (req: Request, res: Response) => {
+router.get('/fragebogen/stats/:id', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
-    await refreshFragebogenStatuses(freshClient);
+    await refreshFragebogenStatuses(freshClient, req);
     
     const { data, error } = await freshClient
       .from('fb_fragebogen_overview')
@@ -3180,7 +3192,7 @@ router.get('/fragebogen/stats/:id', requireAdmin, async (req: Request, res: Resp
  * GET /api/fragebogen/responses/fragebogen/:fragebogenId
  * Get all responses for a fragebogen
  */
-router.get('/responses/fragebogen/:fragebogenId', requireAdmin, async (req: Request, res: Response) => {
+router.get('/responses/fragebogen/:fragebogenId', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const { fragebogenId } = req.params;
     const freshClient = createFreshClient();
@@ -4049,7 +4061,7 @@ router.delete('/responses/:id', requireOwnedRowOrAdmin('fb_responses'), async (r
  * GET /api/fragebogen/responses/stats/fragebogen/:fragebogenId
  * Get detailed statistics for a fragebogen's responses
  */
-router.get('/responses/stats/fragebogen/:fragebogenId', requireAdmin, async (req: Request, res: Response) => {
+router.get('/responses/stats/fragebogen/:fragebogenId', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const { fragebogenId } = req.params;
     const freshClient = createFreshClient();
@@ -4455,7 +4467,7 @@ router.get('/zeiterfassung/gl/:glId', requireSelfOrAdmin(req => req.params.glId)
  * GET /api/fragebogen/zeiterfassung/admin
  * Get all zeiterfassung submissions grouped by date for admin view
  */
-router.get('/zeiterfassung/admin', requireAdmin, async (req: Request, res: Response) => {
+router.get('/zeiterfassung/admin', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { start_date, end_date, gl_id } = req.query;
@@ -4840,7 +4852,7 @@ router.get('/zusatz-zeiterfassung/:glId', requireSelfOrAdmin(req => req.params.g
  * GET /api/fragebogen/zusatz-zeiterfassung/all
  * Get all zusatz zeiterfassung entries (for admin)
  */
-router.get('/zusatz-zeiterfassung-all', requireAdmin, async (req: Request, res: Response) => {
+router.get('/zusatz-zeiterfassung-all', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { start_date, end_date } = req.query;
@@ -5081,7 +5093,7 @@ const findPendingActiveDay = async (
 };
 
 // GET ALL DAY TRACKING (for admin)
-router.get('/day-tracking-all', requireAdmin, async (req: Request, res: Response) => {
+router.get('/day-tracking-all', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     const { data, error } = await freshClient
@@ -6033,7 +6045,7 @@ function applyGroupRow(row: ExcelJS.Row) {
   });
 }
 
-router.get('/fragebogen/:id/export.xlsx', requireAdmin, async (req: Request, res: Response) => {
+router.get('/fragebogen/:id/export.xlsx', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const freshClient = createFreshClient();
@@ -6508,7 +6520,7 @@ router.get('/fragebogen/:id/export.xlsx', requireAdmin, async (req: Request, res
 // FRAGEBOGEN DISTRIBUTION EXPORT (Monatlich, Ja/Nein)
 // POST /api/fragebogen/fragebogen/distribution-export.xlsx
 // ============================================================================
-router.post('/fragebogen/distribution-export.xlsx', requireAdmin, async (req: Request, res: Response) => {
+router.post('/fragebogen/distribution-export.xlsx', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const fragebogenIds: string[] = Array.from(new Set((req.body?.fragebogen_ids || []).filter(Boolean)));
     let questionIds: string[] = Array.from(new Set((req.body?.question_ids || []).filter(Boolean)));

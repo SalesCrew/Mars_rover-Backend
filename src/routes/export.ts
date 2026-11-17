@@ -1,3 +1,4 @@
+import { AuthRequest } from '../middleware/auth';
 import express, { Request, Response } from 'express';
 import ExcelJS from 'exceljs';
 import { createFreshClient } from '../config/supabase';
@@ -710,7 +711,7 @@ router.post('/custom', async (req: Request, res: Response) => {
 
 // GET /export/dataset-stats
 // Get row counts for all datasets
-router.get('/dataset-stats', async (req: Request, res: Response) => {
+router.get('/dataset-stats', async (req: AuthRequest, res: Response) => {
   try {
     const freshClient = createFreshClient();
 
@@ -730,6 +731,12 @@ router.get('/dataset-stats', async (req: Request, res: Response) => {
       gebietsleiter: stats[4].count || 0
     };
 
+    if (req.user?.role === 'customer') {
+      const rights = req.user.permissions;
+      const allowed = (pages: string[]) => pages.some(page => rights?.[page as keyof typeof rights]?.export === true);
+      const pages: Record<string, string[]> = { wellen_submissions: ['dashboard','vorbesteller'], markets: ['markets'], vorverkauf_entries: ['dashboard','vorverkauf','produktersatz'], action_history: ['markets'], gebietsleiter: ['gebietsleiter'] };
+      return res.json(Object.fromEntries(Object.entries(result).filter(([key]) => allowed(pages[key]))));
+    }
     res.json(result);
   } catch (error: any) {
     console.error('Error fetching dataset stats:');

@@ -1,7 +1,7 @@
+import { hasAdminReadAccess, AuthRequest, requireAdmin } from '../middleware/auth';
 import express from 'express';
 import { randomUUID } from 'crypto';
 import { createFreshClient } from '../config/supabase.js';
-import { AuthRequest, requireAdmin } from '../middleware/auth';
 import { sendInternalError } from '../utils/httpErrors';
 
 const router = express.Router();
@@ -47,7 +47,7 @@ const transformProductToDB = (product: any) => ({
 router.get('/', async (req: AuthRequest, res) => {
   try {
     const freshClient = createFreshClient();
-    const includeArchived = req.user?.role === 'admin' && req.query.includeArchived === 'true';
+    const includeArchived = hasAdminReadAccess(req) && req.query.includeArchived === 'true';
 
     let query = freshClient
       .from('products')
@@ -83,7 +83,7 @@ router.get('/:id', async (req: AuthRequest, res) => {
       .select(PRODUCT_SELECT_COLUMNS)
       .eq('id', req.params.id);
 
-    if (req.user?.role !== 'admin') {
+    if (!hasAdminReadAccess(req)) {
       query = query.eq('is_deleted', false);
     }
 

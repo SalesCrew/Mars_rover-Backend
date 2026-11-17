@@ -1,7 +1,7 @@
+import { requireAdminRead, AuthRequest, requireAdmin, requireSelfOrAdmin } from '../middleware/auth';
 import { Router, Request, Response } from 'express';
 import { supabase, createFreshClient } from '../config/supabase';
 import { aggregateSubmissions } from './wellen';
-import { AuthRequest, requireAdmin, requireSelfOrAdmin } from '../middleware/auth';
 import { sendInternalError } from '../utils/httpErrors';
 
 const router = Router();
@@ -300,7 +300,7 @@ async function calculateDashboardRevenue(
  * GET /api/gebietsleiter
  * Get all active gebietsleiter
  */
-router.get('/', requireAdmin, async (req: Request, res: Response) => {
+router.get('/', requireAdminRead, async (req: Request, res: Response) => {
   try {
     console.log('Fetching all gebietsleiter...');
     

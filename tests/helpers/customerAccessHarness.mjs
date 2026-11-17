@@ -36,6 +36,7 @@ const listen = async (app, port = 0) => {
 export async function createCustomerAccessHarness({
   port = 0,
   rowCap = 1000,
+  actualAdminPages = false,
 } = {}) {
   if (
     process.env.SUPABASE_URL &&
@@ -47,6 +48,7 @@ export async function createCustomerAccessHarness({
     calls = [],
     tokens = new Map(),
     accounts = new Map();
+  const businessWrites = [];
   let seq = 500;
   await db.exec(`CREATE ROLE anon;CREATE ROLE authenticated;CREATE ROLE service_role BYPASSRLS;
     CREATE SCHEMA auth; CREATE TABLE auth.users(id uuid PRIMARY KEY);
@@ -209,6 +211,7 @@ export async function createCustomerAccessHarness({
     "insert into products(id,name,artikel_nr,department,product_type,content,price) values($1,'Beispielprodukt','TEST-100','food','standard','6',2.5)",
     [id(99)]
   );
+  if (actualAdminPages) { const {seedAdminPages} = await import('./adminPageFixture.mjs'); await seedAdminPages(db, id); }
   const tokenFor = (uid) => {
     const token =
       Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString(
@@ -233,6 +236,7 @@ export async function createCustomerAccessHarness({
   };
   const rest = express();
   rest.use(express.json({ limit: '2mb' }));
+  if (actualAdminPages) rest.use((req,res,next)=>{if(req.path.startsWith('/rest/v1/') && !['GET','HEAD'].includes(req.method) && !req.path.startsWith('/rest/v1/rpc/save_customer_access')) { businessWrites.push({method:req.method,path:req.path}); return res.status(400).json({message:'Fixture forbids business writes'}); } next();});
   rest.post('/auth/v1/token', (req, res) => {
     const account = [...accounts.values()].find(
       (a) => a.email === req.body.email && a.password === req.body.password
@@ -294,6 +298,7 @@ export async function createCustomerAccessHarness({
     ],
     (_req, res) => res.type('png').send(png)
   );
+  rest.post('/storage/v1/object/sign/:bucket/*', (req,res) => res.json({signedURL:'/object/authenticated/'+req.params.bucket+'/'+req.params[0]+'?fixture=1'}));
   rest.post('/rest/v1/rpc/save_customer_access', async (req, res) => {
     try {
       const keys = Object.keys(req.body),
@@ -311,6 +316,7 @@ export async function createCustomerAccessHarness({
       res.status(400).json({ message: e.message, code: e.code });
     }
   });
+  if (actualAdminPages) { const { adminPageRest } = await import('./adminPageFixture.mjs'); rest.get('/rest/v1/:table', await adminPageRest(db,{errors,calls,rowCap})); }
   rest.get('/rest/v1/:table', async (req, res) => {
     calls.push({ table: req.params.table, select: req.query.select });
     try {
@@ -425,6 +431,13 @@ export async function createCustomerAccessHarness({
     )
   );
   app.use('/api', blockCustomerBusinessRoutes);
+  if (actualAdminPages) {
+    const {requireAdminRead} = await import('../../src/middleware/auth.ts');
+    for (const [prefix,file,guard] of [['markets','marketAdminComments',false],['markets','markets',false],['gebietsleiter','gebietsleiter',false],['products','products',false],['wellen','wellen',false],['vorverkauf','vorverkauf',false],['nara-incentive','naraIncentive',false],['fragebogen','fragebogen',false],['activities','activities',true],['export','export',true],['action-history','actionHistory',true]]) {
+      const {default:router}=await import('../../src/routes/'+file+'.ts');
+      if(guard)app.use('/api/'+prefix,requireAdminRead,router);else app.use('/api/'+prefix,router);
+    }
+  }
   app.get('/api/wellen/dashboard/waves', (_req, res) => res.json([]));
   app.get('/api/markets', (_req, res) => res.json([]));
   app.get('/api/gebietsleiter', (_req, res) => res.json([]));
@@ -441,6 +454,7 @@ export async function createCustomerAccessHarness({
     calls,
     accounts,
     tokens,
+    businessWrites,
     tokenFor,
     base: api.origin + '/api',
     dataOrigin: dataApi.origin,

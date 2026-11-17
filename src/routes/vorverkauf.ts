@@ -1,6 +1,6 @@
+import { hasAdminReadAccess, requireAdminRead, AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
 import { Router, Request, Response, NextFunction } from 'express';
 import { supabase, createFreshClient } from '../config/supabase';
-import { AuthRequest, getAuthenticatedGlId, requireAdmin, requireOwnedRowOrAdmin, requireSelfOrAdmin } from '../middleware/auth';
 import { sendInternalError } from '../utils/httpErrors';
 
 const router = Router();
@@ -75,7 +75,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       .order('created_at', { ascending: false });
 
     // Apply GL filter if specified
-    if (req.user?.role !== 'admin') {
+    if (!hasAdminReadAccess(req)) {
       query = query.eq('gebietsleiter_id', getAuthenticatedGlId(req.user));
     } else if (glId && typeof glId === 'string') {
       query = query.eq('gebietsleiter_id', glId);
@@ -692,7 +692,7 @@ router.post('/submit', async (req: AuthRequest, res: Response) => {
 // ============================================================================
 // GET VORVERKAUF STATISTICS
 // ============================================================================
-router.get('/stats/summary', requireAdmin, async (req: Request, res: Response) => {
+router.get('/stats/summary', requireAdminRead, async (req: Request, res: Response) => {
   try {
     const freshClient = createFreshClient();
     

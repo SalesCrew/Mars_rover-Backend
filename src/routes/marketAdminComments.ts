@@ -1,6 +1,6 @@
+import { requireAdminRead, requireAdmin } from '../middleware/auth';
 import { Router, Request, Response } from 'express';
 import { createFreshClient } from '../config/supabase';
-import { requireAdmin } from '../middleware/auth';
 import { sendInternalError } from '../utils/httpErrors';
 
 const validMarketId = (value: unknown): value is string =>
@@ -11,7 +11,7 @@ export const createMarketAdminCommentsRouter = (
 ) => {
   const router = Router();
 
-  router.get('/admin-comments', requireAdmin, async (_req: Request, res: Response) => {
+  router.get('/admin-comments', requireAdminRead, async (_req: Request, res: Response) => {
     try {
       const client = clientFactory();
       const comments: Array<{ market_id: string; comment: string }> = [];
@@ -34,7 +34,7 @@ export const createMarketAdminCommentsRouter = (
     }
   });
 
-  router.get('/:id/admin-comment', requireAdmin, async (req: Request, res: Response) => {
+  router.get('/:id/admin-comment', requireAdminRead, async (req: Request, res: Response) => {
     const { id } = req.params;
     if (!validMarketId(id)) return res.status(400).json({ error: 'Invalid market ID' });
 

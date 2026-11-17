@@ -1,14 +1,14 @@
 export const CUSTOMER_PAGES = [
   { key: 'dashboard', label: 'Dashboard' },
-  { key: 'vorbesteller', label: 'Umsatzwellen' },
-  { key: 'fotos', label: 'Fotowellen' },
   { key: 'markets', label: 'Märkte' },
   { key: 'gebietsleiter', label: 'Gebietsleiter' },
+  { key: 'vorbesteller', label: 'Vorbesteller' },
   { key: 'vorverkauf', label: 'Vorverkauf' },
   { key: 'produktersatz', label: 'Produktersatz' },
   { key: 'nara-incentive', label: 'NaRa Incentive' },
   { key: 'fragebogen', label: 'Fragebogen' },
   { key: 'zeiterfassung', label: 'Zeiterfassung' },
+  { key: 'fotos', label: 'Fotos' },
   { key: 'produkte', label: 'Produkte' },
 ] as const;
 export type CustomerPage = (typeof CUSTOMER_PAGES)[number]['key'];
