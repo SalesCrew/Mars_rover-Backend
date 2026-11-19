@@ -1666,6 +1666,7 @@ router.get('/dashboard/waves', async (req: AuthRequest, res: Response) => {
           assignedMarkets: glFilter.length > 0 ? glWaveMarketCount : allWaveMarketsCount,
           participatingGLs,
           fotoOnly: welle.foto_only || false,
+          noLimitWelle: welle.no_limit_welle || false,
           fotoEnabled: welle.foto_enabled || false,
           photoCount
         };

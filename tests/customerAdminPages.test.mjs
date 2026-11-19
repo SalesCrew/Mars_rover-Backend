@@ -205,3 +205,17 @@ test('existing export endpoints check export permission separately and custom ex
   ]);
   assert.deepEqual(h.businessWrites, []);
 });
+
+test('wave summaries identify unlimited revenue waves even with a percentage goal type', async () => {
+  await set({ dashboard: { view: true, export: false } });
+  await h.db.query(
+    'UPDATE wellen SET goal_type=$1,no_limit_welle=true,goal_percentage=0 WHERE id=$2',
+    ['percentage', waveId]
+  );
+  const response = await req('/wellen/dashboard/waves');
+  assert.equal(response.status, 200);
+  const wave = (await response.json()).find((wave) => wave.id === waveId);
+  assert.equal(wave.goalType, 'percentage');
+  assert.equal(wave.noLimitWelle, true);
+  assert.deepEqual(h.businessWrites, []);
+});
